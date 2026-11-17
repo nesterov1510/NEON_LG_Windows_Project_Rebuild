@@ -3016,7 +3016,7 @@ def build_alemtv_wgt(target_url=ALEMTV_DEFAULT_PORTAL, pkg_id=ALEMTV_PKG_ID, app
         '<widget xmlns="http://www.w3.org/ns/widgets"\n'
         '        xmlns:tizen="http://tizen.org/ns/widgets"\n'
         f'        id="http://yourdomain/{safe_pkg}"\n'
-        '        version="1.0.0"\n'
+        '        version="1.0.1"\n'
         '        viewmodes="fullscreen">\n'
         f'    <tizen:application id="{safe_app_id}"\n'
         f'                       package="{safe_pkg}"\n'
