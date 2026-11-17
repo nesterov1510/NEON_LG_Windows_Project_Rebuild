@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, 'arena/**']
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -38,9 +41,19 @@ jobs:
           git commit -m "Windows app pytest report ($(Get-Date -Format yyyyMMddTHHmmssZ))"
           git push --force origin ci-win-tests-log:ci-win-tests-log
       - run: python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "ui.html;." --add-data "assets;assets" --uac-admin app.py
-      - name: Upload Windows portable application artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: NeonLGControl-Windows
-          path: dist/NeonLGControl/
-          if-no-files-found: error
+      - name: Package portable application
+        shell: pwsh
+        run: Compress-Archive -Path "dist\NeonLGControl" -DestinationPath "dist\NeonLGControl-Windows.zip" -Force
+
+      - name: Publish Windows app as a draft release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: windows-app-${{ github.run_id }}
+        run: |
+          gh release create "$env:RELEASE_TAG" `
+            "dist/NeonLGControl-Windows.zip" `
+            --draft `
+            --title "Windows app build $env:GITHUB_RUN_NUMBER" `
+            --notes "Windows app bundle built from commit $env:GITHUB_SHA." `
+            --repo $env:GITHUB_REPOSITORY

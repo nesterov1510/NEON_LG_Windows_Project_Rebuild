@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, 'arena/**']
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -126,16 +129,20 @@ jobs:
           }
           Write-Host "Silent install + Desktop shortcut + Complete uninstall verified 100%!"
 
-      - name: Upload Windows Installer artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: NEON-Windows-Installer
-          path: dist/NEON_Setup_Win81_10_11.exe
-          if-no-files-found: error
+      - name: Package portable application
+        shell: pwsh
+        run: Compress-Archive -Path "dist\NeonLGControl81" -DestinationPath "dist\NeonLGControl-Windows81-Portable.zip" -Force
 
-      - name: Upload Windows 8.1 portable application artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: NeonLGControl-Windows81-Portable
-          path: dist/NeonLGControl81/
-          if-no-files-found: error
+      - name: Publish Windows builds as draft release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: windows-installer-${{ github.run_id }}
+        run: |
+          gh release create "$env:RELEASE_TAG" `
+            "dist/NEON_Setup_Win81_10_11.exe" `
+            "dist/NeonLGControl-Windows81-Portable.zip" `
+            --draft `
+            --title "Windows Installer build $env:GITHUB_RUN_NUMBER" `
+            --notes "Windows installer and portable bundle built from commit $env:GITHUB_SHA." `
+            --repo $env:GITHUB_REPOSITORY
