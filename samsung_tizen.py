@@ -431,7 +431,7 @@ class SdbClient:
         return self.run_shell(
             f'0 vd_appinstall {pkg_id} {remote_wgt_path}',
             timeout=timeout,
-            done_pattern=r'(?:spend time\(|install completed|install failed|download failed|check certificate error|invalid certificate chain|invalid certificate signature|invalid certificate format in signature)',
+            done_pattern=r'(?:spend time\(|install completed|install failed|download failed|check certificate error|invalid certificate chain)',
         )
 
     def list_apps(self, retries=3):
@@ -495,18 +495,6 @@ def diagnose_install_output(output, pkg_id=BELET_PKG_ID):
     """Classify Samsung vd_appinstall output into structured recovery guidance."""
     text = str(output or '')
     low = text.lower()
-
-    if 'invalid certificate format in signature' in low:
-        return {
-            'status': 'cert_invalid_format',
-            'reason': 'TV rejected the X.509 certificate encoding in the package signature',
-        }
-
-    if 'invalid certificate signature' in low:
-        return {
-            'status': 'cert_invalid_signature',
-            'reason': 'TV rejected the XML-DSig signing certificate signature (check the signed WGT and certificate chain)',
-        }
 
     if 'install completed' in low or 'installing[100]' in low:
         if 'install failed' not in low and 'failed[' not in low:
@@ -3327,6 +3315,335 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
     )
 
 
+def _build_legacy_belet_wgt(target_url=BELET_URL, pkg_id=BELET_PKG_ID, app_name='Belet', icon_bytes=None):
+    """Build the pre-proxy Belet WGT that opens belet.tm directly, without a TV-side localhost service."""
+    if not re.fullmatch(r'[A-Za-z0-9]{10}', str(pkg_id)):
+        raise ValueError(f'Tizen package ID must be exactly 10 alphanumeric chars, got {pkg_id!r}')
+
+    from xml.sax.saxutils import escape as xml_escape
+
+    app_id = f'{pkg_id}.{app_name}'
+    safe_app_id = xml_escape(app_id, {'"': '&quot;'})
+    safe_app_name = xml_escape(str(app_name or 'Belet'))
+    safe_url = json.dumps(str(target_url or BELET_URL))
+    safe_pkg = json.dumps(str(pkg_id))
+
+    if icon_bytes is None:
+        for candidate in (('assets', 'belet_large_icon.png'), ('assets', 'belet_icon.png')):
+            p = _resource_path(*candidate)
+            if os.path.isfile(p):
+                with open(p, 'rb') as f:
+                    icon_bytes = f.read()
+                break
+    if not icon_bytes:
+        raise FileNotFoundError('Belet icon asset missing for .wgt build')
+
+    config_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" '
+        'id="https://belet.tm/tizen" version="1.2.8" viewmodes="maximized">\n'
+        f'    <tizen:application id="{safe_app_id}" package="{pkg_id}" required_version="2.3"/>\n'
+        '    <content src="index.html"/>\n'
+        '    <feature name="http://tizen.org/feature/screen.size.all"/>\n'
+        '    <icon src="icon.png"/>\n'
+        f'    <name>{safe_app_name}</name>\n'
+        '    <access origin="*" subdomains="true"/>\n'
+        '    <tizen:allow-navigation>*</tizen:allow-navigation>\n'
+        '    <tizen:content-security-policy>'
+        "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; "
+        "style-src * 'unsafe-inline'; img-src * data:; media-src * blob:;"
+        '</tizen:content-security-policy>\n'
+        '    <tizen:privilege name="http://tizen.org/privilege/internet"/>\n'
+        '    <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"/>\n'
+        '    <tizen:privilege name="http://tizen.org/privilege/application.launch"/>\n'
+        '    <tizen:privilege name="http://tizen.org/privilege/application.info"/>\n'
+        '    <tizen:profile name="tv"/>\n'
+        '    <tizen:setting screen-orientation="landscape" context-menu="disable" '
+        'background-support="disable" encryption="disable" install-location="auto" hwkey-event="enable"/>\n'
+        '</widget>\n'
+    ).encode('utf-8')
+
+    index_html = (
+        '<!DOCTYPE html>\n'
+        '<html lang="ru">\n'
+        '<head>\n'
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">\n'
+        '<title>Belet</title>\n'
+        '<style>\n'
+        '*{box-sizing:border-box;}\n'
+        'html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;'
+        'background:radial-gradient(circle at 50% 42%,#0e233b 0%,#070b12 72%);'
+        'color:#eaf4ff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}\n'
+        '.wrap{position:absolute;top:50%;left:50%;'
+        '-webkit-transform:translate(-50%,-50%);transform:translate(-50%,-50%);'
+        'width:88%;max-width:860px;}\n'
+        '.card{text-align:center;padding:38px 48px;border-radius:28px;'
+        'background:rgba(13,17,22,0.86);border:1px solid rgba(44,232,255,0.28);'
+        'box-shadow:0 24px 64px rgba(0,0,0,0.58);}\n'
+        '.logo{width:116px;height:116px;border-radius:24px;margin-bottom:14px;}\n'
+        '.title{font-size:36px;font-weight:700;letter-spacing:0.6px;margin-bottom:8px;}\n'
+        '.status{font-size:21px;line-height:1.4;color:#8be9ff;min-height:32px;margin:8px 0 24px;}\n'
+        '.status.err{color:#ff9e9e;}\n'
+        '.actions{width:100%;max-width:680px;margin:0 auto;}\n'
+        '.btn{display:block;width:100%;margin:0 auto 14px;padding:18px 26px;border-radius:16px;'
+        'border:3px solid rgba(130,178,214,0.28);background:rgba(20,31,46,0.92);'
+        'color:#eaf4ff;text-align:left;cursor:pointer;outline:none;'
+        '-webkit-transition:transform 0.12s ease,border-color 0.12s ease;'
+        'transition:transform 0.12s ease,border-color 0.12s ease;}\n'
+        '.btn.primary{background:linear-gradient(135deg,rgba(25,75,112,0.95),rgba(13,43,74,0.95));'
+        'border-color:rgba(44,232,255,0.45);}\n'
+        '.btn.exit{text-align:center;padding:13px 22px;margin-top:8px;margin-bottom:0;'
+        'background:rgba(26,33,44,0.75);border-color:rgba(148,163,184,0.24);color:#c2d4e6;}\n'
+        '.btn.is-focus,.btn:focus{border-color:#2ce8ff;'
+        'background:linear-gradient(135deg,#2ce8ff,#1484ff);color:#04101c;'
+        '-webkit-transform:scale(1.025);transform:scale(1.025);'
+        'box-shadow:0 0 0 4px rgba(44,232,255,0.30);}\n'
+        '.btn-main{display:block;font-size:23px;font-weight:700;line-height:1.25;}\n'
+        '.btn-sub{display:block;font-size:16px;opacity:0.86;margin-top:4px;}\n'
+        '.tip{margin-top:22px;padding-top:16px;border-top:1px solid rgba(148,163,184,0.2);'
+        'font-size:17px;line-height:1.45;color:#9bb5cd;}\n'
+        '.tip b{color:#eaf4ff;}\n'
+        '</style>\n'
+        '</head>\n'
+        '<body>\n'
+        '<div class="wrap">\n'
+        '<div class="card">\n'
+        '<img class="logo" src="icon.png" alt="Belet">\n'
+        '<div class="title">Belet</div>\n'
+        '<div id="status" class="status">Автозапуск в Браузере ТВ (курсор пульта)… Нажмите ↓ для выбора.</div>\n'
+        '<div class="actions">\n'
+        '<button id="btnBrowser" class="btn primary is-focus" type="button" tabindex="0">'
+        '<span class="btn-main">Открыть с курсором пульта · Браузер ТВ</span>'
+        '<span class="btn-sub">Open with TV Remote Cursor (Samsung Internet · recommended)</span>'
+        '</button>\n'
+        '<button id="btnWebview" class="btn" type="button" tabindex="0">'
+        '<span class="btn-main">Полный экран без панели · WebView</span>'
+        '<span class="btn-sub">Fullscreen WebView without toolbar (USB / Bluetooth mouse)</span>'
+        '</button>\n'
+        '<button id="btnExit" class="btn exit" type="button" tabindex="0">'
+        '<span class="btn-main">Выход / Exit</span>'
+        '</button>\n'
+        '</div>\n'
+        '<div class="tip">'
+        '<b>Пульт / Remote:</b> ↑↓ выбор · OK открыть · RETURN выход<br>'
+        'В Браузере ТВ стрелки управляют курсором. Чтобы убрать верхнюю панель браузера: '
+        '<b>⚙ Настройки → Скрыть вкладки и панель меню</b> (Hide Tabs &amp; Menu).'
+        '</div>\n'
+        '</div>\n'
+        '</div>\n'
+        '<script>\n'
+        '(function(){\n'
+        'var TARGET=' + safe_url + ';\n'
+        'var SELF_PKG=' + safe_pkg + ';\n'
+        'var BROWSER_IDS=["3202010022079","3201907018784","org.tizen.browser","com.samsung.tv.browser"];\n'
+        'var statusEl=document.getElementById("status");\n'
+        'var btnBrowser=document.getElementById("btnBrowser");\n'
+        'var btnWebview=document.getElementById("btnWebview");\n'
+        'var btnExit=document.getElementById("btnExit");\n'
+        'var btns=[btnBrowser,btnWebview,btnExit];\n'
+        'var focusIdx=0;\n'
+        'var autoTimer=null;\n'
+        'var retryTimer=null;\n'
+        'var autoCancelled=false;\n'
+        'var launchedBrowser=false;\n'
+        'var busy=false;\n'
+        'function setStatus(msg,isErr){\n'
+        '  if(!statusEl)return;\n'
+        '  statusEl.textContent=msg;\n'
+        '  statusEl.className=isErr?"status err":"status";\n'
+        '}\n'
+        'function setFocus(idx){\n'
+        '  if(idx<0)idx=btns.length-1;\n'
+        '  if(idx>=btns.length)idx=0;\n'
+        '  focusIdx=idx;\n'
+        '  for(var i=0;i<btns.length;i++){\n'
+        '    if(!btns[i])continue;\n'
+        '    var active=(i===focusIdx);\n'
+        '    if(active){\n'
+        '      if(btns[i].className.indexOf("is-focus")<0)btns[i].className+=" is-focus";\n'
+        '      try{btns[i].focus();}catch(e){}\n'
+        '    }else{\n'
+        '      btns[i].className=btns[i].className.replace(/\\bis-focus\\b/g,"").replace(/\\s+/g," ");\n'
+        '    }\n'
+        '  }\n'
+        '}\n'
+        'function cancelAuto(){\n'
+        '  autoCancelled=true;\n'
+        '  if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}\n'
+        '}\n'
+        'function exitApp(){\n'
+        '  cancelAuto();\n'
+        '  if(retryTimer){clearTimeout(retryTimer);retryTimer=null;}\n'
+        '  try{tizen.application.getCurrentApplication().exit();}catch(e){try{window.close();}catch(e2){}}\n'
+        '}\n'
+        'function launchKnownIds(ctrl,list,idx,onOk,onAllFail){\n'
+        '  if(idx>=list.length){onAllFail();return;}\n'
+        '  var id=list[idx];\n'
+        '  try{\n'
+        '    tizen.application.launchAppControl(ctrl,id,onOk,function(){\n'
+        '      launchKnownIds(ctrl,list,idx+1,onOk,onAllFail);\n'
+        '    });\n'
+        '  }catch(e){\n'
+        '    launchKnownIds(ctrl,list,idx+1,onOk,onAllFail);\n'
+        '  }\n'
+        '}\n'
+        'function tryFindBrowser(ctrl,onOk,onAllFail){\n'
+        '  if(typeof tizen.application.findAppControl!=="function"){\n'
+        '    launchKnownIds(ctrl,BROWSER_IDS,0,onOk,onAllFail);\n'
+        '    return;\n'
+        '  }\n'
+        '  try{\n'
+        '    tizen.application.findAppControl(ctrl,function(appInfos,appCtrl){\n'
+        '      var preferred=[];\n'
+        '      var others=[];\n'
+        '      var seen={};\n'
+        '      if(appInfos&&appInfos.length){\n'
+        '        for(var i=0;i<appInfos.length;i++){\n'
+        '          var aid=appInfos[i]&&appInfos[i].id;\n'
+        '          if(!aid||seen[aid]||aid.indexOf(SELF_PKG)===0)continue;\n'
+        '          seen[aid]=true;\n'
+        '          var low=aid.toLowerCase();\n'
+        '          if(low.indexOf("browser")>=0||low.indexOf("internet")>=0||aid==="3201907018784"||aid==="3202010022079"){\n'
+        '            preferred.push(aid);\n'
+        '          }else{\n'
+        '            others.push(aid);\n'
+        '          }\n'
+        '        }\n'
+        '      }\n'
+        '      var pool=preferred.concat(others);\n'
+        '      for(var j=0;j<BROWSER_IDS.length;j++){\n'
+        '        if(!seen[BROWSER_IDS[j]]){pool.push(BROWSER_IDS[j]);seen[BROWSER_IDS[j]]=true;}\n'
+        '      }\n'
+        '      launchKnownIds(appCtrl||ctrl,pool,0,onOk,onAllFail);\n'
+        '    },function(){\n'
+        '      launchKnownIds(ctrl,BROWSER_IDS,0,onOk,onAllFail);\n'
+        '    });\n'
+        '  }catch(e){\n'
+        '    launchKnownIds(ctrl,BROWSER_IDS,0,onOk,onAllFail);\n'
+        '  }\n'
+        '}\n'
+        'function openBrowser(){\n'
+        '  if(busy)return;\n'
+        '  cancelAuto();\n'
+        '  if(retryTimer){clearTimeout(retryTimer);retryTimer=null;}\n'
+        '  if(typeof tizen==="undefined"||!tizen.application||typeof tizen.application.launchAppControl!=="function"){\n'
+        '    setStatus("Браузер ТВ недоступен — выберите WebView ниже (нужна мышь).",true);\n'
+        '    setFocus(1);\n'
+        '    return;\n'
+        '  }\n'
+        '  var AppCtrl=tizen.ApplicationControl||tizen.application.ApplicationControl;\n'
+        '  if(typeof AppCtrl!=="function"){\n'
+        '    setStatus("ApplicationControl недоступен — выберите WebView ниже.",true);\n'
+        '    setFocus(1);\n'
+        '    return;\n'
+        '  }\n'
+        '  busy=true;\n'
+        '  setStatus("Запуск Браузера ТВ (Samsung Internet)…",false);\n'
+        '  var ctrl;\n'
+        '  try{\n'
+        '    ctrl=new AppCtrl("http://tizen.org/appcontrol/operation/view",TARGET,null,null,null,null);\n'
+        '  }catch(e){\n'
+        '    try{ctrl=new AppCtrl("http://tizen.org/appcontrol/operation/view",TARGET);}catch(e2){ctrl=null;}\n'
+        '  }\n'
+        '  if(!ctrl){\n'
+        '    busy=false;\n'
+        '    setStatus("Не удалось создать запрос браузера — выберите WebView.",true);\n'
+        '    setFocus(1);\n'
+        '    return;\n'
+        '  }\n'
+        '  function onOk(){\n'
+        '    busy=false;\n'
+        '    launchedBrowser=true;\n'
+        '    setStatus("Открыто в Браузере ТВ (стрелки двигают курсор, OK — выбор).",false);\n'
+        '  }\n'
+        '  function onAllFail(){\n'
+        '    busy=false;\n'
+        '    setStatus("Браузер ТВ не найден — выберите WebView ниже (для мыши).",true);\n'
+        '    setFocus(1);\n'
+        '  }\n'
+        '  try{\n'
+        '    tizen.application.launchAppControl(ctrl,null,onOk,function(){\n'
+        '      tryFindBrowser(ctrl,onOk,onAllFail);\n'
+        '    });\n'
+        '  }catch(e){\n'
+        '    tryFindBrowser(ctrl,onOk,onAllFail);\n'
+        '  }\n'
+        '}\n'
+        'function openWebview(){\n'
+        '  if(busy)return;\n'
+        '  cancelAuto();\n'
+        '  busy=true;\n'
+        '  setStatus("Загрузка belet.tm в полноэкранном WebView…",false);\n'
+        '  if(retryTimer)clearTimeout(retryTimer);\n'
+        '  retryTimer=setTimeout(function(){\n'
+        '    busy=false;\n'
+        '    setStatus("Не удаётся открыть belet.tm — проверьте Wi-Fi / Conf на ТВ и нажмите OK.",true);\n'
+        '    setFocus(1);\n'
+        '  },8000);\n'
+        '  setTimeout(function(){\n'
+        '    try{window.location.replace(TARGET);}catch(e){window.location.href=TARGET;}\n'
+        '  },60);\n'
+        '}\n'
+        'var actions=[openBrowser,openWebview,exitApp];\n'
+        'function triggerCurrent(){\n'
+        '  var fn=actions[focusIdx];\n'
+        '  if(fn)fn();\n'
+        '}\n'
+        'if(btnBrowser)btnBrowser.onclick=function(){setFocus(0);openBrowser();};\n'
+        'if(btnWebview)btnWebview.onclick=function(){setFocus(1);openWebview();};\n'
+        'if(btnExit)btnExit.onclick=function(){setFocus(2);exitApp();};\n'
+        'document.addEventListener("keydown",function(ev){\n'
+        '  var k=ev.keyCode;\n'
+        '  if(k===38||k===37){\n'
+        '    ev.preventDefault();\n'
+        '    cancelAuto();\n'
+        '    setFocus(focusIdx-1);\n'
+        '    setStatus("Выберите режим стрелками ↑↓ и нажмите OK.",false);\n'
+        '  }else if(k===40||k===39){\n'
+        '    ev.preventDefault();\n'
+        '    cancelAuto();\n'
+        '    setFocus(focusIdx+1);\n'
+        '    setStatus("Выберите режим стрелками ↑↓ и нажмите OK.",false);\n'
+        '  }else if(k===13||ev.key==="Enter"){\n'
+        '    ev.preventDefault();\n'
+        '    cancelAuto();\n'
+        '    triggerCurrent();\n'
+        '  }else if(k===10009||k===10182||k===27||k===8){\n'
+        '    ev.preventDefault();\n'
+        '    exitApp();\n'
+        '  }\n'
+        '});\n'
+        'window.addEventListener("tizenhwkey",function(ev){\n'
+        '  if(ev&&ev.keyName==="back"){exitApp();}\n'
+        '});\n'
+        'document.addEventListener("visibilitychange",function(){\n'
+        '  if(!document.hidden&&launchedBrowser){\n'
+        '    busy=false;\n'
+        '    setStatus("Belet готов. Нажмите OK для открытия с курсором или RETURN для выхода.",false);\n'
+        '    setFocus(0);\n'
+        '  }\n'
+        '});\n'
+        'setFocus(0);\n'
+        'autoTimer=setTimeout(function(){\n'
+        '  if(!autoCancelled&&!launchedBrowser)openBrowser();\n'
+        '},900);\n'
+        '})();\n'
+        '</script>\n'
+        '</body>\n'
+        '</html>\n'
+    ).encode('utf-8')
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('config.xml', config_xml)
+        zf.writestr('index.html', index_html)
+        zf.writestr('icon.png', icon_bytes)
+    return buf.getvalue()
+
+
+
+
 def build_belet_wgt(
     target_url=BELET_URL,
     pkg_id=BELET_PKG_ID,
@@ -3336,6 +3653,8 @@ def build_belet_wgt(
     tv_ip=None,
 ):
     """Build an unsigned Tizen .wgt package rendering Belet in a fullscreen WebView with TV D-pad navigation."""
+    if not enable_service:
+        return _build_legacy_belet_wgt(target_url, pkg_id, app_name, icon_bytes)
     if not re.fullmatch(r'[A-Za-z0-9]{10}', str(pkg_id)):
         raise ValueError(f'Tizen package ID must be exactly 10 alphanumeric chars, got {pkg_id!r}')
 

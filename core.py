@@ -3314,7 +3314,9 @@ class Api:
                         )
                         lines.append(f'[+] Samsung certificate saved: {bundle["source"]}')
 
-                enable_service = not (ver_num is not None and ver_num < 3.0)
+                # Return to the pre-proxy Belet package: older Samsung firmware opens its
+                # TV browser to the Belet site directly instead of navigating to localhost.
+                enable_service = False
                 remote_wgt = f'{sdk_toolpath}/{BELET_PKG_ID}.wgt'
 
                 def _build_sign_push(use_service, active_bundle):

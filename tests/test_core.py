@@ -1191,8 +1191,6 @@ def test_wgt_xmldsig_matches_tizen_tv_format_and_strips_root():
         assert names[:2] == ['author-signature.xml', 'signature1.xml']
         for sig_name in ('author-signature.xml', 'signature1.xml'):
             xml = zf.read(sig_name).decode('utf-8')
-            # Tizen's verified WGT signer uses C14N 1.1 for the #prop reference.
-            assert 'Algorithm="http://www.w3.org/2006/12/xml-c14n11"' in xml
             # Only [leaf, intermediate] embedded — root stripped
             x509_blocks = re.findall(r'<X509Certificate>(.*?)</X509Certificate>', xml, flags=re.DOTALL)
             assert len(x509_blocks) == 2
@@ -1435,8 +1433,6 @@ def test_sdb_wire_client_and_belet_install_launch_remove(tmp_api, tmp_path, monk
 
     assert diagnose_install_output('install failed[118012]')['status'] == 'cert_mismatch'
     assert diagnose_install_output('install failed[118, -12] reason: Check certificate error : :Invalid certificate chain.:<-2>')['status'] == 'cert_invalid_chain'
-    assert diagnose_install_output('Check certificate error: Invalid Certificate Signature')['status'] == 'cert_invalid_signature'
-    assert diagnose_install_output('Check certificate error: Invalid certificate format in signature')['status'] == 'cert_invalid_format'
     assert diagnose_install_output('download failed[116]')['status'] == 'no_space'
     assert diagnose_install_output('install failed[118, -22]')['status'] == 'pkg_blocked'
     assert diagnose_install_output('installing[100]\ninstall completed')['status'] == 'ok'
@@ -2113,10 +2109,15 @@ def test_belet_wgt_service_manifest_es5_and_fallback(tmp_path):
     with zipfile.ZipFile(io.BytesIO(wgt_nosvc), 'r') as zf:
         nosvc_names = set(zf.namelist())
         assert 'service/proxy.js' not in nosvc_names
-        assert {'config.xml', 'index.html', 'neon-nav.js', 'icon.png'}.issubset(nosvc_names)
+        assert {'config.xml', 'index.html', 'icon.png'}.issubset(nosvc_names)
         nosvc_cfg = zf.read('config.xml').decode('utf-8')
+        nosvc_html = zf.read('index.html').decode('utf-8')
+        assert 'version="1.2.8"' in nosvc_cfg
         assert 'required_version="2.3"' in nosvc_cfg
         assert '<tizen:service' not in nosvc_cfg
+        assert 'https://belet.tm/ru' in nosvc_html
+        assert 'http://127.0.0.1:18765' not in nosvc_html
+        assert 'btnBrowser' in nosvc_html
 
     # Self-contained service/proxy.js must not rely on __dirname or relative require() (breaks Tizen 10 vm.runInThisContext)
     assert '__dirname' not in proxy_js
@@ -3482,7 +3483,7 @@ assert.strictEqual(doc.getElementById('neon-tv-cursor').style.display, 'none');
 
 
 
-def test_install_samsung_belet_falls_back_when_service_manifest_rejected(tmp_api, tmp_path, monkeypatch):
+def test_install_samsung_belet_uses_direct_browser_wgt(tmp_api, tmp_path, monkeypatch):
     import datetime
     import io
     import zipfile
@@ -3542,12 +3543,10 @@ def test_install_samsung_belet_falls_back_when_service_manifest_rejected(tmp_api
 
         def install_wgt(self, pkg_id, remote, timeout=120.0):
             install_attempts.append(pkg_id)
-            if len(install_attempts) == 1:
-                return 'install failed[118,-19]\n'
             return 'installing[100]\ninstall completed\n'
 
         def list_apps(self):
-            return 'BeletTV001.Belet\tBelet\n' if len(install_attempts) >= 2 else ''
+            return 'BeletTV001.Belet\tBelet\n' if install_attempts else ''
 
         def launch_app(self, app_id):
             return 'launched'
@@ -3567,16 +3566,14 @@ def test_install_samsung_belet_falls_back_when_service_manifest_rejected(tmp_api
 
     res = tmp_api.install_samsung_belet('192.168.1.55')
     assert res['ok'] is True
-    assert len(pushed_wgts) == 2
-    assert 'install failed[118,-19]' in res['output']
+    assert len(pushed_wgts) == 1
+    assert len(install_attempts) == 1
 
     with zipfile.ZipFile(io.BytesIO(pushed_wgts[0]), 'r') as z1:
-        assert 'service/proxy.js' in z1.namelist()
-        assert 'var HINT_TV_IP="192.168.1.55";' in z1.read('index.html').decode('utf-8')
-    with zipfile.ZipFile(io.BytesIO(pushed_wgts[1]), 'r') as z2:
-        assert 'service/proxy.js' not in z2.namelist()
-        assert 'neon-nav.js' in z2.namelist()
-        assert 'required_version="2.3"' in z2.read('config.xml').decode('utf-8')
+        assert 'service/proxy.js' not in z1.namelist()
+        html = z1.read('index.html').decode('utf-8')
+        assert 'https://belet.tm/' in html
+        assert '127.0.0.1:18765' not in html
         assert 'var HINT_TV_IP="192.168.1.55";' in z2.read('index.html').decode('utf-8')
 
 
