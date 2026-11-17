@@ -251,11 +251,19 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
   var bakedDefault = DEFAULT_PORTAL;
   var lastBaked = localStorage.getItem("alem_last_baked");
   var currentPortal = localStorage.getItem("alem_portal");
+  var normalizePortalKey = function(url) {
+    return String(url || "").replace(/\/+$/, "").toLowerCase();
+  };
+  var hadPortalBinding = !!localStorage.getItem("alem_mac");
+  var portalBindingChanged = hadPortalBinding && (
+    !currentPortal || (lastBaked !== bakedDefault && normalizePortalKey(currentPortal) !== normalizePortalKey(bakedDefault))
+  );
   if (!currentPortal || lastBaked !== bakedDefault) {
     currentPortal = bakedDefault;
     localStorage.setItem("alem_portal", bakedDefault);
     localStorage.setItem("alem_last_baked", bakedDefault);
     localStorage.removeItem("alem_sid");
+    if (portalBindingChanged) localStorage.removeItem("alem_mac");
     sessionId = null;
   }
 
@@ -278,6 +286,24 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
 
   var currentMac = localStorage.getItem("alem_mac") || null;
   var sessionId = localStorage.getItem("alem_sid") || null;
+  if (portalBindingChanged) {
+    currentMac = null;
+    sessionId = null;
+  }
+  function clearTerminalBinding() {
+    localStorage.removeItem("alem_mac");
+    localStorage.removeItem("alem_sid");
+    currentMac = null;
+    sessionId = null;
+  }
+  function setCurrentPortal(url) {
+    var nextPortal = String(url || "");
+    if (normalizePortalKey(nextPortal) !== normalizePortalKey(currentPortal)) {
+      clearTerminalBinding();
+    }
+    currentPortal = nextPortal;
+    localStorage.setItem("alem_portal", nextPortal);
+  }
   var serverTimeOffset = 0;
   var domainConfig = null;
   var authData = { channels: [], playlists: [], tokens: {}, domain: "tmalem" };
@@ -597,6 +623,12 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     if (err.code === -32003 || err.code === -32002) return true;
     var msg = (err.message || "").toLowerCase();
     return msg.indexOf("not registered") !== -1 || msg === "not found";
+  }
+  function isTerminalNotFound(err) {
+    if (!err) return false;
+    if (err.code === -32002) return true;
+    var msg = (err.message || "").toLowerCase();
+    return msg === "not found" || msg.indexOf("terminal not found") !== -1 || msg.indexOf("not registered") !== -1;
   }
   function friendlyLoginError(err) {
     if (!err) return "Неверные данные или доступ запрещён.";
@@ -1001,6 +1033,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
           }
           if (isRequiresSignIn(lErr) || lRes === false) {
             if (bootWatchdog) { clearTimeout(bootWatchdog); bootWatchdog = null; }
+            if (isTerminalNotFound(lErr)) clearTerminalBinding();
             showBootError("Терминал не зарегистрирован на сервере " + currentPortal.replace(/^https?:\/\//, "") + ". Введите логин и пароль абонента для активации или выберите открытый сервер.");
             showLoginModal();
           } else {
@@ -1032,6 +1065,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
             return;
           }
           if (isRequiresSignIn(aErr)) {
+            if (isTerminalNotFound(aErr)) clearTerminalBinding();
             sessionId = null;
             localStorage.removeItem("alem_sid");
             if (bootWatchdog) { clearTimeout(bootWatchdog); bootWatchdog = null; }
@@ -1128,10 +1162,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
 
   window.onSplashPortalSelected = function(url) {
     if (!url) return;
-    currentPortal = url;
-    localStorage.setItem("alem_portal", url);
-    localStorage.removeItem("alem_sid");
-    sessionId = null;
+    setCurrentPortal(url);
     bootAlemTV();
   };
 
@@ -1165,10 +1196,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
       xhr.onreadystatechange = function() {
         if (xhr.readyState === 4) {
           if (xhr.status >= 200 && xhr.status < 300) {
-            currentPortal = target.url;
-            localStorage.setItem("alem_portal", target.url);
-            localStorage.removeItem("alem_sid");
-            sessionId = null;
+            setCurrentPortal(target.url);
             if (statusEl) statusEl.textContent = "Сервер найден: " + target.name;
             setTimeout(function() {
               bootAlemTV();
@@ -2226,14 +2254,12 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     if (!inp || !inp.value.trim()) return;
     var u = inp.value.trim();
     if (!/^https?:\/\//i.test(u)) u = "http://" + u;
-    currentPortal = u;
-    localStorage.setItem("alem_portal", u);
+    setCurrentPortal(u);
     reauthPortal();
   };
 
   window.onPortalSelected = function(url) {
-    currentPortal = url;
-    localStorage.setItem("alem_portal", url);
+    setCurrentPortal(url);
   };
 
   window.reauthPortal = function() {
