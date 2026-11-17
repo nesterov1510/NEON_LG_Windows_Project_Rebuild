@@ -349,33 +349,45 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     return s.length < 2 ? "0" + s : s;
   }
 
-  // Crypto: safe modPow without BigInt literals (supports Chromium 47+ without SyntaxError)
-  function modPowSafe(b, e, m) {
-    if (typeof BigInt === "function") {
-      try {
-        var r = BigInt(1);
-        b = BigInt(b) % BigInt(m);
-        e = BigInt(e);
-        m = BigInt(m);
-        var zero = BigInt(0);
-        var one = BigInt(1);
-        var two = BigInt(2);
-        while (e > zero) {
-          if (e % two === one) r = (r * b) % m;
-          e = e / two;
-          b = (b * b) % m;
-        }
-        return r;
-      } catch(x){}
+  // RSA-1024 exponent 65537. Byte arithmetic provides a fallback for older
+  // TV web engines without BigInt; all values are big-endian and < modulus.
+  function rsaModAdd(a, b, modulus) {
+    var out = new Uint8Array(modulus.length);
+    var carry = 0, i;
+    for (i = out.length - 1; i >= 0; i--) {
+      var sum = a[i] + b[i] + carry;
+      out[i] = sum & 255;
+      carry = sum >> 8;
     }
-    return null;
+    var ge = !!carry;
+    if (!ge) {
+      for (i = 0; i < out.length; i++) {
+        if (out[i] !== modulus[i]) { ge = out[i] > modulus[i]; break; }
+      }
+      if (i === out.length) ge = true;
+    }
+    if (ge) {
+      var borrow = 0;
+      for (i = out.length - 1; i >= 0; i--) {
+        var diff = out[i] - modulus[i] - borrow;
+        out[i] = diff & 255;
+        borrow = diff < 0 ? 1 : 0;
+      }
+    }
+    return out;
   }
-
+  function rsaModMultiply(a, b, modulus) {
+    var result = new Uint8Array(modulus.length);
+    for (var i = 0; i < b.length; i++) {
+      for (var bit = 7; bit >= 0; bit--) {
+        result = rsaModAdd(result, result, modulus);
+        if ((b[i] >> bit) & 1) result = rsaModAdd(result, a, modulus);
+      }
+    }
+    return result;
+  }
   function rsaEncrypt(blockBytes) {
-    if (typeof BigInt !== "function") return "";
-    var N = BigInt("0x" + RSA_N_HEX);
-    var E = BigInt(65537);
-    var k = 128; // 1024 bit = 128 bytes
+    var k = 128;
     if (blockBytes.length > k - 11) return "";
     var em = new Uint8Array(k);
     em[0] = 0x00; em[1] = 0x02;
@@ -387,15 +399,24 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     }
     em[2 + psLen] = 0x00;
     em.set(blockBytes, 3 + psLen);
-
-    var m = BigInt(0);
-    for (var j = 0; j < k; j++) m = (m * BigInt(256)) + BigInt(em[j]);
-    var c = modPowSafe(m, E, N);
-    if (c === null) return "";
-    var hex = c.toString(16);
-    while (hex.length < k * 2) hex = "0" + hex;
-    var res = new Uint8Array(k);
-    for (var h = 0; h < k; h++) res[h] = parseInt(hex.substr(h * 2, 2), 16);
+    var res;
+    if (typeof BigInt === "function") {
+      var n = BigInt("0x" + RSA_N_HEX), m = BigInt(0);
+      for (var j = 0; j < k; j++) m = m * BigInt(256) + BigInt(em[j]);
+      var c = m;
+      for (var sq = 0; sq < 16; sq++) c = c * c % n;
+      c = c * m % n;
+      var hex = c.toString(16);
+      while (hex.length < k * 2) hex = "0" + hex;
+      res = new Uint8Array(k);
+      for (var h = 0; h < k; h++) res[h] = parseInt(hex.substr(h * 2, 2), 16);
+    } else {
+      var modulus = new Uint8Array(k);
+      for (var x = 0; x < k; x++) modulus[x] = parseInt(RSA_N_HEX.substr(x * 2, 2), 16);
+      res = em;
+      for (var s = 0; s < 16; s++) res = rsaModMultiply(res, res, modulus);
+      res = rsaModMultiply(res, em, modulus);
+    }
     var bin = "";
     for (var b = 0; b < res.length; b++) bin += String.fromCharCode(res[b]);
     return btoa(bin);
@@ -632,8 +653,8 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
   }
   function friendlyLoginError(err) {
     if (!err) return "Неверные данные или доступ запрещён.";
-    if (err.code === -32003) return "Доступ запрещён: неверный логин или пароль.";
-    if (err.code === -32002) return "Терминал не найден на сервере. Проверьте логин/пароль или выберите другой сервер.";
+    if (err.code === -32003) return "Доступ запрещён (код -32003). Проверьте данные договора и состояние подписки.";
+    if (err.code === -32002) return "Терминал или абонент не найден (код -32002). Проверьте сервер оператора и данные договора; при повторении обратитесь к оператору.";
     if (err.message && err.message.indexOf("HTTP ") === 0) {
       return "Сервер не найден (" + err.message + "). Проверьте адрес портала и сеть.";
     }
@@ -1033,7 +1054,6 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
           }
           if (isRequiresSignIn(lErr) || lRes === false) {
             if (bootWatchdog) { clearTimeout(bootWatchdog); bootWatchdog = null; }
-            if (isTerminalNotFound(lErr)) clearTerminalBinding();
             showBootError("Терминал не зарегистрирован на сервере " + currentPortal.replace(/^https?:\/\//, "") + ". Введите логин и пароль абонента для активации или выберите открытый сервер.");
             showLoginModal();
           } else {
@@ -1065,7 +1085,6 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
             return;
           }
           if (isRequiresSignIn(aErr)) {
-            if (isTerminalNotFound(aErr)) clearTerminalBinding();
             sessionId = null;
             localStorage.removeItem("alem_sid");
             if (bootWatchdog) { clearTimeout(bootWatchdog); bootWatchdog = null; }
@@ -2187,7 +2206,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     var pEl = document.getElementById("loginPassword");
     var errMsg = document.getElementById("loginErrMsg");
     var u = (uEl ? uEl.value : "").trim();
-    var p = (pEl ? pEl.value : "").trim();
+    var p = pEl ? pEl.value : "";
     if (!u) {
       if (errMsg) errMsg.textContent = "Введите номер договора или логин.";
       return;
