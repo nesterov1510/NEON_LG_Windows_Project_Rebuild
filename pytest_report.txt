@@ -1,0 +1,149 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.10, pytest-9.2.0, pluggy-1.7.0 -- C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe
+cachedir: .pytest_cache
+rootdir: D:\a\NEON_LG_Windows_Project_Rebuild\NEON_LG_Windows_Project_Rebuild
+plugins: platformdirs-4.14.3
+collecting ... collected 60 items
+
+tests/test_core.py::test_normalize_ip PASSED                             [  1%]
+tests/test_core.py::test_settings_never_persist_secrets PASSED           [  3%]
+tests/test_core.py::test_remember_profile_preserves_existing_profiles PASSED [  5%]
+tests/test_core.py::test_remember_profile_disambiguates_duplicate_names PASSED [  6%]
+tests/test_core.py::test_inspect_profile_auth_ignores_comments PASSED    [  8%]
+tests/test_core.py::test_connect_and_actions_handle_exit_codes_and_backup PASSED [ 10%]
+tests/test_core.py::test_action_detects_dropped_ssh_transport PASSED     [ 11%]
+tests/test_core.py::test_openvpn_auth_file_cleanup_and_emergency_leak_stop PASSED [ 13%]
+tests/test_core.py::test_start_vpn_hotspot_win81_and_win10_fallback PASSED [ 15%]
+tests/test_core.py::test_change_region_sh_aborts_on_write_failure PASSED [ 16%]
+tests/test_core.py::test_ui_html_contains_vpn_logs_auth_and_hotspot_controls PASSED [ 18%]
+tests/test_core.py::test_action_allows_custom_area_codes_and_rejects_invalid PASSED [ 20%]
+tests/test_core.py::test_windows_icon_has_dib_layers_and_png_256 PASSED  [ 21%]
+tests/test_core.py::test_connect_tv_ssh_falls_back_to_legacy_ssh_rsa_for_lg_dropbear FAILED [ 23%]
+tests/test_core.py::test_connect_strips_crlf_from_change_region_sh_before_sftp_upload PASSED [ 25%]
+tests/test_core.py::test_build_and_install_belet_ipk_structure_and_luna PASSED [ 26%]
+tests/test_core.py::test_samsung_ws_protocol_token_pairing_stale_recovery_and_actions PASSED [ 28%]
+tests/test_core.py::test_samsung_legacy_port_55000_protocol PASSED       [ 30%]
+tests/test_core.py::test_belet_wgt_build_sign_and_verify PASSED          [ 31%]
+tests/test_core.py::test_samsung_cert_manager_oauth_and_provisioning PASSED [ 33%]
+tests/test_core.py::test_https_ca_download_handles_ssl_local_issuer_via_schannel_and_mirror PASSED [ 35%]
+tests/test_core.py::test_bundled_samsung_ca_certs_are_valid_non_root_2025_intermediates PASSED [ 36%]
+tests/test_core.py::test_wgt_xmldsig_matches_tizen_tv_format_and_strips_root PASSED [ 38%]
+tests/test_core.py::test_samsung_cert_manager_heals_1cert_p12_refreshes_stale_ca_and_rejects_broken_chain PASSED [ 40%]
+tests/test_core.py::test_sdb_wire_client_and_belet_install_launch_remove PASSED [ 41%]
+tests/test_core.py::test_classify_adapter_distinguishes_ethernet_wifi_vpn_virtual PASSED [ 43%]
+tests/test_core.py::test_start_vpn_ethernet_auto_selects_and_tears_down_safely PASSED [ 45%]
+tests/test_core.py::test_broadcom_uplink_never_selected_for_ethernet_or_vpn_sharing PASSED [ 46%]
+tests/test_core.py::test_sharing_dns_validation_presets_and_persistence PASSED [ 48%]
+tests/test_core.py::test_sharing_dns_applied_to_ethernet_hotspot_uplink_restore_and_rebind PASSED [ 50%]
+tests/test_core.py::test_belet_wgt_service_manifest_es5_and_fallback PASSED [ 51%]
+tests/test_core.py::test_belet_proxy_service_live_http_rewriting_and_cookies PASSED [ 53%]
+tests/test_core.py::test_belet_nav_js_spatial_nav_ime_cursor_and_back PASSED [ 55%]
+tests/test_core.py::test_belet_index_html_tier1_tier2_and_back_handshake PASSED [ 56%]
+tests/test_core.py::test_belet_nav_js_login_autofocus_qr_react_click_and_tier2_fetch_bridge PASSED [ 58%]
+tests/test_core.py::test_install_samsung_belet_uses_direct_browser_wgt FAILED [ 60%]
+tests/test_core.py::test_belet_nav_js_player_seek_and_controls PASSED    [ 61%]
+tests/test_core.py::test_belet_proxy_caching_and_keepalive PASSED        [ 63%]
+tests/test_alemtv.py::test_alemtv_assets_exist PASSED                    [ 65%]
+tests/test_alemtv.py::test_alemtv_portals_catalog PASSED                 [ 66%]
+tests/test_alemtv.py::test_build_alemtv_html_structure PASSED            [ 68%]
+tests/test_alemtv.py::test_build_alemtv_ipk_structure PASSED             [ 70%]
+tests/test_alemtv.py::test_build_alemtv_wgt_and_sign PASSED              [ 71%]
+tests/test_alemtv.py::test_api_alemtv_methods PASSED                     [ 73%]
+tests/test_alemtv.py::test_alemtv_js_syntax_validity PASSED              [ 75%]
+tests/test_alemtv.py::test_alemtv_custom_portal_persistence PASSED       [ 76%]
+tests/test_alemtv.py::test_alemtv_silky_open_channel PASSED              [ 78%]
+tests/test_alemtv.py::test_alemtv_stream_url_builder_appletv_alignment PASSED [ 80%]
+tests/test_alemtv.py::test_alemtv_play_channel_navigation PASSED         [ 81%]
+tests/test_alemtv.py::test_alemtv_ares_cipher_vectors PASSED             [ 83%]
+tests/test_alemtv.py::test_alemtv_login_by_contract_encrypted_roundtrip PASSED [ 85%]
+tests/test_alemtv.py::test_alemtv_boot_without_mac_shows_login PASSED    [ 86%]
+tests/test_alemtv.py::test_alemtv_epg_csv_table_parsing PASSED           [ 88%]
+tests/test_alemtv.py::test_alemtv_epg_modal_day_panel_and_archive PASSED [ 90%]
+tests/test_alemtv.py::test_alemtv_player_timeshift_archive_modes PASSED  [ 91%]
+tests/test_alemtv.py::test_alemtv_remote_key_table PASSED                [ 93%]
+tests/test_alemtv.py::test_alemtv_remote_key_static PASSED               [ 95%]
+tests/test_alemtv.py::test_alemtv_session_persists_across_restart PASSED [ 96%]
+tests/test_alemtv.py::test_alemtv_authorize_mac_fallback_static PASSED   [ 98%]
+tests/test_alemtv.py::test_launchers_persist_webview_profile PASSED      [100%]
+
+================================== FAILURES ===================================
+______ test_connect_tv_ssh_falls_back_to_legacy_ssh_rsa_for_lg_dropbear _______
+C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\transport.py:2369: in _check_banner
+    buf = self.packetizer.readline(timeout)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\packet.py:395: in readline
+    buf += self._read_timeout(timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\packet.py:673: in _read_timeout
+    raise socket.timeout()
+E   TimeoutError
+
+During handling of the above exception, another exception occurred:
+tests\test_core.py:420: in test_connect_tv_ssh_falls_back_to_legacy_ssh_rsa_for_lg_dropbear
+    client, remote_ver = tmp_api._connect_tv_ssh('127.0.0.1', client_key, out)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+core.py:327: in _connect_tv_ssh
+    client.connect(clean_ip, **kwargs)
+tests\test_core.py:415: in redirect_port
+    return orig_connect(self, hostname, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\client.py:451: in connect
+    t.start_client(timeout=timeout)
+C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\transport.py:773: in start_client
+    raise e
+C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\transport.py:2185: in run
+    self._check_banner()
+C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\transport.py:2373: in _check_banner
+    raise SSHException(
+E   paramiko.ssh_exception.SSHException: Error reading SSH protocol banner
+------------------------------ Captured log call ------------------------------
+ERROR    paramiko.transport:transport.py:1944 Exception (client): Error reading SSH protocol banner
+ERROR    paramiko.transport:transport.py:1942 Traceback (most recent call last):
+ERROR    paramiko.transport:transport.py:1942   File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\transport.py", line 2369, in _check_banner
+ERROR    paramiko.transport:transport.py:1942     buf = self.packetizer.readline(timeout)
+ERROR    paramiko.transport:transport.py:1942           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR    paramiko.transport:transport.py:1942   File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\packet.py", line 395, in readline
+ERROR    paramiko.transport:transport.py:1942     buf += self._read_timeout(timeout)
+ERROR    paramiko.transport:transport.py:1942            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR    paramiko.transport:transport.py:1942   File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\packet.py", line 673, in _read_timeout
+ERROR    paramiko.transport:transport.py:1942     raise socket.timeout()
+ERROR    paramiko.transport:transport.py:1942 TimeoutError
+ERROR    paramiko.transport:transport.py:1942 
+ERROR    paramiko.transport:transport.py:1942 During handling of the above exception, another exception occurred:
+ERROR    paramiko.transport:transport.py:1942 
+ERROR    paramiko.transport:transport.py:1942 Traceback (most recent call last):
+ERROR    paramiko.transport:transport.py:1942   File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\transport.py", line 2185, in run
+ERROR    paramiko.transport:transport.py:1942     self._check_banner()
+ERROR    paramiko.transport:transport.py:1942   File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\transport.py", line 2373, in _check_banner
+ERROR    paramiko.transport:transport.py:1942     raise SSHException(
+ERROR    paramiko.transport:transport.py:1942 paramiko.ssh_exception.SSHException: Error reading SSH protocol banner
+ERROR    paramiko.transport:transport.py:1942
+_____________ test_install_samsung_belet_uses_direct_browser_wgt ______________
+tests\test_core.py:3577: in test_install_samsung_belet_uses_direct_browser_wgt
+    assert 'var HINT_TV_IP="192.168.1.55";' in z2.read('index.html').decode('utf-8')
+                                               ^^
+E   NameError: name 'z2' is not defined
+============================== warnings summary ===============================
+tests/test_core.py::test_connect_tv_ssh_falls_back_to_legacy_ssh_rsa_for_lg_dropbear
+  C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\_pytest\threadexception.py:54: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-13 (serve)
+  
+  Traceback (most recent call last):
+    File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\threading.py", line 1075, in _bootstrap_inner
+      self.run()
+    File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\threading.py", line 1012, in run
+      self._target(*self._args, **self._kwargs)
+    File "D:\a\NEON_LG_Windows_Project_Rebuild\NEON_LG_Windows_Project_Rebuild\tests\test_core.py", line 397, in serve
+      tr.start_server(server=LegacyDropbearServer())
+    File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\paramiko\transport.py", line 842, in start_server
+      raise SSHException("Negotiation failed.")
+  paramiko.ssh_exception.SSHException: Negotiation failed.
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_core.py::test_connect_tv_ssh_falls_back_to_legacy_ssh_rsa_for_lg_dropbear - paramiko.ssh_exception.SSHException: Error reading SSH protocol banner
+FAILED tests/test_core.py::test_install_samsung_belet_uses_direct_browser_wgt - NameError: name 'z2' is not defined
+================== 2 failed, 58 passed, 1 warning in 16.74s ===================
