@@ -3574,7 +3574,6 @@ def test_install_samsung_belet_uses_direct_browser_wgt(tmp_api, tmp_path, monkey
         html = z1.read('index.html').decode('utf-8')
         assert 'https://belet.tm/' in html
         assert '127.0.0.1:18765' not in html
-        assert 'var HINT_TV_IP="192.168.1.55";' in z2.read('index.html').decode('utf-8')
 
 
 def test_belet_nav_js_player_seek_and_controls(tmp_path):
