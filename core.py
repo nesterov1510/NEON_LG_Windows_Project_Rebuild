@@ -88,6 +88,7 @@ class Api:
         self.hotspot_mode = None
         self.ethernet_active = False
         self.ethernet_adapter = None
+        self._combined_sharing = None
         self.vpn_adapter_name = None
         self.vpn_adapter_guid = None
         self.vpn_ifindex = None
@@ -1983,7 +1984,9 @@ class Api:
 
         # Refresh active ICS route if sharing is live so Windows SharedAccess (192.168.137.1:53) picks up new upstream DNS immediately.
         ics_refreshed = False
-        if reapply_ics and pub_name and self.app_shared_pair and self.app_shared_pair[1]:
+        if reapply_ics and self._combined_sharing:
+            lines.append('[i] Restart combined sharing to refresh the ICS DNS proxy.')
+        elif reapply_ics and pub_name and self.app_shared_pair and self.app_shared_pair[1]:
             pair_pub, pair_priv = self.app_shared_pair
             if self.hotspot_active and self.hotspot_mode == 'winrt':
                 lines.append('[i] Win10/11 Mobile Hotspot is live: Windows DNS cache flushed. If TV keeps cached DNS, restart the hotspot (Stop -> Start).')
@@ -2148,6 +2151,8 @@ class Api:
             return {'error': str(exc)}
 
     def stop_sharing(self):
+        if self._combined_sharing:
+            return self.stop_combined_sharing()
         if platform.system() != 'Windows':
             return {'error': 'Windows only.'}
         script = (
@@ -2450,7 +2455,202 @@ class Api:
             'output': '\n'.join(lines),
         }
 
+    def _configure_combined_ics(self, public, ethernet, hotspot):
+        # Never alter an existing ICS configuration; rollback only adapters we enabled.
+        payload = base64.b64encode(json.dumps([public, ethernet, hotspot]).encode('utf-8')).decode('ascii')
+        script = (
+            f"$n=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}'))|ConvertFrom-Json; "
+            "$m=New-Object -ComObject HNetCfg.HNetShare; $cs=@{}; "
+            "foreach($c in $m.EnumEveryConnection){"
+            "$p=$m.NetConnectionProps.Invoke($c); $q=$m.INetSharingConfigurationForINetConnection.Invoke($c); "
+            "if($q.SharingEnabled){throw 'Another ICS configuration is active; it was not changed.'}; "
+            "if($p.Name -in $n){$cs[$p.Name]=$c}}; "
+            "foreach($name in $n){if(-not $cs.ContainsKey($name)){throw ('Adapter not found: '+$name)}}; "
+            "$enabled=@(); try{ "
+            "foreach($i in @(0,1,2)){ $q=$m.INetSharingConfigurationForINetConnection.Invoke($cs[$n[$i]]); "
+            "$q.EnableSharing([int]($i -ne 0)); $enabled+=,$q }; "
+            "foreach($i in @(0,1,2)){ $q=$m.INetSharingConfigurationForINetConnection.Invoke($cs[$n[$i]]); "
+            "if(-not $q.SharingEnabled -or $q.SharingConnectionType -ne [int]($i -ne 0)){throw ('ICS did not retain adapter: '+$n[$i])} }; "
+            "'Combined ICS enabled.' "
+            "}catch{ $failure=$_; $rollbackErrors=@(); "
+            "foreach($q in $enabled){try{$q.DisableSharing()}catch{$rollbackErrors+=($_.Exception.Message)}}; "
+            "if($rollbackErrors.Count){throw ('ICS setup failed and rollback failed: '+$failure+'; '+($rollbackErrors -join '; '))}; throw $failure }"
+        )
+        return self._powershell(script, timeout=45)
+
+    def start_combined_sharing(self, ssid, password, ethernet_name=None, use_vpn=True):
+        """Attempt ICS on Ethernet and Hosted Network; never switch VPN traffic to the uplink."""
+        if platform.system() != 'Windows':
+            return {'error': 'Combined sharing is Windows-only.'}
+        if not isinstance(use_vpn, bool):
+            return {'error': 'Choose VPN or direct sharing explicitly.'}
+        if self.hotspot_active or self.ethernet_active or self.app_shared_pair or self._combined_sharing:
+            return {'error': 'Stop existing NEON sharing before starting combined sharing.'}
+        if use_vpn and self.vpn_state != 'CONNECTED':
+            return {'error': 'Connect Conf / OpenVPN before starting VPN sharing.'}
+        if not use_vpn and self.vpn_state != 'DISCONNECTED':
+            return {'error': 'Disconnect Conf / OpenVPN before starting direct sharing.'}
+        ssid = str(ssid or '').strip()
+        password = str(password or '')
+        if not re.fullmatch(r'[A-Za-z0-9 _.-]{1,32}', ssid):
+            return {'error': 'SSID must be 1–32 ASCII letters, numbers, spaces, dots, underscores or hyphens.'}
+        if not re.fullmatch(r'[A-Za-z0-9!@#$%^&*()_+\-=.]{8,63}', password):
+            return {'error': 'Hotspot password must be 8–63 supported ASCII characters.'}
+        if self._driver_supports_hosted_network() is not True:
+            return {'error': 'Simultaneous sharing requires Hosted Network support. This Wi-Fi driver does not report support; Windows Mobile Hotspot is not supported for this mode.'}
+        found = self.network_connections()
+        adapters = found.get('adapters', [])
+        if found.get('error') and not adapters:
+            return {'error': found['error']}
+        if any(a.get('shared') for a in adapters):
+            return {'error': 'Windows ICS is already active. Stop the existing configuration first; it was not changed.'}
+        if use_vpn:
+            pub = self._select_vpn_public_adapter(adapters)
+            if (not pub or not self._is_matching_vpn_adapter(pub)
+                    or not (pub.get('status') == 2 or pub.get('has_vpn_route'))):
+                return {'error': 'The NEON VPN adapter could not be verified; no sharing was started.'}
+        else:
+            choices = [a for a in adapters if a.get('status') == 2 and a.get('has_default_gw')
+                       and (a.get('category') or self._classify_adapter(a)) in ('wifi', 'ethernet')]
+            if len(choices) != 1:
+                return {'error': 'Expected exactly one connected physical internet uplink with a default gateway.'}
+            pub = choices[0]
+        public = pub.get('name')
+        wired = [a for a in adapters if a.get('name') != public and not a.get('has_default_gw')
+                 and (a.get('category') or self._classify_adapter(a)) == 'ethernet']
+        requested = str(ethernet_name or '').strip()
+        if requested:
+            wired = [a for a in wired if a.get('name') == requested]
+        else:
+            wired.sort(key=lambda a: (a.get('status') != 2, a.get('hardware') is not True))
+        if not wired:
+            return {'error': 'A separate physical Ethernet target is required.'}
+        ethernet = wired[0]['name']
+        started = False
+        configured = False
+        try:
+            rc, out, err = self._run_netsh('wlan', 'set', 'hostednetwork', 'mode=allow',
+                                           'ssid=' + ssid, 'key=' + password, 'keyUsage=persistent', timeout=15)
+            if rc:
+                raise RuntimeError(err or out or 'Hosted Network configuration failed.')
+            rc, out, err = self._run_netsh('wlan', 'start', 'hostednetwork', timeout=15)
+            if rc:
+                raise RuntimeError(err or out or 'Hosted Network failed to start.')
+            started = True
+            hotspot = None
+            for _ in range(8):
+                _, hotspot, _ = self._detect_hotspot_and_vpn_adapters()
+                if hotspot:
+                    break
+                time.sleep(1)
+            if not hotspot or hotspot in (public, ethernet):
+                raise RuntimeError('Could not identify a separate hotspot adapter.')
+            self._configure_combined_ics(public, ethernet, hotspot)
+            configured = True
+            self._combined_sharing = {'public': public, 'ethernet': ethernet, 'hotspot': hotspot, 'vpn': use_vpn}
+            self.app_shared_pair = (public, hotspot)
+            self.hotspot_active, self.hotspot_mode = True, 'hostednetwork'
+            self.ethernet_active, self.ethernet_adapter = True, ethernet
+            # If the tunnel exited while the hotspot/ICS were being configured, tear down immediately.
+            if use_vpn and self.vpn_state != 'CONNECTED':
+                stopped = self.stop_combined_sharing()
+                return {'error': 'VPN disconnected during setup. Combined sharing was stopped.' +
+                        (' Cleanup failed: ' + stopped['error'] if stopped.get('error') else '')}
+            self.save_settings({'ethernet_adapter': ethernet, 'hotspot_ssid': ssid})
+            return {'ok': True, 'public_adapter': public, 'ethernet_adapter': ethernet,
+                    'hotspot_adapter': hotspot, 'vpn': use_vpn,
+                    'output': 'ICS configured for Ethernet and hotspot. Verify public IP and DNS on BOTH clients; this is not an OS-level kill switch.'}
+        except Exception as exc:
+            if configured:
+                self.stop_combined_sharing()
+            elif started:
+                try:
+                    rc, out, err = self._run_netsh('wlan', 'stop', 'hostednetwork', timeout=15)
+                    if rc:
+                        return {'error': str(exc) + '; hotspot cleanup failed: ' + (err or out)}
+                except Exception as cleanup:
+                    return {'error': str(exc) + '; hotspot cleanup failed: ' + str(cleanup)}
+            return {'error': str(exc)}
+
+    def stop_combined_sharing(self):
+        session = self._combined_sharing
+        if not session:
+            return {'ok': True, 'output': 'Combined sharing is not active.'}
+        names = [session['public'], session['ethernet'], session['hotspot']]
+        payload = base64.b64encode(json.dumps(names).encode('utf-8')).decode('ascii')
+        script = (
+            f"$n=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}'))|ConvertFrom-Json; "
+            "$m=New-Object -ComObject HNetCfg.HNetShare; $errors=@(); "
+            "foreach($c in $m.EnumEveryConnection){$p=$m.NetConnectionProps.Invoke($c); "
+            "if($p.Name -in $n){$q=$m.INetSharingConfigurationForINetConnection.Invoke($c); "
+            "if($q.SharingEnabled){try{$q.DisableSharing()}catch{$errors+=($_.Exception.Message)}}}}; "
+            "if($errors.Count){throw ($errors -join '; ')}; 'Combined ICS disabled.'"
+        )
+        errors = []
+        try:
+            self._powershell(script, timeout=30)
+        except Exception as exc:
+            errors.append('ICS: ' + str(exc))
+        try:
+            rc, out, err = self._run_netsh('wlan', 'stop', 'hostednetwork', timeout=15)
+            if rc:
+                errors.append('Hotspot: ' + (err or out or 'stop failed'))
+        except Exception as exc:
+            errors.append('Hotspot: ' + str(exc))
+        if errors:
+            return {'error': 'Cleanup incomplete; inspect Windows ICS and hotspot settings: ' + '; '.join(errors)}
+        self._combined_sharing = None
+        self.app_shared_pair = None
+        self.hotspot_active = False
+        self.hotspot_mode = None
+        self.ethernet_active = False
+        self.ethernet_adapter = None
+        return {'ok': True, 'output': 'Combined Ethernet and hotspot sharing stopped.'}
+
+    def start_direct_ethernet(self, ethernet_name=None):
+        """Share a physical uplink over Ethernet, explicitly without NEON VPN."""
+        if platform.system() != 'Windows':
+            return {'error': 'Ethernet ICS sharing is Windows-only.'}
+        if self.vpn_state != 'DISCONNECTED':
+            return {'error': 'Disconnect Conf / OpenVPN before starting direct Ethernet sharing.'}
+        if self.hotspot_active or self.ethernet_active or self.app_shared_pair:
+            return {'error': 'Stop the existing NEON sharing session before starting direct Ethernet sharing.'}
+        found = self.network_connections()
+        adapters = found.get('adapters', [])
+        if found.get('error') and not adapters:
+            return {'error': found['error']}
+        uplinks = [a for a in adapters if a.get('has_default_gw') and a.get('status') == 2
+                   and (a.get('category') or self._classify_adapter(a)) in ('wifi', 'ethernet')]
+        if len(uplinks) != 1:
+            return {'error': 'Expected one connected Wi-Fi or Ethernet internet uplink with a default gateway. Check adapters and disconnect extra uplinks.'}
+        public = uplinks[0]['name']
+        wired = [a for a in adapters if a.get('name') != public and not a.get('has_default_gw')
+                 and (a.get('category') or self._classify_adapter(a)) == 'ethernet']
+        requested = str(ethernet_name or '').strip()
+        if requested:
+            wired = [a for a in wired if a.get('name') == requested]
+        else:
+            wired.sort(key=lambda a: (a.get('status') != 2, a.get('hardware') is not True))
+        if not wired:
+            return {'error': 'No separate physical Ethernet target found. Do not select the internet uplink.'}
+        private = wired[0]['name']
+        if any(a.get('shared') for a in adapters):
+            return {'error': 'Windows ICS is already active. Stop the existing sharing configuration first; it was not changed.'}
+        sharing = self.set_sharing(public, private)
+        if sharing.get('error'):
+            if self._uplink_dns_backups:
+                self._restore_uplink_dns_backups()
+            return {'error': 'Direct Ethernet sharing failed: ' + sharing['error']}
+        self.ethernet_active = True
+        self.ethernet_adapter = private
+        self.save_settings({'ethernet_adapter': private})
+        return {'ok': True, 'ethernet_adapter': private, 'public_adapter': public,
+                'output': 'Direct internet sharing: ' + public + ' -> ' + private +
+                          '. No NEON VPN is used. Set the client to DHCP and verify its public IP and DNS. Other VPN software may affect routing.'}
+
     def stop_vpn_ethernet(self):
+        if self._combined_sharing:
+            return self.stop_combined_sharing()
         messages = []
         errors = []
         target = self.ethernet_adapter
@@ -2615,6 +2815,8 @@ class Api:
             return {'error': str(exc)}
 
     def stop_vpn_hotspot(self):
+        if self._combined_sharing:
+            return self.stop_combined_sharing()
         messages = []
         errors = []
         if self.app_shared_pair:
@@ -3314,9 +3516,9 @@ class Api:
                         )
                         lines.append(f'[+] Samsung certificate saved: {bundle["source"]}')
 
-                # Return to the pre-proxy Belet package: older Samsung firmware opens its
-                # TV browser to the Belet site directly instead of navigating to localhost.
-                enable_service = False
+                # Prefer the fullscreen in-app proxy. If the TV rejects the service
+                # manifest, retry with the service-free in-app WebView package.
+                enable_service = True
                 remote_wgt = f'{sdk_toolpath}/{BELET_PKG_ID}.wgt'
 
                 def _build_sign_push(use_service, active_bundle):

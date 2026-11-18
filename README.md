@@ -48,6 +48,10 @@ NEON runs `openvpn.exe` as a hidden background process and displays its live log
 3. Enter the hotspot SSID and password, then press **Start VPN Hotspot**. NEON automatically selects Hosted Network (Win 8.1) or Mobile Hotspot (Win 10/11), detects the connected VPN and hotspot virtual adapters, and configures ICS routing.
 4. If adapter detection fails, use **Refresh Adapters**, choose the VPN/public and hotspot/private adapters manually, and click **Route VPN → Hotspot**. Always test a client's public IP/DNS to confirm VPN egress.
 
+For ordinary internet over Ethernet without NEON VPN, disconnect Conf and choose **Share internet without VPN** (WebView: **Share without Conf**). The computer needs one connected physical Wi-Fi/Ethernet internet uplink and a separate Ethernet port for the client; set the client to DHCP. NEON refuses to replace an existing ICS session in this mode. Other VPN software can affect routing; verify the client's public IP and DNS. This mode is not VPN protected.
+
+For simultaneous Ethernet and Wi-Fi, use **Ethernet + hotspot via VPN** or **Ethernet + hotspot without VPN**. This experimental mode requires a Wi-Fi driver reporting Hosted Network support; it does not use Windows Mobile Hotspot. It attempts to configure Windows ICS with both private adapters and verifies the reported configuration. Some Windows versions, drivers, VPN adapters, or bridge configurations may reject this setup. Stop existing sharing first. Stopping either output stops both. Test internet, public IP and DNS separately on both clients; changing DNS may require stopping and restarting combined sharing. This mode has not been verified on physical Windows hardware.
+
 NEON stops the hosted network/mobile hotspot and its own ICS route on normal exit, disconnect, or unexpected tunnel exit. **This is not a guaranteed OS-level kill switch:** a system crash, forced kill, or driver/provider change can still bypass routing. Test with a non-sensitive device first.
 
 ## TV regions

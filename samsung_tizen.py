@@ -3653,8 +3653,6 @@ def build_belet_wgt(
     tv_ip=None,
 ):
     """Build an unsigned Tizen .wgt package rendering Belet in a fullscreen WebView with TV D-pad navigation."""
-    if not enable_service:
-        return _build_legacy_belet_wgt(target_url, pkg_id, app_name, icon_bytes)
     if not re.fullmatch(r'[A-Za-z0-9]{10}', str(pkg_id)):
         raise ValueError(f'Tizen package ID must be exactly 10 alphanumeric chars, got {pkg_id!r}')
 
@@ -3697,7 +3695,7 @@ def build_belet_wgt(
     config_xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" '
-        'id="https://belet.tm/tizen" version="1.2.7" viewmodes="maximized">\n'
+        'id="https://belet.tm/tizen" version="1.2.9" viewmodes="maximized">\n'
         f'    <tizen:application id="{safe_app_id}" package="{pkg_id}" required_version="{req_ver}"/>\n'
         '    <content src="index.html"/>\n'
         '    <feature name="http://tizen.org/feature/screen.size.all"/>\n'
@@ -3772,7 +3770,7 @@ def build_belet_wgt(
         '<div id="spinner" class="spin"></div>\n'
         '<div id="errBox">\n'
         '<button id="btnRetry" class="btn is-focus" type="button">Повторить / Retry</button>\n'
-        '<button id="btnDirect" class="btn" type="button">Открыть напрямую / Direct</button>\n'
+        '<button id="btnDirect" class="btn" type="button">Выход / Exit</button>\n'
         '</div>\n'
         '</div>\n'
         '</div>\n'
@@ -4026,10 +4024,6 @@ def build_belet_wgt(
         '  try{frameEl.focus();}catch(e){}\n'
         '  try{if(frameEl.contentWindow)frameEl.contentWindow.focus();}catch(e){}\n'
         '}\n'
-        'function openDirectTopLevel(u){\n'
-        '  var dest=u||lastTier2Url||TARGET;\n'
-        '  try{window.location.replace(dest);}catch(e){window.location.href=dest;}\n'
-        '}\n'
         'function formatBootDiag(){\n'
         '  return svcTimeoutDiag?(bootDiag+" / "+svcTimeoutDiag):bootDiag;\n'
         '}\n'
@@ -4041,15 +4035,15 @@ def build_belet_wgt(
         '      var _d=frameEl.contentDocument||(frameEl.contentWindow&&frameEl.contentWindow.document);\n'
         '      var _loc="";\n'
         '      try{_loc=String(frameEl.contentWindow&&frameEl.contentWindow.location&&frameEl.contentWindow.location.href||"");}catch(e2){}\n'
-        '      if(!_d){frameNavReady=false;bootDiag="tier2_cross_origin";showErrorUi("Страница Belet перенаправлена ("+formatBootDiag()+"). Нажмите Повторить или Открыть напрямую.");return;}\n'
-        '      if(_loc.indexOf("chrome-error:")===0){frameNavReady=false;bootDiag="tier2_blocked_frame";showErrorUi("Встроенный фрейм заблокирован ("+formatBootDiag()+"). Нажмите Повторить или Открыть напрямую.");return;}\n'
-        '    }catch(e){frameNavReady=false;bootDiag="tier2_cross_origin";showErrorUi("Страница Belet перенаправлена ("+formatBootDiag()+"). Нажмите Повторить или Открыть напрямую.");return;}\n'
+        '      if(!_d){frameNavReady=false;bootDiag="tier2_cross_origin";showErrorUi("Страница Belet перенаправлена ("+formatBootDiag()+"). Нажмите Повторить или Выход.");return;}\n'
+        '      if(_loc.indexOf("chrome-error:")===0){frameNavReady=false;bootDiag="tier2_blocked_frame";showErrorUi("Встроенный фрейм заблокирован ("+formatBootDiag()+"). Нажмите Повторить или Выход.");return;}\n'
+        '    }catch(e){frameNavReady=false;bootDiag="tier2_cross_origin";showErrorUi("Страница Belet перенаправлена ("+formatBootDiag()+"). Нажмите Повторить или Выход.");return;}\n'
         '  }\n'
         '  try{if(frameEl&&frameEl.contentWindow)frameEl.contentWindow.postMessage({type:"neon-ping"},"*");}catch(e){}\n'
         '  navPingTimer=setTimeout(function(){\n'
         '    if(!navAck){\n'
         '      frameNavReady=false;\n'
-        '      if(usingTier2){bootDiag="tier2_no_nav";showErrorUi("Нет ответа от навигации Belet ("+formatBootDiag()+"). Нажмите Повторить или Открыть напрямую.");return;}\n'
+        '      if(usingTier2){bootDiag="tier2_no_nav";showErrorUi("Нет ответа от навигации Belet ("+formatBootDiag()+"). Нажмите Повторить или Выход.");return;}\n'
         '      if(!everHadNav){bootDiag="proxy_no_nav";svcTimeoutDiag=bootDiag;loadViaWebViewFetch(TARGET);}\n'
         '      else if(activeProxyBase&&proxyRecoverTries<2){proxyRecoverTries++;frameEl.src=activeProxyBase+TARGET_PATH;}\n'
         '    }\n'
@@ -4389,7 +4383,7 @@ def build_belet_wgt(
         '    else if(code===39||code===40){ev.preventDefault();setErrFocus(errFocusIdx+1);}\n'
         '    else if(code===13||keyStr==="Enter"){\n'
         '      ev.preventDefault();\n'
-        '      if(errFocusIdx===0)startBoot();else openDirectTopLevel(lastTier2Url||TARGET);\n'
+        '      if(errFocusIdx===0)startBoot();else exitApp();\n'
         '    }\n'
         '  }\n'
         '},true);\n'
@@ -4400,7 +4394,7 @@ def build_belet_wgt(
         '  }\n'
         '});\n'
         'if(btnRetry)btnRetry.onclick=function(){startBoot();};\n'
-        'if(btnDirect)btnDirect.onclick=function(){openDirectTopLevel(lastTier2Url||TARGET);};\n'
+        'if(btnDirect)btnDirect.onclick=function(){exitApp();};\n'
         'registerRemoteKeys();\n'
         'startBoot();\n'
         '})();\n'

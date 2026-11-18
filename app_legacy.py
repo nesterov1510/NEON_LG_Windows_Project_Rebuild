@@ -1229,6 +1229,11 @@ class NeonWindow(QMainWindow):
         eth_btn_row.addWidget(self.btn_eth_start, 2)
         eth_btn_row.addWidget(self.btn_eth_stop, 1)
         l_eth.addLayout(eth_btn_row)
+        self.btn_eth_direct = QPushButton()
+        self.btn_eth_direct.setObjectName('NormalBtn')
+        self.btn_eth_direct.setCursor(Qt.PointingHandCursor)
+        self.btn_eth_direct.clicked.connect(self.start_direct_ethernet_share)
+        l_eth.addWidget(self.btn_eth_direct)
         left.addWidget(c_eth)
 
         # Card 4: Hotspot
@@ -1276,6 +1281,14 @@ class NeonWindow(QMainWindow):
         hb_row.addWidget(self.btn_hs_start, 2)
         hb_row.addWidget(self.btn_hs_stop, 1)
         l2.addLayout(hb_row)
+        self.btn_combined_vpn = QPushButton()
+        self.btn_combined_vpn.setObjectName('NormalBtn')
+        self.btn_combined_vpn.clicked.connect(lambda: self.start_combined_share(True))
+        l2.addWidget(self.btn_combined_vpn)
+        self.btn_combined_direct = QPushButton()
+        self.btn_combined_direct.setObjectName('NormalBtn')
+        self.btn_combined_direct.clicked.connect(lambda: self.start_combined_share(False))
+        l2.addWidget(self.btn_combined_direct)
 
         self.btn_hs_win = QPushButton()
         self.btn_hs_win.setObjectName('GhostBtn')
@@ -1603,6 +1616,7 @@ class NeonWindow(QMainWindow):
         self.lbl_eth_iface.setText(self.t('lbl_eth_iface'))
         self.eth_auto_hint.setText(self.t('eth_auto_hint'))
         self.btn_eth_start.setText(self.t('btn_eth_start'))
+        self.btn_eth_direct.setText('Share internet without VPN' if self.lang == 'en' else 'Раздать интернет без VPN')
         self.btn_eth_stop.setText(self.t('btn_eth_stop'))
         if self.eth_combo.count() > 0 and self.eth_combo.itemData(0) == '':
             self.eth_combo.setItemText(0, 'Автовыбор (физический Ethernet)' if self.lang == 'ru' else 'Auto (Physical Ethernet)')
@@ -1613,6 +1627,8 @@ class NeonWindow(QMainWindow):
         self.lbl_hs_pass.setText(self.t('lbl_hs_pass'))
         self.hs_pass.setPlaceholderText(self.t('ph_hs_pass'))
         self.btn_hs_start.setText(self.t('btn_hs_start'))
+        self.btn_combined_vpn.setText('Ethernet + hotspot via VPN' if self.lang == 'en' else 'Ethernet + точка через VPN')
+        self.btn_combined_direct.setText('Ethernet + hotspot without VPN' if self.lang == 'en' else 'Ethernet + точка без VPN')
         self.btn_hs_stop.setText(self.t('btn_hs_stop'))
         self.btn_hs_win.setText(self.t('btn_hs_win'))
 
@@ -3038,16 +3054,63 @@ class NeonWindow(QMainWindow):
 
         self._run_async('net', lambda: self.api.start_vpn_ethernet(eth_name or None), done)
 
+    def start_direct_ethernet_share(self):
+        if not self._collect_and_validate_dns(persist=True):
+            return
+        eth_name = self.eth_combo.currentData() or ''
+        body = ('Share the regular internet connection over Ethernet without NEON VPN? '
+                'Traffic is not protected by NEON VPN. Stop other sharing first. '
+                'Other VPN software may affect routing.' if self.lang == 'en' else
+                'Раздать обычный интернет по Ethernet без VPN NEON? '
+                'Трафик не защищён VPN NEON. Сначала остановите другую раздачу. '
+                'Другие VPN могут влиять на маршрутизацию.')
+        dlg = ConfirmDialog(self, 'Direct Ethernet' if self.lang == 'en' else 'Ethernet без VPN',
+                            body, self.t('confirm_ok'), self.t('confirm_cancel'))
+        if dlg.exec_() != ConfirmDialog.Accepted:
+            return
+        self.log('$ enable direct Ethernet ICS (no NEON VPN)')
+        def done(r):
+            if r.get('ok'):
+                self._update_sam_host_ip_label()
+                self.toast.show_toast('Ethernet: no NEON VPN' if self.lang == 'en' else 'Ethernet: без VPN NEON', 'info')
+            elif r.get('error'):
+                self.refresh_adapters()
+        self._run_async('net', lambda: self.api.start_direct_ethernet(eth_name or None), done)
+
     def stop_ethernet_share(self):
         self.log('$ stop Ethernet Conf ICS sharing')
         self._run_async(
             'net',
             self.api.stop_vpn_ethernet,
-            lambda _r: self.toast.show_toast(
-                'Ethernet sharing stopped.' if self.lang == 'en' else 'Раздача по Ethernet остановлена.',
-                'info',
+            lambda r: self.toast.show_toast(
+                ('Stop failed: ' + r['error']) if r.get('error') else
+                ('Ethernet stopped (combined mode stops both outputs).' if self.lang == 'en' else 'Ethernet остановлен (в совместном режиме — оба выхода).'),
+                'warn' if r.get('error') else 'info',
             ),
         )
+
+    def start_combined_share(self, use_vpn):
+        if not self._collect_and_validate_dns(persist=True):
+            return
+        ssid, password = self.hs_ssid.text().strip(), self.hs_pass.text()
+        eth = self.eth_combo.currentData() or None
+        body = ('Share over Ethernet and Wi-Fi together? Requires Hosted Network support. '
+                + ('Traffic should use NEON VPN; verify IP and DNS on BOTH devices. This is not a guaranteed kill switch.'
+                   if use_vpn else 'Traffic is NOT protected by NEON VPN. Other VPN software may affect routing.')
+                if self.lang == 'en' else
+                'Раздать интернет одновременно по Ethernet и Wi-Fi? Требуется поддержка Hosted Network. '
+                + ('Трафик должен идти через VPN NEON: проверьте IP и DNS на ОБОИХ устройствах. Это не гарантированный kill switch.'
+                   if use_vpn else 'Трафик НЕ защищён VPN NEON. Другие VPN могут влиять на маршрутизацию.'))
+        dlg = ConfirmDialog(self, 'Ethernet + Wi-Fi', body, self.t('confirm_ok'), self.t('confirm_cancel'))
+        if dlg.exec_() != ConfirmDialog.Accepted:
+            return
+        self.log('$ start combined Ethernet + hotspot (' + ('Conf' if use_vpn else 'direct') + ')')
+        def done(result):
+            if result.get('ok'):
+                self.toast.show_toast('Ethernet + Wi-Fi: check both clients' if self.lang == 'en' else 'Ethernet + Wi-Fi: проверьте оба устройства', 'info')
+            else:
+                self.refresh_adapters()
+        self._run_async('net', lambda: self.api.start_combined_sharing(ssid, password, eth, use_vpn), done)
 
     def start_hotspot(self):
         if not self._collect_and_validate_dns(persist=True):
@@ -3087,7 +3150,7 @@ class NeonWindow(QMainWindow):
         self._run_async(
             'net',
             self.api.stop_vpn_hotspot,
-            lambda _r: self.toast.show_toast('Hotspot stopped.', 'info'),
+            lambda r: self.toast.show_toast(('Stop failed: ' + r['error']) if r.get('error') else ('Hotspot stopped (combined mode stops both outputs).' if self.lang == 'en' else 'Точка остановлена (в совместном режиме — оба выхода).'), 'warn' if r.get('error') else 'info'),
         )
 
     def open_hotspot_settings(self):
