@@ -30,7 +30,9 @@ class LGRemote:
         client = WebOSClient(self.host)
         self.client = client
         try:
+            client.sock.settimeout(10)
             client.connect()
+            client.sock.settimeout(None)
             payload = copy.deepcopy(REGISTRATION_PAYLOAD)
             if client_key:
                 payload['client-key'] = client_key
@@ -58,8 +60,10 @@ class LGRemote:
             if parsed.scheme not in ('ws', 'wss') or parsed.hostname != self.host.lower() or parsed.username or parsed.password:
                 raise RuntimeError('LG TV returned an invalid remote input address.')
             inp.mouse_ws = inp.ws_class(path)
-            inp.mouse_ws.connect()
             self.input = inp
+            inp.mouse_ws.sock.settimeout(10)
+            inp.mouse_ws.connect()
+            inp.mouse_ws.sock.settimeout(None)
             return str(new_key)
         except Exception:
             self.close()

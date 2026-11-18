@@ -6,10 +6,15 @@ from lg_remote import LGRemote
 from core import Api
 
 
+class FakeSocket:
+    def settimeout(self, value): pass
+
+
 class FakeClient:
     messages = []
     def __init__(self, host):
         self.host, self.closed = host, False
+        self.sock = FakeSocket()
     def connect(self):
         pass
     def close(self):
@@ -26,6 +31,7 @@ class FakeInput:
     path = 'ws://192.168.1.5:3000/input'
     def __init__(self, client):
         self.sent = []
+        self.sock = FakeSocket()
         self.ws_class = lambda path: self
     def request(self, *args, **kwargs):
         return {'payload': {'socketPath': self.path}}
