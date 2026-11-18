@@ -2074,7 +2074,7 @@ def test_belet_wgt_service_manifest_es5_and_fallback(tmp_path):
         proxy_js = zf.read('service/proxy.js').decode('utf-8')
 
     root = ET.fromstring(cfg)
-    assert root.attrib.get('version') == '1.2.7'
+    assert root.attrib.get('version') == '1.2.9'
     assert 'required_version="3.0"' in cfg
     assert 'http://tizen.org/feature/web.service' in cfg
     assert '<tizen:service id="BeletTV001.BeletProxy" auto-restart="true">' in cfg
@@ -2112,12 +2112,14 @@ def test_belet_wgt_service_manifest_es5_and_fallback(tmp_path):
         assert {'config.xml', 'index.html', 'icon.png'}.issubset(nosvc_names)
         nosvc_cfg = zf.read('config.xml').decode('utf-8')
         nosvc_html = zf.read('index.html').decode('utf-8')
-        assert 'version="1.2.8"' in nosvc_cfg
+        assert 'version="1.2.9"' in nosvc_cfg
         assert 'required_version="2.3"' in nosvc_cfg
         assert '<tizen:service' not in nosvc_cfg
         assert 'https://belet.tm/ru' in nosvc_html
-        assert 'http://127.0.0.1:18765' not in nosvc_html
-        assert 'btnBrowser' in nosvc_html
+        assert 'var ENABLE_SVC=false;' in nosvc_html
+        assert '<iframe id="beletFrame"' in nosvc_html
+        assert 'btnBrowser' not in nosvc_html
+        assert 'Открыть напрямую' not in nosvc_html
 
     # Self-contained service/proxy.js must not rely on __dirname or relative require() (breaks Tizen 10 vm.runInThisContext)
     assert '__dirname' not in proxy_js
@@ -3044,7 +3046,7 @@ assert.strictEqual(t2.els.errBox.style.display, 'block');
 assert(t2.els.status.textContent.includes('tier2_cross_origin'));
 assert(t2.els.status.textContent.includes('cap_false'));
 t2.els.btnDirect.onclick();
-assert.strictEqual(t2.getReplacedTopUrl(), 'https://belet.tm/ru');
+assert.strictEqual(t2.getReplacedTopUrl(), '');
 """,
         encoding='utf-8',
     )
@@ -3483,7 +3485,8 @@ assert.strictEqual(doc.getElementById('neon-tv-cursor').style.display, 'none');
 
 
 
-def test_install_samsung_belet_uses_direct_browser_wgt(tmp_api, tmp_path, monkeypatch):
+@pytest.mark.parametrize("reject_service", [False, True])
+def test_install_samsung_belet_uses_fullscreen_wgt(tmp_api, tmp_path, monkeypatch, reject_service):
     import datetime
     import io
     import zipfile
@@ -3543,6 +3546,8 @@ def test_install_samsung_belet_uses_direct_browser_wgt(tmp_api, tmp_path, monkey
 
         def install_wgt(self, pkg_id, remote, timeout=120.0):
             install_attempts.append(pkg_id)
+            if reject_service and len(install_attempts) == 1:
+                return 'install failed [118, -19]'
             return 'installing[100]\ninstall completed\n'
 
         def list_apps(self):
@@ -3566,14 +3571,16 @@ def test_install_samsung_belet_uses_direct_browser_wgt(tmp_api, tmp_path, monkey
 
     res = tmp_api.install_samsung_belet('192.168.1.55')
     assert res['ok'] is True
-    assert len(pushed_wgts) == 1
-    assert len(install_attempts) == 1
-
-    with zipfile.ZipFile(io.BytesIO(pushed_wgts[0]), 'r') as z1:
-        assert 'service/proxy.js' not in z1.namelist()
+    assert len(pushed_wgts) == (2 if reject_service else 1)
+    assert len(install_attempts) == len(pushed_wgts)
+    with zipfile.ZipFile(io.BytesIO(pushed_wgts[0]), 'r') as first:
+        assert 'service/proxy.js' in first.namelist()
+    with zipfile.ZipFile(io.BytesIO(pushed_wgts[-1]), 'r') as z1:
+        assert ('service/proxy.js' in z1.namelist()) is not reject_service
         html = z1.read('index.html').decode('utf-8')
         assert 'https://belet.tm/' in html
-        assert '127.0.0.1:18765' not in html
+        assert '<iframe id="beletFrame"' in html
+        assert 'btnBrowser' not in html
 
 
 def test_belet_nav_js_player_seek_and_controls(tmp_path):

@@ -317,6 +317,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
   var contentStartMs = 0; // server time (ms) the current stream corresponds to
   var pausedAtMs = 0;
   var epgDayOffset = 0; // EPG modal day shift vs server today
+  var epgRequestId = 0;
   var osdTimer = null;
   var osdHidden = true; // OSD visibility for overlay logic (panel vs none)
   var digitBuffer = "";
@@ -349,33 +350,45 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     return s.length < 2 ? "0" + s : s;
   }
 
-  // Crypto: safe modPow without BigInt literals (supports Chromium 47+ without SyntaxError)
-  function modPowSafe(b, e, m) {
-    if (typeof BigInt === "function") {
-      try {
-        var r = BigInt(1);
-        b = BigInt(b) % BigInt(m);
-        e = BigInt(e);
-        m = BigInt(m);
-        var zero = BigInt(0);
-        var one = BigInt(1);
-        var two = BigInt(2);
-        while (e > zero) {
-          if (e % two === one) r = (r * b) % m;
-          e = e / two;
-          b = (b * b) % m;
-        }
-        return r;
-      } catch(x){}
+  // RSA-1024 exponent 65537. Byte arithmetic provides a fallback for older
+  // TV web engines without BigInt; all values are big-endian and < modulus.
+  function rsaModAdd(a, b, modulus) {
+    var out = new Uint8Array(modulus.length);
+    var carry = 0, i;
+    for (i = out.length - 1; i >= 0; i--) {
+      var sum = a[i] + b[i] + carry;
+      out[i] = sum & 255;
+      carry = sum >> 8;
     }
-    return null;
+    var ge = !!carry;
+    if (!ge) {
+      for (i = 0; i < out.length; i++) {
+        if (out[i] !== modulus[i]) { ge = out[i] > modulus[i]; break; }
+      }
+      if (i === out.length) ge = true;
+    }
+    if (ge) {
+      var borrow = 0;
+      for (i = out.length - 1; i >= 0; i--) {
+        var diff = out[i] - modulus[i] - borrow;
+        out[i] = diff & 255;
+        borrow = diff < 0 ? 1 : 0;
+      }
+    }
+    return out;
   }
-
+  function rsaModMultiply(a, b, modulus) {
+    var result = new Uint8Array(modulus.length);
+    for (var i = 0; i < b.length; i++) {
+      for (var bit = 7; bit >= 0; bit--) {
+        result = rsaModAdd(result, result, modulus);
+        if ((b[i] >> bit) & 1) result = rsaModAdd(result, a, modulus);
+      }
+    }
+    return result;
+  }
   function rsaEncrypt(blockBytes) {
-    if (typeof BigInt !== "function") return "";
-    var N = BigInt("0x" + RSA_N_HEX);
-    var E = BigInt(65537);
-    var k = 128; // 1024 bit = 128 bytes
+    var k = 128;
     if (blockBytes.length > k - 11) return "";
     var em = new Uint8Array(k);
     em[0] = 0x00; em[1] = 0x02;
@@ -387,15 +400,24 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     }
     em[2 + psLen] = 0x00;
     em.set(blockBytes, 3 + psLen);
-
-    var m = BigInt(0);
-    for (var j = 0; j < k; j++) m = (m * BigInt(256)) + BigInt(em[j]);
-    var c = modPowSafe(m, E, N);
-    if (c === null) return "";
-    var hex = c.toString(16);
-    while (hex.length < k * 2) hex = "0" + hex;
-    var res = new Uint8Array(k);
-    for (var h = 0; h < k; h++) res[h] = parseInt(hex.substr(h * 2, 2), 16);
+    var res;
+    if (typeof BigInt === "function") {
+      var n = BigInt("0x" + RSA_N_HEX), m = BigInt(0);
+      for (var j = 0; j < k; j++) m = m * BigInt(256) + BigInt(em[j]);
+      var c = m;
+      for (var sq = 0; sq < 16; sq++) c = c * c % n;
+      c = c * m % n;
+      var hex = c.toString(16);
+      while (hex.length < k * 2) hex = "0" + hex;
+      res = new Uint8Array(k);
+      for (var h = 0; h < k; h++) res[h] = parseInt(hex.substr(h * 2, 2), 16);
+    } else {
+      var modulus = new Uint8Array(k);
+      for (var x = 0; x < k; x++) modulus[x] = parseInt(RSA_N_HEX.substr(x * 2, 2), 16);
+      res = em;
+      for (var s = 0; s < 16; s++) res = rsaModMultiply(res, res, modulus);
+      res = rsaModMultiply(res, em, modulus);
+    }
     var bin = "";
     for (var b = 0; b < res.length; b++) bin += String.fromCharCode(res[b]);
     return btoa(bin);
@@ -632,8 +654,8 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
   }
   function friendlyLoginError(err) {
     if (!err) return "Неверные данные или доступ запрещён.";
-    if (err.code === -32003) return "Доступ запрещён: неверный логин или пароль.";
-    if (err.code === -32002) return "Терминал не найден на сервере. Проверьте логин/пароль или выберите другой сервер.";
+    if (err.code === -32003) return "Доступ запрещён (код -32003). Проверьте данные договора и состояние подписки.";
+    if (err.code === -32002) return "Терминал или абонент не найден (код -32002). Проверьте сервер оператора и данные договора; при повторении обратитесь к оператору.";
     if (err.message && err.message.indexOf("HTTP ") === 0) {
       return "Сервер не найден (" + err.message + "). Проверьте адрес портала и сеть.";
     }
@@ -831,7 +853,8 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     if (!authData.timeshiftEnabled) return false;
     var depth = ch.timeshift_archive_length || 0;
     if (!depth) return false;
-    return progStartMs >= (nowMs || getServerNow()) - depth * 1000;
+    var now = nowMs || getServerNow();
+    return progStartMs >= now - depth * 1000 && progStartMs < now;
   }
   window.parseCsvTable = parseCsvTable;
   window.portalDayString = portalDayString;
@@ -914,7 +937,9 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
       var tsBase = timeshiftBase(channel);
       if (!tsBase) return liveBase(channel);
       var startSec = Math.floor(((extra && extra.start) || getServerNow()) / 1000) - (channel.timeshift_offset || 0);
-      var durSec = Math.max(0, Math.floor(((extra && extra.duration) || 3600) / 1000));
+      var durationMs = extra && typeof extra.duration === "number" ? extra.duration :
+        (extra && typeof extra.stop === "number" && typeof extra.start === "number" ? extra.stop - extra.start : 3600000);
+      var durSec = Math.max(0, Math.floor(durationMs / 1000));
       base = tsBase + "/index-" + startSec + "-" + durSec + ".m3u8";
     } else if (mode === "timeshift") {
       var tsBaseRel = timeshiftBase(channel);
@@ -1033,7 +1058,6 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
           }
           if (isRequiresSignIn(lErr) || lRes === false) {
             if (bootWatchdog) { clearTimeout(bootWatchdog); bootWatchdog = null; }
-            if (isTerminalNotFound(lErr)) clearTerminalBinding();
             showBootError("Терминал не зарегистрирован на сервере " + currentPortal.replace(/^https?:\/\//, "") + ". Введите логин и пароль абонента для активации или выберите открытый сервер.");
             showLoginModal();
           } else {
@@ -1065,7 +1089,6 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
             return;
           }
           if (isRequiresSignIn(aErr)) {
-            if (isTerminalNotFound(aErr)) clearTerminalBinding();
             sessionId = null;
             localStorage.removeItem("alem_sid");
             if (bootWatchdog) { clearTimeout(bootWatchdog); bootWatchdog = null; }
@@ -1530,6 +1553,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     if (!res) return out;
     var rows = [];
     if (Array.isArray(res)) rows = parseCsvTable(res);
+    else if (Array.isArray(res.programs)) rows = parseCsvTable(res.programs);
     else if (typeof res === "string") {
       // Plain CSV dump fallback: media_id,title,start,stop,...
       res.split("\n").forEach(function(l){
@@ -1537,7 +1561,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
         if (p.length >= 3) rows.push({ media_id: p[0], title: p[1], start: p[2], stop: p[3] });
       });
     } else if (Array.isArray(res.media)) {
-      rows = parseCsvTable([Object.keys(res.media[0] || {}), res.media[0]].concat(res.media));
+      rows = res.media;
     }
     rows.forEach(function(r){
       var prog = programFromRow(r, mediaId);
@@ -1553,53 +1577,30 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     var today = portalDayString(nowMs);
     var yesterday = portalDayString(nowMs - 86400000);
 
-    // Day schedules for all channels in chunks of 50 (EPGStore.chunkSize).
-    var done = { count: 0 };
-    var chunkSize = 50;
-    function finishChunk(err) {
-      done.count++;
-      if (done.count === Math.ceil(ids.length / chunkSize)) {
-        renderChannels();
-        scheduleEpgRefresh(nowMs);
-      }
-    }
-    for (var start = 0; start < ids.length; start += chunkSize) {
-      (function(chunk) {
-        jsonRpc("get_epg", { version: 2, result_as: "csv", media_id: chunk, start: today + " 00:00:00", stop: today + " 23:59:59" }, false, function(err, res){
-          if (!err && res) {
-            parseCsvTable(Array.isArray(res) ? res : []).forEach(function(row){
-              var prog = programFromRow(row);
-              if (prog && prog.start <= nowMs && nowMs < prog.stop) {
-                epgNow[prog.media_id] = { title: prog.title, start: prog.start, stop: prog.stop, description: prog.description };
-              }
-            });
-          }
-          finishChunk(err);
-        });
-      })(ids.slice(start, start + chunkSize));
-    }
-
-    // Channels with no program in today's bulk response: try the bulk "now"
-    // query shape, then yesterday for overnight programs (EPGStore.lookup).
-    var missing = ids.filter(function(id){ return !epgNow[id]; });
-    if (missing.length > 0) {
-      jsonRpc("get_epg", { version: 2, result_as: "csv", media_id: missing }, false, function(err, res){
-        if (!err && res) {
-          var table = Array.isArray(res) ? res : null;
-          if (table) {
-            parseCsvTable(table).forEach(function(row){
-              var prog = programFromRow(row);
-              if (prog && prog.start <= nowMs && nowMs < prog.stop) {
-                epgNow[prog.media_id] = { title: prog.title, start: prog.start, stop: prog.stop, description: prog.description };
-              }
-            });
-          }
+    // Wait for all day requests before determining missing channels. Responses
+    // are objects with a programs CSV table (not the table itself).
+    epgNow = {};
+    var done = 0;
+    var total = Math.ceil(ids.length / 50);
+    function applyPrograms(res) {
+      programsFromResp(res).forEach(function(prog) {
+        if (prog.media_id && prog.start <= nowMs && nowMs < prog.stop) {
+          epgNow[prog.media_id] = { title: prog.title, start: prog.start, stop: prog.stop, description: prog.description };
         }
-        missing = missing.filter(function(id){ return !epgNow[id]; });
-        if (missing.length > 0) fetchEpgDay(missing, yesterday, nowMs);
       });
-    } else {
-      scheduleEpgRefresh(nowMs);
+    }
+    for (var start = 0; start < ids.length; start += 50) {
+      (function(chunk) {
+        jsonRpc("get_epg", { version: 2, result_as: "csv", media_id: chunk, start: today + " 00:00:00", stop: today + " 23:59:59" }, false, function(err, res) {
+          if (!err && res) applyPrograms(res);
+          done++;
+          if (done !== total) return;
+          var missing = ids.filter(function(id) { return !epgNow[id]; });
+          renderChannels();
+          if (missing.length) fetchEpgDay(missing, yesterday, nowMs);
+          scheduleEpgRefresh(nowMs);
+        });
+      })(ids.slice(start, start + 50));
     }
   }
 
@@ -1621,9 +1622,8 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     for (var start = 0; start < ids.length; start += chunkSize) {
       (function(chunk) {
         jsonRpc("get_epg", { version: 2, result_as: "csv", media_id: chunk, start: day + " 00:00:00", stop: day + " 23:59:59" }, false, function(err, res){
-          if (!err && res && Array.isArray(res)) {
-            parseCsvTable(res).forEach(function(row){
-              var prog = programFromRow(row);
+          if (!err && res) {
+            programsFromResp(res).forEach(function(prog){
               if (prog && prog.start <= nowMs && nowMs < prog.stop) {
                 epgNow[prog.media_id] = { title: prog.title, start: prog.start, stop: prog.stop, description: prog.description };
               }
@@ -1647,7 +1647,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
         if (d > 5 && d < 60) delays.push(d * 1000);
       }
     });
-    var next = Math.min(Math.max.apply(null, delays));
+    var next = Math.min.apply(null, delays);
     updateInterval = setInterval(loadEpgNow, next);
   }
 
@@ -1792,7 +1792,9 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     if (progEl) progEl.textContent = (epgNow[channel.id] && epgNow[channel.id].title) || "Прямой эфир";
 
     loadStream("live");
+    currentFocusIndex = 0;
     showOsd();
+    updateFocus();
   }
   window.playChannel = playChannel;
 
@@ -1801,12 +1803,17 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
   window.playArchiveProgram = function(program) {
     if (!currentPlayingChannel) return;
     if (!program || !program.start || !program.stop) return;
-    archiveProgram = { start: program.start, stop: program.stop, title: program.title };
-    playerMode = "archive";
-    timeshiftBehind = 0;
+    var nowMs = getServerNow();
+    if (!isInArchive(currentPlayingChannel, program.start, nowMs) || program.stop <= program.start) return;
+    var start = Math.floor(program.start / 60000) * 60000;
+    var stop = Math.floor(program.stop / 60000) * 60000;
+    archiveProgram = { start: start, stop: stop, title: program.title };
+    playerMode = stop + 1200000 <= nowMs ? "archive" : "timeshift";
+    timeshiftBehind = Math.max(0, Math.floor((nowMs - start) / 1000));
+    closeEpgModal();
     var progEl = document.getElementById("osdProgTitle");
     if (progEl) progEl.textContent = archiveProgram.title + " (запись)";
-    loadStream("archive");
+    loadStream(playerMode);
     showOsd();
   };
 
@@ -1892,7 +1899,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     var nowMs = getServerNow();
     if (playerMode === "archive") {
       var dur = (archiveProgram.stop - archiveProgram.start) / 1000;
-      var pos = (nowMs - contentStartMs) / 1000;
+      var pos = (videoElement.currentTime && isFinite(videoElement.currentTime)) ? videoElement.currentTime : 0;
       pos = Math.min(Math.max(0, pos + sec), Math.max(0, dur - 1));
       var t = videoElement.currentTime;
       if (t !== undefined && t !== null && !isNaN(t)) {
@@ -1904,8 +1911,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
           return;
         }
       }
-      archiveProgram.start = nowMs - pos * 1000;
-      archiveProgram.stop = archiveProgram.start + dur * 1000;
+      archiveProgram.start = Math.min(archiveProgram.stop - 1000, archiveProgram.start + pos * 1000);
       loadStream("archive");
       showOsd();
       return;
@@ -1960,12 +1966,15 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     if (modal) {
       modal.className = "modal-overlay active";
       modal.style.display = "flex";
+      epgDayOffset = 0;
+      currentFocusIndex = 0;
       renderEpgModal();
       updateFocus();
     }
   };
 
   window.closeEpgModal = function() {
+    epgRequestId++;
     var modal = document.getElementById("epgModal");
     if (modal) {
       modal.className = "modal-overlay";
@@ -1982,7 +1991,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     var cur = document.getElementById("osdCurrentTime");
     var fill = document.getElementById("osdProgressFill");
     if (playerMode === "archive" && archiveProgram) {
-      var pos = Math.min(Math.max(0, (nowMs - contentStartMs) / 1000), (archiveProgram.stop - archiveProgram.start) / 1000);
+      var pos = Math.min(Math.max(0, videoElement && isFinite(videoElement.currentTime) ? videoElement.currentTime : 0), (archiveProgram.stop - archiveProgram.start) / 1000);
       var pct = 100 * pos / Math.max(1, (archiveProgram.stop - archiveProgram.start) / 1000);
       if (cur) cur.textContent = fmtHms(pos);
       if (fill) fill.style.width = pct + "%";
@@ -2024,10 +2033,11 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
         var dayVal = portalDayString(nowMs + d * 86400000);
         var btn = document.createElement("button");
         btn.className = "btn focusable" + (dayVal === portalDayString(nowMs + epgDayOffset * 86400000) ? " btn-primary" : "");
-        btn.textContent = (d === 0 ? "Сегодня" : (d === -1 ? "Вчера" : ""));
+        btn.textContent = (d === 0 ? "Сегодня" : (d === -1 ? "Вчера" : dayVal.slice(8, 10) + "." + dayVal.slice(5, 7)));
         btn.dataset.day = dayVal;
+        btn.dataset.offset = d;
         btn.onclick = function(ev){
-          epgDayOffset = portalDayString(nowMs) === this.dataset.day ? 0 : (parseInt(this.dataset.day.slice(8, 10), 10) - parseInt(portalDayString(nowMs).slice(8, 10), 10));
+          epgDayOffset = parseInt(this.dataset.offset, 10) || 0;
           renderEpgModal();
         };
         nav.appendChild(btn);
@@ -2038,7 +2048,9 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     var dayStr = portalDayString(nowMs + epgDayOffset * 86400000);
     list.innerHTML = '<div style="padding:24px;text-align:center;color:#64748b;">Загрузка программы…</div>';
 
+    var requestId = ++epgRequestId;
     jsonRpc("get_epg", { version: 2, result_as: "csv", media_id: ch.id, start: dayStr + " 00:00:00", stop: dayStr + " 23:59:59" }, false, function(err, res){
+      if (requestId !== epgRequestId) return;
       if (err || !res) {
         list.innerHTML = '<div style="padding:40px;text-align:center;color:#64748b;">Программа передач недоступна для этого канала.</div>';
         return;
@@ -2063,23 +2075,20 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
         var clickable = isOnAir || inArch;
         if (clickable) {
           item.onclick = function(){
-            if (isOnAir) { playChannel(ch); }
+            if (isOnAir) { closeEpgModal(); playChannel(ch); }
             else { playArchiveProgram(p); }
           };
-          item.onkeydown = function(ke){
-            if (ke.keyCode === 13 || ke.keyCode === 65385 || ke.key === "Enter" || ke.key === "Select") {
-              ke.preventDefault();
-              if (isOnAir) { playChannel(ch); } else { playArchiveProgram(p); }
-            }
-          };
+
         }
         item.innerHTML =
           '<div class="epg-time"></div>' +
           '<div style="flex:1;">' +
-            '<div class="epg-prog-name">' + (p.title || "Передача") + badge + '</div>' +
-            (p.description ? '<div class="epg-desc">' + p.description + '</div>' : '') +
+            '<div class="epg-prog-name"><span class="epg-title"></span>' + badge + '</div>' +
+            (p.description ? '<div class="epg-desc"></div>' : '') +
             '<div class="progress-bar-box"><div class="progress-fill" style="width: ' + pct + '%;"></div></div>' +
           '</div>';
+        item.querySelector(".epg-title").textContent = p.title || "Передача";
+        if (p.description) item.querySelector(".epg-desc").textContent = p.description;
         // Wall-clock start/stop in server timezone (UTC+5).
         var sD = new Date(p.start + 5 * 3600 * 1000);
         var eD = new Date(p.stop + 5 * 3600 * 1000);
@@ -2187,7 +2196,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     var pEl = document.getElementById("loginPassword");
     var errMsg = document.getElementById("loginErrMsg");
     var u = (uEl ? uEl.value : "").trim();
-    var p = (pEl ? pEl.value : "").trim();
+    var p = pEl ? pEl.value : "";
     if (!u) {
       if (errMsg) errMsg.textContent = "Введите номер договора или логин.";
       return;
@@ -2381,7 +2390,8 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     if (bestIndex !== -1) {
       currentFocusIndex = bestIndex;
       updateFocus();
-      list[bestIndex].scrollIntoView({ behavior: "smooth", block: "nearest" });
+      try { list[bestIndex].scrollIntoView({ behavior: "smooth", block: "nearest" }); }
+      catch (e) { try { list[bestIndex].scrollIntoView(false); } catch (ignored) {} }
     } else {
       if (dir === "down" && currentFocusIndex < list.length - 1) {
         currentFocusIndex++;
@@ -2418,7 +2428,6 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
   function stepSelect(el, delta) {
     if (!el || el.tagName !== "SELECT" || !el.options || el.options.length === 0) return false;
     el.selectedIndex = (el.selectedIndex + delta + el.options.length) % el.options.length;
-    if (el.onchange) el.onchange();
     el.dispatchEvent(new Event("change"));
     return true;
   }
@@ -2441,7 +2450,8 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     var key = e.key;
 
     // Numbers 0..9 (direct channel tuning)
-    if (code >= 48 && code <= 57) {
+    var inputTarget = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA");
+    if (code >= 48 && code <= 57 && !inputTarget && (currentOverlay() === "none" || currentOverlay() === "panel" || currentOverlay() === "main")) {
       var digit = String(code - 48);
       digitBuffer += digit;
       var banner = document.getElementById("digitBanner");
@@ -2463,15 +2473,15 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     var overlay = currentOverlay();
     var onPlayer = (currentScreen === "player");
 
-    // Arrow keys — Swift PlaybackPolicy.action table.
-    // Overlay first: inside a list/guide/modal arrows move focus. Only on the
-    // bare player (panel/none/error) do arrows act on playback:
-    // UP/DOWN switch channels, LEFT opens the channel list, RIGHT seeks +10
-    // (archive: LEFT seeks back). Any arrow press hides the OSD first so the
-    // action is immediate (the panel is transient).
-    var inList = overlay === "channelList" || overlay === "schedule" || overlay === "settings" || overlay === "login" || overlay === "main";
-    if (code === 37 || key === "ArrowLeft") {
+    // While the player controls are visible, arrows navigate their buttons.
+    // Dedicated channel keys always switch channels when no modal is open.
+    var inList = overlay === "channelList" || overlay === "schedule" || overlay === "settings" || overlay === "login" || overlay === "main" || overlay === "panel";
+    if ((code === 427 || code === 428 || key === "ChannelUp" || key === "ChannelDown") && onPlayer && (overlay === "none" || overlay === "panel")) {
       e.preventDefault();
+      if (code === 427 || key === "ChannelUp") previousChannel(); else nextChannel();
+    } else if (code === 37 || key === "ArrowLeft") {
+      e.preventDefault();
+      if (overlay === "panel") showOsd();
       if (inList) {
         var curElL = getFocusableElements()[currentFocusIndex];
         if (!stepSelect(curElL, -1)) moveFocus("left");
@@ -2484,6 +2494,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
       }
     } else if (code === 39 || key === "ArrowRight") {
       e.preventDefault();
+      if (overlay === "panel") showOsd();
       if (inList) {
         var curElR = getFocusableElements()[currentFocusIndex];
         if (!stepSelect(curElR, 1)) moveFocus("right");
@@ -2493,7 +2504,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
       } else {
         moveFocus("right");
       }
-    } else if (code === 38 || key === "ArrowUp" || key === "ChannelUp" || code === 28) {
+    } else if (code === 38 || key === "ArrowUp" || key === "ChannelUp" || code === 28 || code === 427) {
       e.preventDefault();
       if (inList) {
         moveFocus("up");
@@ -2503,7 +2514,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
       } else {
         moveFocus("up");
       }
-    } else if (code === 40 || key === "ArrowDown" || key === "ChannelDown" || code === 29) {
+    } else if (code === 40 || key === "ArrowDown" || key === "ChannelDown" || code === 29 || code === 428) {
       e.preventDefault();
       if (inList) {
         moveFocus("down");
@@ -2554,8 +2565,12 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
       }
     } else if (code === 192 || key === "Menu") { // MENU — open guide while watching
       if (onPlayer) { e.preventDefault(); openCurrentEpg(); }
-    } else if (code === 403 || key === "ColorF0Red" || key === "MediaPlayPause" || code === 411) { // RED / PLAY
-      togglePlayPause();
+    } else if (code === 403 || key === "ColorF0Red" || key === "MediaPlayPause" || code === 10252) { // RED / PLAY-PAUSE
+      if (onPlayer) { e.preventDefault(); togglePlayPause(); }
+    } else if (code === 415 || key === "MediaPlay") {
+      if (onPlayer && videoElement && videoElement.paused) { e.preventDefault(); togglePlayPause(); }
+    } else if (code === 19 || key === "MediaPause") {
+      if (onPlayer && videoElement && !videoElement.paused) { e.preventDefault(); togglePlayPause(); }
     } else if (code === 404 || key === "ColorF1Green") { // GREEN — back to live edge
       jumpToLive();
     } else if (code === 405 || key === "ColorF2Yellow") { // YELLOW — favorite
@@ -2564,9 +2579,9 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
       showSettings();
     } else if (code === 457 || key === "Info") { // INFO — program guide
       openCurrentEpg();
-    } else if (key === "MediaRewind") { // rewind 10s (player)
+    } else if (code === 412 || key === "MediaRewind") { // rewind 10s (player)
       if (onPlayer) { e.preventDefault(); seekRelative(-10); }
-    } else if (key === "MediaFastForward") { // forward 10s (player)
+    } else if (code === 417 || key === "MediaFastForward") { // forward 10s (player)
       if (onPlayer) { e.preventDefault(); seekRelative(10); }
     }
   });
@@ -2588,7 +2603,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
   if (window.tizen && tizen.tvinputdevice) {
     try {
       var keys = [
-        "MediaPlayPause", "MediaPlay", "MediaPause", "MediaFastForward", "MediaRewind",
+        "MediaPlayPause", "MediaPlay", "MediaPause", "MediaFastForward", "MediaRewind", "Menu",
         "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
         "ChannelUp", "ChannelDown", "ColorF0Red", "ColorF1Green", "ColorF2Yellow", "ColorF3Blue", "Info",
         "Enter", "Select"
@@ -3016,7 +3031,7 @@ def build_alemtv_wgt(target_url=ALEMTV_DEFAULT_PORTAL, pkg_id=ALEMTV_PKG_ID, app
         '<widget xmlns="http://www.w3.org/ns/widgets"\n'
         '        xmlns:tizen="http://tizen.org/ns/widgets"\n'
         f'        id="http://yourdomain/{safe_pkg}"\n'
-        '        version="1.0.1"\n'
+        '        version="1.0.2"\n'
         '        viewmodes="fullscreen">\n'
         f'    <tizen:application id="{safe_app_id}"\n'
         f'                       package="{safe_pkg}"\n'

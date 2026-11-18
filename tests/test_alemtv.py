@@ -552,6 +552,14 @@ if (window.aresDecrypt(enc, key) !== plain) throw new Error('aresDecrypt roundtr
 var cyr = window.aresEncrypt('Привет', key);
 if (cyr !== '3sPPfhhXQCKpLVq6AyuboA==') throw new Error('cyrillic vector mismatch: ' + cyr);
 if (window.aresDecrypt(cyr, key) !== 'Привет') throw new Error('cyrillic roundtrip failed');
+// Compare the legacy-TV byte arithmetic path to native BigInt RSA.
+var originalBigInt = BigInt;
+Math.random = function() { return 0.5; };
+var nativeHeader = window.buildAresHeader(key, 1234567890);
+BigInt = undefined;
+var legacyHeader = window.buildAresHeader(key, 1234567890);
+BigInt = originalBigInt;
+if (!legacyHeader || legacyHeader !== nativeHeader) throw new Error('RSA fallback differs from BigInt');
 if (!window.isRequiresSignIn({ code: -32002, message: 'not found' })) throw new Error('-32002 must require sign-in');
 if (!window.isRequiresSignIn({ code: -32003, message: 'denied' })) throw new Error('-32003 must require sign-in');
 if (window.isRequiresSignIn({ code: -1, message: 'limit' })) throw new Error('-1 must not require sign-in');
@@ -647,11 +655,11 @@ xhrHandler = function(req) {
   return { status: 200, responseText: '{"jsonrpc":"2.0","id":1,"result":{}}' };
 };
 document.getElementById('loginUsername').value = '12345678';
-document.getElementById('loginPassword').value = 'secret';
+document.getElementById('loginPassword').value = ' secret ';
 window.submitSubscriberLogin();
 if (!decryptedRegister) throw new Error('register_terminal not called');
 if (decryptedRegister.params.username !== '12345678') throw new Error('username mismatch');
-if (decryptedRegister.params.password !== 'secret') throw new Error('password mismatch');
+if (decryptedRegister.params.password !== ' secret ') throw new Error('password must be preserved');
 if (!('macaddr' in decryptedRegister.params) || decryptedRegister.params.macaddr !== null) throw new Error('macaddr must be null: ' + JSON.stringify(decryptedRegister.params));
 if (decryptedRegister.params.create_macaddr !== true) throw new Error('create_macaddr must be true');
 if (store['alem_sid'] !== 'SID2') throw new Error('session not saved: ' + JSON.stringify(store));
@@ -1060,6 +1068,13 @@ env4.flush();
 if (!isHidden('loginModal') || !isShown('mainScreen')) {
   throw new Error('launch 3: relaunch must auto-login after MAC fallback');
 }
+// A not-found error must not silently discard the existing terminal binding.
+store.set('alem_mac', '00:1A:79:99:99:99');
+const env5 = makeContext();
+env5.ctx.bootAlemTV();
+env5.flush();
+if (store.get('alem_mac') !== '00:1A:79:99:99:99') throw new Error('MAC lost after not-found');
+if (!isShown('loginModal')) throw new Error('not-found must request credentials');
 process.exit(0);
 '''
     runner = runner.replace('__JS__', json.dumps(js))
