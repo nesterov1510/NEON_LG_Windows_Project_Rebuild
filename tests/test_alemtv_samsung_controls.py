@@ -124,5 +124,5 @@ prev.click();
 const last=requests[requests.length-1];
 if (last.params.start !== '2026-09-30 00:00:00') throw Error('incorrect cross-month day: '+last.params.start);
 '''.replace('__JS__', build_alemtv_js()).replace('__DAY__', json.dumps(day, ensure_ascii=False)).replace('__NOW__', json.dumps(now, ensure_ascii=False))
-    result = subprocess.run([node], input=runner, capture_output=True, text=True, timeout=30)
+    result = subprocess.run([node], input=runner, capture_output=True, text=True, encoding='utf-8', timeout=30)
     assert result.returncode == 0, result.stderr
