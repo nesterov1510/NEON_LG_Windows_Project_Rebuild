@@ -590,6 +590,7 @@ class NeonWindow(QMainWindow):
         self.alem_portal_combo = QComboBox()
         for p in ALEMTV_PORTALS:
             self.alem_portal_combo.addItem(p['name'], p['url'])
+        self.alem_portal_combo.setCurrentIndex(self.alem_portal_combo.findData(ALEMTV_DEFAULT_PORTAL))
         al.addWidget(self.alem_portal_combo)
 
         self.btn_alem_install = QPushButton()
@@ -890,6 +891,7 @@ class NeonWindow(QMainWindow):
         self.sam_alem_portal_combo = QComboBox()
         for p in ALEMTV_PORTALS:
             self.sam_alem_portal_combo.addItem(p['name'], p['url'])
+        self.sam_alem_portal_combo.setCurrentIndex(self.sam_alem_portal_combo.findData(ALEMTV_DEFAULT_PORTAL))
         sal.addWidget(self.sam_alem_portal_combo)
 
         self.btn_sam_alem_install = QPushButton()

@@ -251,7 +251,8 @@ def test_alemtv_custom_portal_persistence():
 
     # Test custom portal in HTML
     html = build_alemtv_html(default_portal="http://astu.tmalem.tv")
-    assert 'id="splashServerButtons"' in html
+    assert 'id="splashServerButtons"' not in html
+    assert 'id="loginMac"' in html
     assert 'http://astu.tmalem.tv' in html
 
 def test_alemtv_silky_open_channel():
@@ -913,10 +914,11 @@ const localStorage = {
 };
 const MAC = '00:1A:79:00:00:01';
 const ARES_KEY = new Uint8Array(16).fill(128); // Math.random() -> 0.5
+let registerParams = null;
 
 function server(method, params) {
   if (method === 'get_domain_config') return { name: 'AlemTV' };
-  if (method === 'register_terminal') return { session_id: 'SID-NEW', user_id: 1, macaddr: MAC };
+  if (method === 'register_terminal') { registerParams = params; return { session_id: 'SID-NEW', user_id: 1, macaddr: MAC }; }
   if (method === 'login') {
     if (params.macaddr === MAC) return { session_id: 'SID-RELOGIN', user_id: 1 };
     return { error: { code: -32002, message: 'not found' } };
@@ -1010,7 +1012,12 @@ env.flush();
 if (!isShown('loginModal')) throw new Error('launch 1: login modal must be shown without MAC');
 getEl('loginUsername').value = '123456';
 getEl('loginPassword').value = 'secret';
+getEl('loginMac').value = 'not-a-mac';
 env.ctx.submitSubscriberLogin();
+if (registerParams) throw new Error('invalid MAC was sent');
+getEl('loginMac').value = MAC.toLowerCase();
+env.ctx.submitSubscriberLogin();
+if (!registerParams || registerParams.macaddr !== MAC || registerParams.create_macaddr !== false) throw new Error('manual MAC not sent');
 env.flush();
 if (store.get('alem_mac') !== MAC) throw new Error('launch 1: MAC not stored: ' + store.get('alem_mac'));
 if (!store.get('alem_sid')) throw new Error('launch 1: session not stored');
