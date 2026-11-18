@@ -548,6 +548,9 @@ class NeonWindow(QMainWindow):
         self.btn_belet_install.setCursor(Qt.PointingHandCursor)
         self.btn_belet_install.clicked.connect(self.install_belet)
         bl.addWidget(self.btn_belet_install)
+        btn_belet_test = QPushButton('УСТАНОВИТЬ BELET TEST (ЭКСПЕРИМЕНТ)')
+        btn_belet_test.clicked.connect(self.install_belet_test)
+        bl.addWidget(btn_belet_test)
 
         b_row = QHBoxLayout()
         b_row.setSpacing(8)
@@ -2291,6 +2294,12 @@ class NeonWindow(QMainWindow):
     def open_system_tune(self):
         dlg = SystemTuneDialog(self, lang=self.lang)
         dlg.exec_()
+
+    def install_belet_test(self):
+        if not self.tv_connected:
+            self.toast.show_toast('Сначала подключите телевизор по SSH', 'error')
+            return
+        self._run_async('tv', lambda: self.api.install_belet_app(True))
 
     def install_belet(self):
         if not self.tv_connected:

@@ -25,6 +25,7 @@ import urllib.request
 import paramiko
 
 from lg_remote import LGRemote, ALLOWED_KEYS as LG_REMOTE_KEYS
+import belet_experimental
 
 from samsung_tv import (
     SAMSUNG_LOCAL_SETS,
@@ -559,8 +560,8 @@ class Api:
             out += b'\n'
         return out
 
-    def build_belet_ipk(self, target_url='https://belet.tm/'):
-        app_id = 'tm.belet.webos'
+    def build_belet_ipk(self, target_url='https://belet.tm/', experimental=False):
+        app_id = 'tm.belet.neontest' if experimental else 'tm.belet.webos'
         version = '1.0.2'
         mtime = int(time.time())
 
@@ -570,7 +571,7 @@ class Api:
             'vendor': 'Belet',
             'type': 'web',
             'main': 'index.html',
-            'title': 'Belet',
+            'title': 'Belet Test' if experimental else 'Belet',
             'icon': 'icon.png',
             'largeIcon': 'largeIcon.png',
             'splashBackground': 'splash.png',
@@ -649,6 +650,9 @@ class Api:
             '</body>\n'
             '</html>\n'
         ).encode('utf-8')
+
+        if experimental:
+            index_html = belet_experimental.html().encode('utf-8')
 
         with open(resource('assets/belet_icon.png'), 'rb') as f:
             icon_bytes = f.read()
@@ -729,7 +733,7 @@ class Api:
     def _tv_temp_dir(self):
         return '/media/developer/temp' if '/media/developer/temp/' in str(self.remote_script) else '/tmp'
 
-    def install_belet_app(self):
+    def install_belet_app(self, experimental=False):
         if not self.client:
             return {'ok': False, 'disconnected': True, 'error': 'Not connected to a TV.', 'output': '[!] Not connected.'}
         transport = self.client.get_transport() if hasattr(self.client, 'get_transport') else None
@@ -737,9 +741,9 @@ class Api:
             self.disconnect_tv()
             return {'ok': False, 'disconnected': True, 'error': 'TV SSH session closed. Reconnect first.', 'output': '[!] SSH session closed.'}
 
-        lines = ['[+] Packaging Belet webOS fullscreen app (tm.belet.webos)…']
+        lines = ['[+] Packaging Belet Test (experimental)…' if experimental else '[+] Packaging Belet webOS fullscreen app (tm.belet.webos)…']
         try:
-            ipk_bytes = self.build_belet_ipk()
+            ipk_bytes = self.build_belet_ipk(experimental=True) if experimental else self.build_belet_ipk()
             remote_dir = self._tv_temp_dir()
             remote_ipk = f'{remote_dir}/tm.belet.webos.ipk'
             remote_fifo = f'{remote_dir}/belet_luna_fifo'
@@ -792,7 +796,7 @@ class Api:
                     'error': f'webOS app install failed (status {exit_code}). Check console output.',
                     'output': '\n'.join(lines),
                 }
-            lines.append('[+] Belet installed cleanly! Find it on the TV Home launcher or click Launch.')
+            lines.append('[+] Belet Test installed. Open Belet Test on the TV Home launcher.' if experimental else '[+] Belet installed cleanly! Find it on the TV Home launcher or click Launch.')
             self._logger.info('Installed Belet IPK on TV')
             return {'ok': True, 'output': '\n'.join(lines)}
         except (paramiko.SSHException, EOFError, OSError, socket.error) as exc:
