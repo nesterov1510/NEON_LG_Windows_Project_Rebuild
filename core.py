@@ -465,8 +465,8 @@ class Api:
             self.client = None
         return {'ok': True, 'disconnected': True, 'output': '[+] Disconnected from TV SSH session.'}
 
-    def _exec(self, command, lines):
-        _stdin, stdout, stderr = self.client.exec_command(command, timeout=30)
+    def _exec(self, command, lines, timeout=30):
+        _stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
         out = stdout.read().decode(errors='replace').strip()
         err = stderr.read().decode(errors='replace').strip()
         if out:
@@ -742,9 +742,9 @@ class Api:
 
             fd, local_ipk = tempfile.mkstemp(prefix='belet_', suffix='.ipk')
             try:
-                os.write(fd, ipk_bytes)
-                os.close(fd)
-                fd = None
+                with os.fdopen(fd, 'wb') as tmp_file:
+                    fd = None
+                    tmp_file.write(ipk_bytes)
                 sftp = self.client.open_sftp()
                 try:
                     sftp.put(local_ipk, remote_ipk)
@@ -781,7 +781,7 @@ class Api:
                 'rm -f "$FIFO" "$IPK"; '
                 'exit $STATUS'
             )
-            exit_code = self._exec(install_cmd, lines)
+            exit_code = self._exec(install_cmd, lines, timeout=45)
             if exit_code != 0:
                 return {
                     'ok': False,
@@ -811,6 +811,13 @@ class Api:
             out = '\n'.join(lines) if lines else '[+] Launch command sent.'
             if rc != 0:
                 return {'ok': False, 'error': f'Launch failed (status {rc}).', 'output': out}
+            try:
+                response = json.loads('\n'.join(lines))
+            except (ValueError, TypeError):
+                response = None
+            if isinstance(response, dict) and response.get('returnValue') is False:
+                reason = response.get('errorText') or response.get('errorMessage') or 'webOS rejected the launch request.'
+                return {'ok': False, 'error': str(reason), 'output': out}
             return {'ok': True, 'output': out}
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': '[!] ' + str(exc)}
