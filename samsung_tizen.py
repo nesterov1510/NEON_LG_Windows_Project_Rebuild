@@ -3698,7 +3698,7 @@ def build_belet_wgt(
     config_xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" '
-        'id="https://belet.tm/tizen" version="1.3.0" viewmodes="maximized">\n'
+        'id="https://belet.tm/tizen" version="1.3.1" viewmodes="maximized">\n'
         f'    <tizen:application id="{safe_app_id}" package="{pkg_id}" required_version="{req_ver}"/>\n'
         '    <content src="index.html"/>\n'
         '    <feature name="http://tizen.org/feature/screen.size.all"/>\n'
@@ -3706,6 +3706,7 @@ def build_belet_wgt(
         + '    <icon src="icon.png"/>\n'
         + f'    <name>{safe_app_name}</name>\n'
         + '    <access origin="*" subdomains="true"/>\n'
+        + '    <tizen:allow-navigation>*</tizen:allow-navigation>\n'
         + '    <tizen:allow-mixed-content>true</tizen:allow-mixed-content>\n'
         + '    <tizen:content-security-policy>'
         + "default-src 'self' * 'unsafe-inline' 'unsafe-eval' data: blob:; "

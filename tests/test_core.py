@@ -2074,7 +2074,8 @@ def test_belet_wgt_service_manifest_es5_and_fallback(tmp_path):
         proxy_js = zf.read('service/proxy.js').decode('utf-8')
 
     root = ET.fromstring(cfg)
-    assert root.attrib.get('version') == '1.3.0'
+    assert root.attrib.get('version') == '1.3.1'
+    assert root.find('{http://tizen.org/ns/widgets}allow-navigation').text == '*'
     assert 'required_version="3.0"' in cfg
     assert 'http://tizen.org/feature/web.service' in cfg
     assert '<tizen:service id="BeletTV001.BeletProxy" auto-restart="true">' in cfg
@@ -2084,7 +2085,6 @@ def test_belet_wgt_service_manifest_es5_and_fallback(tmp_path):
     assert 'http://tizen.org/privilege/network.public' not in cfg
     assert 'http://tizen.org/privilege/application.info' not in cfg
     assert 'register.keygrab.mode.special' not in cfg
-    assert 'tizen:allow-navigation' not in cfg
     assert 'use.keypad.without.useraction' not in cfg
     assert 'wrt:' not in cfg
     for priv in (
@@ -2112,7 +2112,8 @@ def test_belet_wgt_service_manifest_es5_and_fallback(tmp_path):
         assert {'config.xml', 'index.html', 'icon.png'}.issubset(nosvc_names)
         nosvc_cfg = zf.read('config.xml').decode('utf-8')
         nosvc_html = zf.read('index.html').decode('utf-8')
-        assert 'version="1.3.0"' in nosvc_cfg
+        assert 'version="1.3.1"' in nosvc_cfg
+        assert '<tizen:allow-navigation>*</tizen:allow-navigation>' in nosvc_cfg
         assert 'required_version="2.3"' in nosvc_cfg
         assert '<tizen:service' not in nosvc_cfg
         assert 'https://belet.tm/ru' in nosvc_html
