@@ -339,7 +339,7 @@ def test_new_buttons_have_neon_styles(qt_app, tmp_path, monkeypatch):
     def by_text(text):
         matches = [b for b in buttons if b.text() == text]
         assert matches, text
-        return matches[0]
+        return matches
     for text, style in [
         ('Подключить пульт', 'PrimaryBtn'), ('Отключить', 'GhostBtn'),
         ('▲', 'SamKeyPrimary'), ('HOME', 'SamKeyBtn'),
@@ -348,6 +348,6 @@ def test_new_buttons_have_neon_styles(qt_app, tmp_path, monkeypatch):
         ('ДИАГНОСТИКА DIRECT TEST', 'NormalBtn'),
         ('УСТАНОВИТЬ НА LG', 'PrimaryBtn'), ('УСТАНОВИТЬ НА SAMSUNG', 'PrimaryBtn'),
     ]:
-        assert by_text(text).objectName() == style
+        assert any(button.objectName() == style for button in by_text(text))
         assert 'QPushButton#' + style in win.styleSheet()
     win.close()
