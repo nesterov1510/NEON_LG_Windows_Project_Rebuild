@@ -68,7 +68,7 @@ assert(!store.neon_belet_samsung_v1);assert(!ids.login.classList.contains('hidde
 queue('/auth/get-qrcode',200,{code:'https://film.belet.me/register/mock-id-123',qr_png:'iVBORw0KGgoAAA='}); ids.openQr.onclick();
 assert(ids.qrImage.src.startsWith('data:image/png;base64,'));
 queue('/auth/check-qrcode-web',400,{msg:'waiting'}); timers.shift().fn();
-assert.deepStrictEqual(calls[calls.length-1].body,{code:'https://film.belet.me/register/mock-id-123',fingerprint:'07070707070707070707070707070707'});
+assert.deepStrictEqual(calls[calls.length-1].body,{code:'mock-id-123',fingerprint:'07070707070707070707070707070707'});
 assert(!store.neon_belet_samsung_v1); assert.strictEqual(timers.length,1);
 queue('/auth/check-qrcode-web',200,{token:'qr-access',refresh_token:'qr-refresh'});
 queue('/api/v1/home_page',200,{result:[]}); timers.shift().fn();

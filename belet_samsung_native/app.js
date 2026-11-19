@@ -103,7 +103,8 @@
       if (!(status >= 200 && status < 300 && obj && typeof obj.code === 'string' && /^https:\/\/film\.belet\.me\/register\/[A-Za-z0-9-]+$/.test(obj.code) && typeof obj.qr_png === 'string' && obj.qr_png.length < 300000 && /^iVBORw0KGgo[A-Za-z0-9+/=]+$/.test(obj.qr_png))) {
         $('qrStatus').textContent = 'Не удалось получить QR-код Belet. Попробуйте обновить.'; return;
       }
-      var code = obj.code;
+      // The Android scanner removes the register URL prefix before submitting the code.
+      var code = obj.code.substring('https://film.belet.me/register/'.length);
       $('qrImage').src = 'data:image/png;base64,' + obj.qr_png;
       $('qrStatus').textContent = 'Ожидаем сканирование на телефоне…';
       function poll() {
