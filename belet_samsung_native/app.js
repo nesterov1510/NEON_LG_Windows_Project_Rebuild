@@ -49,7 +49,7 @@
       x.send(body === null ? null : JSON.stringify(body));
     } catch (e) { cb(0, null); }
   }
-  function fail(status) { message(status >= 200 && status < 300 ? 'Неожиданный формат ответа Belet.' : status ? 'Сервис Belet ответил HTTP ' + status + '. Проверьте данные и повторите.' : 'Нет ответа Belet. Проверьте сеть и совместимость телевизора.'); }
+  function fail(status) { if (status === 402) { message('Belet вернул HTTP 402. Возможно, требуется активная подписка или оплата; проверьте условия в аккаунте.'); return; } message(status >= 200 && status < 300 ? 'Неожиданный формат ответа Belet.' : status ? 'Сервис Belet ответил HTTP ' + status + '. Проверьте данные и повторите.' : 'Нет ответа Belet. Проверьте сеть и совместимость телевизора.'); }
   function errorFor(status) { if (status === 401 && !session) { message('Сессия завершена. Войдите снова.'); show('login'); loadOtp(true); } else fail(status); }
   function refresh(cb) {
     if (!session || !session.refresh_token) { forgetSession(); return cb(false, 401); }
@@ -104,6 +104,21 @@
       $('phone').value = ''; $('codeSection').classList.add('hidden'); loadHome();
     });
   };
+  // Android ImagesDTO has vertical / horizontal image variants with named sizes.
+  function posterUrl(movie) {
+    var images = movie.images || {}, types = ['vertical', 'vertical_without_name', 'horizontal_with_name', 'horizontal_without_name'];
+    var sizes = ['medium', 'standard', 'default', 'high'], candidates = [], i, j, entry;
+    for (i = 0; i < types.length; i++) {
+      entry = images[types[i]];
+      if (!entry || typeof entry !== 'object') continue;
+      for (j = 0; j < sizes.length; j++) {
+        if (entry[sizes[j]] && typeof entry[sizes[j]].url === 'string') candidates.push(entry[sizes[j]].url);
+      }
+    }
+    if (typeof movie.image_url === 'string') candidates.push(movie.image_url);
+    for (i = 0; i < candidates.length; i++) if (/^https:\/\//i.test(candidates[i])) return candidates[i];
+    return null;
+  }
   function appendRows(result) {
     var rows = $('rows'); rows.textContent = '';
     result.forEach(function (group) {
@@ -114,7 +129,9 @@
       movies.forEach(function (movie) {
         if (!movie || !Number.isInteger(movie.id) || !Number.isInteger(movie.type_id)) return;
         var btn = document.createElement('button'), label = document.createElement('span'); btn.className = 'movie';
-        if (typeof movie.image_url === 'string' && /^https:\/\//i.test(movie.image_url)) { var image = document.createElement('img'); image.alt = ''; image.src = movie.image_url; btn.appendChild(image); }
+        var poster = document.createElement('div'), url = posterUrl(movie); poster.className = 'poster';
+        if (url) { var image = document.createElement('img'); image.alt = ''; image.onload = function () { poster.className = 'poster loaded'; }; image.onerror = function () { image.style.display = 'none'; }; image.src = url; poster.appendChild(image); }
+        btn.appendChild(poster);
         label.textContent = movie.title || movie.name || 'Фильм'; btn.appendChild(label);
         btn.onclick = function () { playMovie(movie); }; row.appendChild(btn);
       });
