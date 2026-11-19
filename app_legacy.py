@@ -867,6 +867,12 @@ class NeonWindow(QMainWindow):
         self.btn_sam_belet_install.setCursor(Qt.PointingHandCursor)
         self.btn_sam_belet_install.clicked.connect(self.install_samsung_belet)
         sbl.addWidget(self.btn_sam_belet_install)
+        btn_belet_client = QPushButton('УСТАНОВИТЬ BELET SAMSUNG · НОВЫЙ КЛИЕНТ')
+        btn_belet_client.setObjectName('NormalBtn')
+        btn_belet_client.setCursor(Qt.PointingHandCursor)
+        btn_belet_client.setToolTip('Отдельный экспериментальный клиент. Обычный Belet не изменяется; вход и видео требуют проверки на ТВ.')
+        btn_belet_client.clicked.connect(self.install_samsung_belet_client)
+        sbl.addWidget(btn_belet_client)
         sbl_row = QHBoxLayout()
         sbl_row.setSpacing(8)
         self.btn_sam_belet_launch = QPushButton()
@@ -2827,6 +2833,15 @@ class NeonWindow(QMainWindow):
             return
         self._run_async('sam', lambda: self.api.install_local_samsung_wgt(ip, path),
                         lambda r: self.toast.show_toast('Samsung подтвердил установку', 'info') if r.get('ok') else None)
+
+    def install_samsung_belet_client(self):
+        ip = self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast('Введите IP Samsung', 'warn')
+            return
+        self.log('[+] Подписываем и устанавливаем отдельный Belet Samsung (BeletFilm1).')
+        self._run_async('sam', lambda: self.api.install_samsung_belet_client(ip),
+                        lambda r: self.toast.show_toast('Belet Samsung установлен; проверьте запуск на ТВ', 'info') if r.get('ok') else None)
 
     def install_samsung_belet(self):
         ip = self.sam_ip.text().strip()

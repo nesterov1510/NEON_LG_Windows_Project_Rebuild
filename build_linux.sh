@@ -20,6 +20,7 @@ python3 -m PyInstaller --noconfirm --clean --windowed --name "$APP_NAME" \
     --add-data "ui.html:." \
     --add-data "change_region.sh:." \
     --add-data "assets:assets" \
+    --add-data "samsung-belet/BeletSamsungClient-unsigned.wgt:samsung-belet" \
     --exclude-module PyQt5 \
     --exclude-module PyQt5.QtWebEngineWidgets \
     --exclude-module PyQt5.QtWebEngineCore \

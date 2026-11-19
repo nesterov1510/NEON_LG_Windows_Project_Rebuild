@@ -33,7 +33,14 @@ jobs:
             }
           }
 
-      - run: python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "ui.html;." --add-data "assets;assets" --uac-admin app.py
+      - run: python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "ui.html;." --add-data "assets;assets" --add-data "samsung-belet/BeletSamsungClient-unsigned.wgt;samsung-belet" --uac-admin app.py
+      - name: Verify bundled Samsung Belet client
+        shell: pwsh
+        run: |
+          $wgt = Get-ChildItem -Path "dist\NeonLGControl" -Filter "BeletSamsungClient-unsigned.wgt" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $wgt) { throw "Bundled Belet Samsung client WGT missing" }
+          Write-Host "Verified bundled Belet Samsung client: $wgt"
+
       - name: Package portable application
         shell: pwsh
         run: Compress-Archive -Path "dist\NeonLGControl" -DestinationPath "dist\NeonLGControl-Windows.zip" -Force

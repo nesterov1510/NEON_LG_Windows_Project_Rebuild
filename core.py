@@ -1187,11 +1187,13 @@ class Api:
             except Exception:
                 pass
 
-    def install_local_samsung_wgt(self, ip, path):
+    def install_local_samsung_wgt(self, ip, path, _expected_pkg=None, _launch=False):
         try:
             clean_ip = self._resolve_samsung_ip(ip)
             data = read_package(path, '.wgt')
             pkg_id, app_id = validate_wgt(data)
+            if _expected_pkg and pkg_id != _expected_pkg:
+                raise ValueError('Bundled application has an unexpected package ID.')
         except (ValueError, OSError) as exc:
             return {'ok': False, 'error': str(exc)}
         lines = ['[+] Installing selected WGT: ' + pkg_id + '. Existing signatures will be replaced.']
@@ -1221,9 +1223,21 @@ class Api:
                 if diag.get('status') != 'ok':
                     return {'ok': False, 'error': diag.get('reason') or 'TV did not confirm WGT installation; see log.', 'output': '\n'.join(lines)}
                 lines.append('[+] Samsung reported installation complete. Open the app on the TV.')
+                if _launch:
+                    try:
+                        launch = sdb.launch_app(app_id)
+                        lines.append('[+] Launch command sent: ' + str(launch))
+                    except Exception as exc:
+                        lines.append('[i] Installed, but automatic launch failed: ' + str(exc))
                 return {'ok': True, 'pkg_id': pkg_id, 'app_id': app_id, 'output': '\n'.join(lines)}
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': '\n'.join(lines)}
+
+    def install_samsung_belet_client(self, ip=None):
+        """Sign and install the separate experimental client, never the ordinary Belet."""
+        return self.install_local_samsung_wgt(
+            ip, resource('samsung-belet/BeletSamsungClient-unsigned.wgt'),
+            _expected_pkg='BeletFilm1', _launch=True)
 
     def browse_profile(self):
         if not self.window:

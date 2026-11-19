@@ -44,7 +44,7 @@ jobs:
 
       - name: Build NeonLGControl81.exe (PyInstaller)
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl81 --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "assets;assets" --exclude-module PyQt5.QtWebEngineWidgets --exclude-module PyQt5.QtWebEngineCore --exclude-module PyQt5.QtQml --exclude-module PyQt5.QtQuick --exclude-module PyQt5.QtMultimedia --exclude-module PyQt5.QtBluetooth --exclude-module PyQt5.QtDesigner --exclude-module tkinter --uac-admin app_legacy.py
+          python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl81 --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "assets;assets" --add-data "samsung-belet/BeletSamsungClient-unsigned.wgt;samsung-belet" --exclude-module PyQt5.QtWebEngineWidgets --exclude-module PyQt5.QtWebEngineCore --exclude-module PyQt5.QtQml --exclude-module PyQt5.QtQuick --exclude-module PyQt5.QtMultimedia --exclude-module PyQt5.QtBluetooth --exclude-module PyQt5.QtDesigner --exclude-module tkinter --uac-admin app_legacy.py
 
       - name: Verify embedded Win32 icon and LF line endings in built EXE bundle
         shell: pwsh
@@ -68,6 +68,9 @@ jobs:
           $caPub = Get-ChildItem -Path "dist\NeonLGControl81" -Filter "vd_tizen_dev_public2.crt" -Recurse | Select-Object -First 1 -ExpandProperty FullName
           if (-not $caAuth -or -not $caPub) { throw "Bundled Samsung VD CA certs missing in dist bundle" }
           Write-Host "Verified bundled Samsung VD CA certs: $caAuth | $caPub"
+          $beletWgt = Get-ChildItem -Path "dist\NeonLGControl81" -Filter "BeletSamsungClient-unsigned.wgt" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $beletWgt) { throw "Bundled Belet Samsung client WGT missing" }
+          Write-Host "Verified bundled Belet Samsung client: $beletWgt"
 
       - name: Locate or install NSIS 3.x
         shell: pwsh
