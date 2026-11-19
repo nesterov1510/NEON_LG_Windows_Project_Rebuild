@@ -853,6 +853,9 @@ class NeonWindow(QMainWindow):
         self.btn_sam_belet_install.setCursor(Qt.PointingHandCursor)
         self.btn_sam_belet_install.clicked.connect(self.install_samsung_belet)
         sbl.addWidget(self.btn_sam_belet_install)
+        btn_belet_direct = QPushButton('BELET DIRECT TEST · БЕЗ ПРОКСИ')
+        btn_belet_direct.clicked.connect(self.install_samsung_belet_direct)
+        sbl.addWidget(btn_belet_direct)
 
         sbl_row = QHBoxLayout()
         sbl_row.setSpacing(8)
@@ -2778,6 +2781,14 @@ class NeonWindow(QMainWindow):
                 )
 
         self._run_async('sam', lambda: self.api.samsung_auth_create_cert(ip), done)
+
+    def install_samsung_belet_direct(self):
+        ip = self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast('Введите IP Samsung', 'warn')
+            return
+        self._run_async('sam', lambda: self.api.install_samsung_belet_direct(ip),
+                        lambda r: self.toast.show_toast('Belet Direct Test установлен', 'info') if r.get('ok') else None)
 
     def install_samsung_belet(self):
         ip = self.sam_ip.text().strip()

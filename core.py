@@ -26,6 +26,7 @@ import paramiko
 
 from lg_remote import LGRemote, ALLOWED_KEYS as LG_REMOTE_KEYS
 import belet_experimental
+import belet_direct
 import msb_callback
 
 from samsung_tv import (
@@ -3541,12 +3542,14 @@ class Api:
                 'output': '\n'.join(lines),
             }
 
-    def install_samsung_belet(self, ip=None, target_url=BELET_URL, cert_mode='auto'):
+    def install_samsung_belet(self, ip=None, target_url=BELET_URL, cert_mode='auto', _direct=False):
         try:
             clean_ip = self._resolve_samsung_ip(ip)
         except ValueError as exc:
             return {'ok': False, 'error': str(exc)}
 
+        pkg_id = belet_direct.PACKAGE if _direct else BELET_PKG_ID
+        app_id = belet_direct.APP if _direct else BELET_APP_ID
         pc_ip = _tizen_local_ip(clean_ip)
         cert_mgr = self._samsung_cert_manager()
         self._samsung_auth_stop.clear()
@@ -3596,13 +3599,13 @@ class Api:
 
                 # Prefer the fullscreen in-app proxy. If the TV rejects the service
                 # manifest, retry with the service-free in-app WebView package.
-                enable_service = True
-                remote_wgt = f'{sdk_toolpath}/{BELET_PKG_ID}.wgt'
+                enable_service = not _direct
+                remote_wgt = f'{sdk_toolpath}/{pkg_id}.wgt'
 
                 def _build_sign_push(use_service, active_bundle):
-                    u_wgt = build_belet_wgt(
+                    u_wgt = belet_direct.build_wgt(self._belet_wgt_icon()) if _direct else build_belet_wgt(
                         target_url=target_url,
-                        pkg_id=BELET_PKG_ID,
+                        pkg_id=pkg_id,
                         app_name='Belet',
                         icon_bytes=self._belet_wgt_icon(),
                         enable_service=use_service,
@@ -3618,20 +3621,20 @@ class Api:
                     verify_wgt_signatures(s_wgt)
                     a_sum = _format_chain_summary(active_bundle.get('author_certs'))
                     d_sum = _format_chain_summary(active_bundle.get('dist_certs'))
-                    lines.append(f'[+] Signed {BELET_PKG_ID}.wgt ({len(s_wgt) // 1024} KB, service={"on" if use_service else "fallback"})')
+                    lines.append(f'[+] Signed {pkg_id}.wgt ({len(s_wgt) // 1024} KB, service={"on" if use_service else "fallback"})')
                     lines.append(f'[+] Author chain: {a_sum} | Distributor chain: {d_sum}')
-                    self._sam_log(f'[WGT] Signed BeletTV001.wgt ({len(s_wgt) // 1024} KB) · Author ({a_sum}) | Dist ({d_sum}). Uploading via SDB...')
+                    self._sam_log(f'[WGT] Signed {pkg_id}.wgt ({len(s_wgt) // 1024} KB) · Author ({a_sum}) | Dist ({d_sum}). Uploading via SDB...')
                     sdb.push_bytes(s_wgt, remote_wgt)
                     lines.append(f'[+] Uploaded to {remote_wgt}')
                     return u_wgt
 
                 unsigned_wgt = _build_sign_push(enable_service, bundle)
-                self._sam_log(f'[SDB] Installing {BELET_PKG_ID} on TV...')
+                self._sam_log(f'[SDB] Installing {pkg_id} on TV...')
 
-                install_out = sdb.install_wgt(BELET_PKG_ID, remote_wgt, timeout=120.0)
+                install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                 if install_out.strip():
                     lines.extend(install_out.strip().splitlines())
-                diag = diagnose_install_output(install_out, BELET_PKG_ID)
+                diag = diagnose_install_output(install_out, pkg_id)
 
                 if enable_service and diag['status'] in ('manifest_error', 'api_mismatch'):
                     reason_line = (install_out or '').strip().splitlines()[-1] if (install_out or '').strip() else diag['status']
@@ -3639,22 +3642,22 @@ class Api:
                     lines.append(f'[i] TV firmware rejected background service manifest ({reason_line}); retrying pure-WebView package...')
                     enable_service = False
                     unsigned_wgt = _build_sign_push(False, bundle)
-                    install_out = sdb.install_wgt(BELET_PKG_ID, remote_wgt, timeout=120.0)
+                    install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                     if install_out.strip():
                         lines.extend(install_out.strip().splitlines())
-                    diag = diagnose_install_output(install_out, BELET_PKG_ID)
+                    diag = diagnose_install_output(install_out, pkg_id)
 
                 if diag['status'] == 'cert_mismatch':
                     self._sam_log('[SDB] Existing Belet has different cert (118012). Uninstalling old copy and retrying...')
                     lines.append('[i] Removing previous Belet installation (certificate mismatch) and retrying...')
                     try:
-                        sdb.uninstall_app(BELET_PKG_ID)
+                        sdb.uninstall_app(pkg_id)
                     except Exception:
                         pass
-                    install_out = sdb.install_wgt(BELET_PKG_ID, remote_wgt, timeout=120.0)
+                    install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                     if install_out.strip():
                         lines.extend(install_out.strip().splitlines())
-                    diag = diagnose_install_output(install_out, BELET_PKG_ID)
+                    diag = diagnose_install_output(install_out, pkg_id)
 
                 elif diag['status'] == 'cert_invalid_chain' and (
                     used_sdk_local or (bundle.get('source') and os.path.abspath(str(bundle['source'])) != os.path.abspath(cert_mgr.cert_dir))
@@ -3677,10 +3680,10 @@ class Api:
                     )
                     verify_wgt_signatures(signed_wgt)
                     sdb.push_bytes(signed_wgt, remote_wgt)
-                    install_out = sdb.install_wgt(BELET_PKG_ID, remote_wgt, timeout=120.0)
+                    install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                     if install_out.strip():
                         lines.extend(install_out.strip().splitlines())
-                    diag = diagnose_install_output(install_out, BELET_PKG_ID)
+                    diag = diagnose_install_output(install_out, pkg_id)
 
                 applist_out = ''
                 try:
@@ -3688,22 +3691,22 @@ class Api:
                 except Exception:
                     pass
 
-                installed_ok = (diag['status'] == 'ok') or (BELET_PKG_ID in applist_out)
+                installed_ok = (diag['status'] == 'ok') or (pkg_id in applist_out)
                 if not installed_ok:
                     # Some Tizen firmwares expect full app_id (<pkg>.<name>) instead of 10-char pkg_id
                     try:
-                        self._sam_log(f'[SDB] Retrying vd_appinstall with app ID {BELET_APP_ID}...')
-                        install_out_app = sdb.install_wgt(BELET_APP_ID, remote_wgt, timeout=120.0)
+                        self._sam_log(f'[SDB] Retrying vd_appinstall with app ID {app_id}...')
+                        install_out_app = sdb.install_wgt(app_id, remote_wgt, timeout=120.0)
                         if install_out_app.strip():
                             lines.extend(install_out_app.strip().splitlines())
-                        diag_app = diagnose_install_output(install_out_app, BELET_PKG_ID)
+                        diag_app = diagnose_install_output(install_out_app, pkg_id)
                         if diag_app['status'] == 'ok':
                             diag = diag_app
                             installed_ok = True
                         else:
                             try:
                                 applist_out = sdb.list_apps()
-                                if BELET_PKG_ID in applist_out:
+                                if pkg_id in applist_out:
                                     installed_ok = True
                             except Exception:
                                 pass
@@ -3724,19 +3727,19 @@ class Api:
                         'output': '\n'.join(lines),
                     }
 
-                lines.append(f'[+] Belet ({BELET_APP_ID}) installed successfully!')
+                lines.append(f'[+] Belet ({app_id}) installed successfully!')
                 launch_note = ''
                 try:
-                    launch_note = sdb.launch_app(BELET_APP_ID)
-                    lines.append(f'[+] Launched {BELET_APP_ID}: {launch_note}')
+                    launch_note = sdb.launch_app(app_id)
+                    lines.append(f'[+] Launched {app_id}: {launch_note}')
                 except Exception as lex:
                     lines.append(f'[i] Installed OK (auto-launch note: {lex})')
 
                 return {
                     'ok': True,
                     'duid': duid,
-                    'app_id': BELET_APP_ID,
-                    'pkg_id': BELET_PKG_ID,
+                    'app_id': app_id,
+                    'pkg_id': pkg_id,
                     'output': '\n'.join(lines),
                 }
         except Exception as exc:
@@ -3748,6 +3751,9 @@ class Api:
                 )
             lines.append(f'[!] Belet install failed: {err}')
             return {'ok': False, 'error': err, 'output': '\n'.join(lines)}
+
+    def install_samsung_belet_direct(self, ip=None):
+        return self.install_samsung_belet(ip=ip, _direct=True)
 
     def launch_samsung_belet(self, ip=None):
         try:
