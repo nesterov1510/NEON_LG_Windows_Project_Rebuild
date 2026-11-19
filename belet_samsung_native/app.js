@@ -6,12 +6,19 @@
   var FILM = 'https://film.beletapis.com';
   var STORAGE = 'neon_belet_samsung_v1';
   var $ = function (id) { return document.getElementById(id); };
-  var session = null, tempToken = null, busy = false, refreshWait = [];
+  var session = null, tempToken = null, busy = false, refreshWait = [], lastMovieButton = null;
+  try {
+    if (window.tizen && window.tizen.tvinputdevice) {
+      ['MediaPlay', 'MediaPause', 'MediaPlayPause', 'MediaStop', 'MediaRewind', 'MediaFastForward'].forEach(function (key) {
+        try { window.tizen.tvinputdevice.registerKey(key); } catch (e) {}
+      });
+    }
+  } catch (e) {}
   function message(text) { $('status').textContent = text || ''; }
-  function show(id) {
+  function show(id, preferred) {
     ['login', 'home', 'player'].forEach(function (x) { $(x).classList.toggle('hidden', x !== id); });
     $('logout').classList.toggle('hidden', !session);
-    setTimeout(function () { var el = $(id).querySelector('button:not([disabled]), input:not([disabled]), select:not([disabled])'); if (el) el.focus(); }, 30);
+    setTimeout(function () { if ($(id).classList.contains('hidden')) return; var el = preferred || $(id).querySelector('button:not([disabled]), input:not([disabled]), select:not([disabled])'); if (el) el.focus(); }, 30);
   }
   function loadSession() {
     try { var s = JSON.parse(localStorage.getItem(STORAGE) || 'null'); if (s && s.token && s.fingerprint) return s; } catch (e) {}
@@ -133,7 +140,7 @@
         if (url) { var image = document.createElement('img'); image.alt = ''; image.onload = function () { poster.className = 'poster loaded'; }; image.onerror = function () { image.style.display = 'none'; }; image.src = url; poster.appendChild(image); }
         btn.appendChild(poster);
         label.textContent = movie.title || movie.name || 'Фильм'; btn.appendChild(label);
-        btn.onclick = function () { playMovie(movie); }; row.appendChild(btn);
+        btn.onclick = function () { lastMovieButton = btn; playMovie(movie); }; row.appendChild(btn);
       });
     });
   }
@@ -158,7 +165,7 @@
     });
   }
   $('video').onerror = function () { message('Телевизор не смог воспроизвести этот формат или поток.'); };
-  $('back').onclick = function () { var video = $('video'); video.pause(); video.removeAttribute('src'); video.load(); show('home'); message(''); };
+  $('back').onclick = function () { var video = $('video'); video.pause(); video.removeAttribute('src'); video.load(); show('home', lastMovieButton); message(''); };
   $('logout').onclick = function () {
     if (!session || !window.confirm('Выйти из Belet на этом устройстве?')) return;
     var token = session.token; forgetSession(); $('rows').textContent = ''; $('video').pause(); $('video').removeAttribute('src'); $('phone').value = ''; $('code').value = '';
@@ -169,6 +176,18 @@
     var key = e.keyCode, current = document.activeElement;
     if (key === 10009 || key === 27 || key === 461) {
       if (!$('player').classList.contains('hidden')) { e.preventDefault(); $('back').click(); }
+      return;
+    }
+    if (!$('player').classList.contains('hidden') && (key === 415 || key === 19 || key === 179 || key === 413 || key === 412 || key === 417 || key === 13 || key === 37 || key === 39)) {
+      var video = $('video'), promise;
+      e.preventDefault();
+      if (key === 413) { $('back').onclick(); return; }
+      if (key === 412 || key === 417 || key === 37 || key === 39) {
+        try { video.currentTime = Math.max(0, Math.min(isFinite(video.duration) ? video.duration : video.currentTime + 10, video.currentTime + ((key === 412 || key === 37) ? -10 : 10))); } catch (ignore) {}
+        return;
+      }
+      if (key === 19 || ((key === 179 || key === 13) && !video.paused)) video.pause();
+      else { promise = video.play(); if (promise && promise.catch) promise.catch(function () { message('Не удалось начать воспроизведение.'); }); }
       return;
     }
     if (current && current.tagName === 'VIDEO') return;

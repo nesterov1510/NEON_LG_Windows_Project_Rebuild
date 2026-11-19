@@ -10,7 +10,7 @@ function Element(tag) {
   this.querySelectorAll = () => [];
   this.focus = () => { doc.activeElement = this; };
   this.removeAttribute = () => {};
-  this.pause = () => {}; this.load = () => {}; this.play = () => ({catch(){}});
+  this.paused = false; this.currentTime = 20; this.duration = 100; this.pause = () => { this.paused = true; }; this.load = () => {}; this.play = () => { this.paused = false; return {catch(){}}; }; this.click = () => { if (this.onclick) this.onclick(); };
   Object.defineProperty(this,'options',{get:()=>this.children});
 }
 let ids = {};
@@ -42,7 +42,8 @@ ids.verify.onclick(); assert.strictEqual(calls[2].body.code,'12345'); assert.str
 assert.strictEqual(ids.rows.children.length,2); assert.strictEqual(ids.rows.children[1].children[0].children[0].children[0].src,'https://example.com/poster.jpg'); let saved=JSON.parse(store.neon_belet_samsung_v1);assert.strictEqual(saved.token,'access');
 queue('/api/v3/files/42?type=1',200,{sources:[{filename:'https://cdn.example.com/movie.m3u8'}]}); ids.rows.children[1].children[0].onclick();
 assert.strictEqual(ids.video.src,'https://cdn.example.com/movie.m3u8');assert(!ids.player.classList.contains('hidden'));
-ids.back.onclick(); assert(!ids.home.classList.contains('hidden'));
+function key(k){let prevented=false; listeners.keydown({keyCode:k,preventDefault(){prevented=true}}); return prevented;}
+assert(key(19)); assert(ids.video.paused); assert(key(415)); assert(!ids.video.paused); assert(key(37)); assert.strictEqual(ids.video.currentTime,10); assert(key(10009)); assert(!ids.home.classList.contains('hidden')); assert.strictEqual(doc.activeElement,ids.rows.children[1].children[0]);
 // A 401 refreshes once, persists the replacement token, then retries the same request.
 queue('/api/v3/files/42?type=1',401,{});queue('/api/v2/auth/refresh-mobile',200,{token:'access2',refresh_token:'refresh2'});
 queue('/api/v3/files/42?type=1',200,{sources:[{filename:'https://cdn.example.com/second.m3u8'}]});
