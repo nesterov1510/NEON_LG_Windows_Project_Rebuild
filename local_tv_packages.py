@@ -52,7 +52,8 @@ def validate_wgt(data):
             names = set()
             for info in infos:
                 n = info.filename
-                if (not n or n.startswith(('/', '\\')) or '\\' in n or
+                raw_name = info.orig_filename
+                if (raw_name != n or not n or n.startswith(('/', '\\')) or '\\' in n or
                     any(part in ('.', '..') for part in n.split('/')) or
                     re.match(r'^[A-Za-z]:', n) or info.flag_bits & 1 or
                     stat.S_ISLNK(info.external_attr >> 16) or n in names):
