@@ -329,3 +329,25 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     win._force_exit = True
     win.close()
     qt_app.processEvents()
+
+
+def test_new_buttons_have_neon_styles(qt_app, tmp_path, monkeypatch):
+    monkeypatch.setenv('APPDATA', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path))
+    win = NeonWindow(api=Api())
+    buttons = win.findChildren(QtWidgets.QPushButton)
+    def by_text(text):
+        matches = [b for b in buttons if b.text() == text]
+        assert matches, text
+        return matches[0]
+    for text, style in [
+        ('Подключить пульт', 'PrimaryBtn'), ('Отключить', 'GhostBtn'),
+        ('▲', 'SamKeyPrimary'), ('HOME', 'SamKeyBtn'),
+        ('УСТАНОВИТЬ BELET TEST (ЭКСПЕРИМЕНТ)', 'NormalBtn'),
+        ('BELET DIRECT TEST · БЕЗ ПРОКСИ', 'NormalBtn'),
+        ('ДИАГНОСТИКА DIRECT TEST', 'NormalBtn'),
+        ('УСТАНОВИТЬ НА LG', 'PrimaryBtn'), ('УСТАНОВИТЬ НА SAMSUNG', 'PrimaryBtn'),
+    ]:
+        assert by_text(text).objectName() == style
+        assert 'QPushButton#' + style in win.styleSheet()
+    win.close()
