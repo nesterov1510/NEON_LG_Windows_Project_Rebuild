@@ -34,7 +34,10 @@ jobs:
             }
             if ($code -eq 0) { break }
             Write-Host "pytest failed (attempt $attempt, exit $code); retrying once for CI timing flakes"
-            if ($attempt -eq 2) { exit $code }
+            if ($attempt -eq 2) {
+              Select-String -Path pytest_report.txt -Pattern '^FAILED ', '^E   ' | Select-Object -Last 12 | ForEach-Object { Write-Host "::error::$(($_.Line) -replace '%','%25' -replace '\r','%0D' -replace '\n','%0A')" }
+              exit $code
+            }
           }
         env:
           QT_QPA_PLATFORM: offscreen
