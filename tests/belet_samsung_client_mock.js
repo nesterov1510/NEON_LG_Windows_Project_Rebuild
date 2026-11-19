@@ -528,6 +528,7 @@ assert(!ids.loginCode.classList.contains('hidden'), 'code step is shown');
 
 /* 4. Confirm the code and receive the session */
 route('/api/v1/auth/check-code-mobile', 200, { token: 'access-token', refresh_token: 'refresh-token' });
+route('/api/v1/users/device', 200, { msg: 'Successfully added' });
 route('/api/v2/home_page', 200, {
   status: 'ok',
   result: [
@@ -558,6 +559,11 @@ runTimers();
 assert.strictEqual(calls.find(c => c.url.indexOf('check-code-mobile') >= 0).body,
   JSON.stringify({ code: '12345', fingerprint: JSON.parse(store.neon_belet_samsung_session_v2).fingerprint, token: 'temp-token' }));
 assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, 'access-token');
+const deviceCall = calls.find(c => c.url.indexOf('/api/v1/users/device') >= 0);
+assert(deviceCall, 'TV registers itself in the account device list');
+assert.strictEqual(deviceCall.method, 'POST');
+assert(deviceCall.body.indexOf('"app_version":"4.3.3"') >= 0, 'device payload has app_version');
+assert(deviceCall.body.indexOf('Samsung Tizen') >= 0, 'device payload has the model name');
 assert(!ids.home.classList.contains('hidden'), 'home opens after login');
 const rows = ids.rows.querySelectorAll('.row-block');
 assert.strictEqual(rows.length, 2, 'two content rows');
@@ -699,7 +705,7 @@ assert(fireKey(19) === true);
 assert.strictEqual(avplayCalls.filter(call => call[0] === 'pause').length, 1, 'pause goes to avplay');
 fireKey(10009);
 
-/* 9e. If AVPlay rejects every source the client falls back to <video> */
+/* 9e. When AVPlay rejects a source the client retries it with <video>, then moves on */
 avplayFail = true;
 avplayCalls.length = 0;
 route('/api/v3/files/701?type=4', 200, { sources: [
@@ -707,10 +713,63 @@ route('/api/v3/files/701?type=4', 200, { sources: [
   { filename: 'https://cdn.example/b.m3u8', quality: '1080p' }
 ] });
 click(ids.episodeList.querySelectorAll('.episode')[0]);
-assert.strictEqual(avplayCalls.filter(call => call[0] === 'open').length, 2, 'both avplay sources tried');
+assert.strictEqual(avplayCalls.filter(call => call[0] === 'open').length, 1, 'avplay tried the best source');
 assert(ids.avPlayer.classList.contains('hidden'), 'avplay surface closed after failure');
-assert.strictEqual(ids.video.src, 'https://cdn.example/b.m3u8', 'video element takes over from the top source');
+assert.strictEqual(ids.video.src, 'https://cdn.example/b.m3u8', 'the same source falls back to the video element');
+ids.video.dispatch('error');
+assert.strictEqual(ids.video.src, 'https://cdn.example/a.m3u8', 'a broken source moves to the next one');
+ids.video.dispatch('error');
+assert(!ids.playerStatus.classList.contains('hidden'), 'playback failure is shown');
+assert(ids.playerStatus.textContent.indexOf('Не удалось воспроизвести') >= 0, 'failure message explains what broke');
+/* OK retries every engine/source combination without another API call */
+const retryMark = avplayCalls.length;
+fireKey(13);
+assert(avplayCalls.length > retryMark, 'OK retries playback after a failure');
+assert.strictEqual(ids.video.src, 'https://cdn.example/b.m3u8', 'retry starts from the best source again');
 fireKey(10009);
+
+/* 9g. HLS is played through hls.js (MSE) when the engine supports it */
+class FakeHls {
+  constructor(config) {
+    this.config = config;
+    this.handlers = {};
+    FakeHls.instances.push(this);
+  }
+  on(event, callback) { this.handlers[event] = callback; }
+  attachMedia(video) {
+    this.video = video;
+    if (this.handlers.mediaAttached) this.handlers.mediaAttached();
+  }
+  loadSource(url) {
+    this.url = url;
+    if (this.handlers.manifestParsed) this.handlers.manifestParsed();
+  }
+  destroy() { this.destroyed = true; }
+}
+FakeHls.instances = [];
+FakeHls.isSupported = () => true;
+FakeHls.Events = { MEDIA_ATTACHED: 'mediaAttached', MANIFEST_PARSED: 'manifestParsed', ERROR: 'error' };
+sandbox.Hls = FakeHls;
+avplayFail = false;
+avplayCalls.length = 0;
+route('/api/v3/files/701?type=4', 200, { sources: [
+  { filename: 'https://cdn.example/a.m3u8', quality: '720p' },
+  { filename: 'https://cdn.example/b.m3u8', quality: '1080p' }
+] });
+click(ids.episodeList.querySelectorAll('.episode')[0]);
+const hlsPlayer = FakeHls.instances[FakeHls.instances.length - 1];
+assert(hlsPlayer, 'hls.js instance created');
+assert.strictEqual(hlsPlayer.url, 'https://cdn.example/b.m3u8', 'hls.js loads the best source');
+assert.strictEqual(hlsPlayer.config.enableWorker, false, 'no blob workers, CSP stays strict');
+assert.strictEqual(ids.video.paused, false, 'hls.js playback started on the video element');
+assert.strictEqual(avplayCalls.length, 0, 'AVPlay is not used when MSE works');
+/* a fatal HLS error degrades to the next engine without losing the position */
+hlsPlayer.handlers.error({}, { fatal: true, details: 'manifestLoadError' });
+assert.strictEqual(hlsPlayer.destroyed, true, 'broken hls.js instance is destroyed');
+assert.strictEqual(avplayCalls[0][0], 'open', 'AVPlay retries the same source');
+fireKey(10009);
+sandbox.Hls = undefined;
+avplayFail = false;
 
 /* 9f. Catalog tab: categories, a category grid and paging */
 route('/api/v1/categories', 200, { categories: [{ id: 1, name: 'Фильмы' }, { id: 2, name: 'Сериалы' }] });
@@ -784,6 +843,7 @@ assert(qrCheckRoute, 'QR polling scheduled');
 route('/api/v1/auth/check-qrcode', 400, { message: 'waiting' });
 runTimers();
 route('/api/v1/auth/check-qrcode', 200, { token: 'qr-access', refresh_token: 'qr-refresh' });
+route('/api/v1/users/device', 200, { msg: 'Successfully added' });
 route('/api/v2/home_page', 200, { status: 'ok', result: [] });
 runTimers();
 assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, 'qr-access');

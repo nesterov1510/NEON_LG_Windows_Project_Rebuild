@@ -447,12 +447,23 @@
     });
   }
 
+  var VIDEO_URL = /\.(m3u8|mpd|mp4|m4v|mov|webm|ts)(\?|#|$)/i;
+
+  function hasMediaMeta(entry) {
+    if (!entry || typeof entry !== 'object') return false;
+    return !!(entry.quality || entry.resolution || entry.height || entry.format ||
+      entry.duration || entry.bitrate || entry.hls);
+  }
+
   function normalizeSource(entry) {
     var url = '';
     if (!entry) return null;
     if (typeof entry === 'string') url = entry;
     else url = entry.filename || entry.url || entry.src || entry.link || entry.file || '';
     if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return null;
+    // The payload also carries posters and other images; only video entries may become sources.
+    if (/\.(jpe?g|png|webp|gif|svg|ico)(\?|#|$)/i.test(url)) return null;
+    if (!VIDEO_URL.test(url) && !hasMediaMeta(entry)) return null;
     return {
       url: url,
       quality: String((entry && (entry.quality || entry.resolution || entry.height)) || ''),
@@ -460,25 +471,31 @@
     };
   }
 
+  // The files endpoint changed shape between app versions, so walk the payload instead of
+  // assuming one exact nesting: any object with an http(s) url field counts as a source.
   function sourcesFrom(data) {
-    var buckets = [];
     var out = [];
-    function push(list) {
-      if (Array.isArray(list)) buckets = buckets.concat(list);
+    var seen = {};
+    function walk(node, depth) {
+      var source;
+      if (!node || depth > 5) return;
+      if (Array.isArray(node)) {
+        node.forEach(function (item) { walk(item, depth + 1); });
+        return;
+      }
+      if (typeof node !== 'object') return;
+      source = normalizeSource(node);
+      if (source && !seen[source.url]) {
+        seen[source.url] = true;
+        out.push(source);
+      }
+      var keys = Object.keys(node);
+      keys.forEach(function (key) {
+        var value = node[key];
+        if (value && typeof value === 'object') walk(value, depth + 1);
+      });
     }
-    if (!data) return out;
-    push(data.sources);
-    push(data.files);
-    if (data.result) {
-      push(data.result.sources);
-      push(data.result.files);
-      if (Array.isArray(data.result)) push(data.result);
-    }
-    if (data.movie) push(data.movie.sources);
-    buckets.forEach(function (entry) {
-      var source = normalizeSource(entry);
-      if (source) out.push(source);
-    });
+    walk(data, 0);
     return out;
   }
 
@@ -585,6 +602,32 @@
     });
   }
 
+  function model() {
+    var name = '';
+    try {
+      if (window.webapis && window.webapis.productinfo && window.webapis.productinfo.getModel) {
+        name = String(window.webapis.productinfo.getModel() || '');
+      }
+    } catch (e) {}
+    if (!name) {
+      try { name = String(window.navigator.userAgent.match(/Tizen[^)]*/) || ''); } catch (e) {}
+    }
+    return name || 'Samsung Tizen TV';
+  }
+
+  function registerDevice(callback) {
+    var name = model();
+    authorized({
+      method: 'POST',
+      url: HOSTS.auth + '/api/v1/users/device',
+      body: { app_version: CLIENT.appVersion, model: 'Samsung Tizen ' + name },
+      headers: { 'X-Device-Model': name }
+    }, function (err, data) {
+      if (!callback) return;
+      callback(err || null, data || null);
+    });
+  }
+
   function deviceInfo() {
     return {
       fingerprint: device,
@@ -656,6 +699,8 @@
     search: search,
     profile: profile,
     deviceInfo: deviceInfo,
+    model: model,
+    registerDevice: registerDevice,
     healthCheck: healthCheck,
     listFrom: listFrom,
     sourcesFrom: sourcesFrom,

@@ -68,10 +68,22 @@ def test_client_bundles_are_es5_and_self_contained():
         assert not re.search(r'\b(let|const|class)\s', code), '%s must not use ES6 declarations' % name
     html = _client_source('index.html')
     scripts = re.findall(r'<script[^>]*src="([^"]+)"', html)
-    assert scripts == ['api.js', 'app.js']
+    assert scripts == ['hls.min.js', 'api.js', 'app.js']
     for src in scripts:
         assert not src.startswith(('http://', 'https://', '//')), src
+        assert (SRC / src).is_file(), src
     assert ' onclick=' not in html.lower()
+
+
+def test_bundled_hls_player_is_vendored_with_its_license():
+    vendor = SRC / 'hls.min.js'
+    license_file = SRC / 'hls.LICENSE'
+    assert vendor.is_file() and license_file.is_file()
+    text = vendor.read_text(encoding='utf-8', errors='replace')
+    assert 'Hls' in text
+    assert 'enableWorker' in text, 'expected the hls.js build'
+    assert 'Apache License' in license_file.read_text(encoding='utf-8')
+    assert 'hls.min.js' in FILES and 'hls.LICENSE' in FILES
 
 
 def test_stylesheet_avoids_css_younger_than_tizen_engines():
@@ -84,19 +96,24 @@ def test_stylesheet_avoids_css_younger_than_tizen_engines():
 
 def test_client_targets_belet_api_hosts_and_ships_csp():
     config = _client_source('config.xml')
-    for host in ('https://beletapis.com', 'https://homepage.belet.me', 'https://film-search.belet.me',
-                 'https://film.beletapis.com'):
+    for host in ('https://beletapis.com', 'https://*.beletapis.com', 'https://api.belet.tm',
+                 'https://*.belet.me'):
         assert host in config, host
     # Tizen needs the wildcard access rule for CDN images; the CSP below is what
     # actually pins scripts, XHR and media to the Belet hosts.
     assert '<tizen:content-security-policy>' in config
     assert "script-src 'self'" in config
-    assert 'https://api.belet.tm' in config
+    # HLS segments are fetched by hls.js over XHR, so videofilm.belet.me must be in connect-src.
+    csp = config[config.index('<tizen:content-security-policy>'):config.index('</tizen:content-security-policy>')]
+    connect = csp[csp.index('connect-src'):csp.index(';', csp.index('connect-src'))]
+    assert 'https://*.belet.me' in connect
+    assert 'media-src https: blob:' in csp
+    assert 'http://developer.samsung.com/privilege/avplay' in config, 'AVPlay needs its Tizen privilege'
     api = _client_source('api.js')
     for path in ('/api/v1/auth/sign-in', '/api/v1/auth/check-code-mobile', '/api/v1/auth/get-qrcode',
                  '/api/v1/auth/check-qrcode', '/api/v2/auth/refresh-mobile', '/api/v2/users/profile',
                  '/api/v3/movie/', '/api/v3/files/', '/api/v3/lastWatchTime', '/api/v1/favorites',
-                 '/api/v2/search'):
+                 '/api/v2/search', '/api/v1/users/device'):
         assert path in api, path
 
 

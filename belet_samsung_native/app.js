@@ -58,6 +58,7 @@
     qr: { generation: 0, timer: null, code: null },
     toastTimer: null,
     backArmed: false,
+    playbackInfo: 'плеер ещё не запускался',
     input: null,
     dialogActions: [],
     mainFocus: null
@@ -425,6 +426,20 @@
     }
   }
 
+  var deviceRegistration = { state: 'не отправлена', model: '' };
+
+  function registerDevice() {
+    deviceRegistration.state = 'отправляется…';
+    Belet.registerDevice(function (err) {
+      deviceRegistration.model = Belet.model();
+      if (err) {
+        deviceRegistration.state = 'ошибка: ' + describeError(err);
+        return;
+      }
+      deviceRegistration.state = 'телевизор добавлен в список устройств';
+    });
+  }
+
   function describeError(err) {
     if (!err) return 'Неизвестная ошибка.';
     if (err.kind === 'network') {
@@ -610,6 +625,7 @@
       state.login.tempToken = '';
       state.login.code = '';
       state.login.phone = '';
+      registerDevice();
       $('loginTitle').textContent = 'Вход в Belet';
       $('loginHint').textContent = 'Введите номер телефона, привязанный к аккаунту Belet.';
       $('loginCode').classList.add('hidden');
@@ -666,6 +682,7 @@
           if (!checkErr && checkData && checkData.token) {
             stopQr();
             $('qrStatus').textContent = 'Вход выполнен.';
+            registerDevice();
             loadHome(true);
             return;
           }
@@ -1353,8 +1370,8 @@
 
   /* ── player ───────────────────────────────────────────────────────── */
 
-  /* Samsung TVs play HLS best through the native AVPlay plugin; <video> is kept as a
-     fallback for emulators and models without webapis.avplay. */
+  /* Three playback engines, tried per source: hls.js over Media Source Extensions (works on
+     Tizen 4+), the native AVPlay plugin, and finally the plain <video> element. */
   function avplayApi() {
     try {
       if (window.webapis && window.webapis.avplay) return window.webapis.avplay;
@@ -1372,17 +1389,28 @@
     setHidden(node, !show);
   }
 
+  function isHlsUrl(url) {
+    return /\.m3u8(\?|$)/i.test(url || '');
+  }
+
+  function engineLabel(engine) {
+    if (engine === 'hls') return 'MSE';
+    if (engine === 'avplay') return 'AVPlay';
+    return 'Video';
+  }
+
   function openPlayer(options) {
     var player = state.player;
-    var video = $('video');
     cancelPlayback(true);
     screen('player');
     player.active = true;
     player.movie = null;
-    player.mode = avplayAvailable() ? 'avplay' : 'video';
+    player.engine = null;
     player.avPlaying = false;
     player.avError = false;
     player.avOpened = false;
+    player.started = false;
+    player.attempts = [];
     player.movieId = options.movieId || null;
     player.seasonId = options.seasonId || null;
     player.episodeId = options.episodeId || null;
@@ -1401,9 +1429,8 @@
     setHidden($('playerSpinner'), false);
     avplaySurface(false);
     showOsd(true);
-    try { video.pause(); } catch (e) {}
-    video.removeAttribute('src');
-    try { video.load(); } catch (e) {}
+    try { $('video').pause(); } catch (e) {}
+    try { $('video').removeAttribute('src'); $('video').load(); } catch (e) {}
   }
 
   function startSources(sources, options) {
@@ -1414,56 +1441,103 @@
       return;
     }
     sources.sort(function (a, b) {
-      var aHls = /\.m3u8(\?|$)/i.test(a.url) ? 0 : 1;
-      var bHls = /\.m3u8(\?|$)/i.test(b.url) ? 0 : 1;
+      var aHls = isHlsUrl(a.url) ? 0 : 1;
+      var bHls = isHlsUrl(b.url) ? 0 : 1;
       if (aHls !== bHls) return aHls - bHls;
       return (parseInt(b.quality, 10) || 0) - (parseInt(a.quality, 10) || 0);
     });
     player.sources = sources;
     player.sourceIndex = 0;
+    player.strategyIndex = 0;
+    player.failed = false;
     player.movie = options || {};
-    $('playerBadge').textContent = sources[0].quality || 'HLS';
+    state.playbackInfo = 'источников: ' + sources.length + ' · ' + hostOf(sources[0].url);
+    beginAttempt();
+  }
+
+  function hostOf(url) {
+    var match = String(url || '').match(/^https?:\/\/([^\/]+)/i);
+    return match ? match[1] : '—';
+  }
+
+  function strategiesFor(source) {
+    var list = [];
+    if (isHlsUrl(source.url) && window.Hls && window.Hls.isSupported()) list.push('hls');
+    if (avplayAvailable()) list.push('avplay');
+    list.push('native');
+    return list;
+  }
+
+  function beginAttempt() {
+    var player = state.player;
+    var source = player.sources[player.sourceIndex];
+    var strategies;
+    if (!source) { attemptFailed('нет источников'); return; }
+    strategies = strategiesFor(source);
+    player.strategies = strategies;
+    if (player.strategyIndex >= strategies.length) { attemptFailed('движки исчерпаны'); return; }
+    player.engine = strategies[player.strategyIndex];
+    player.started = false;
+    $('playerBadge').textContent = (source.quality || 'HLS') + ' · ' + engineLabel(player.engine);
     setHidden($('playerSpinner'), false);
     setHidden($('playerStatus'), true);
-    if (player.mode === 'avplay') startAvplay(0);
-    else startVideo(0);
+    armWatchdog();
+    if (player.engine === 'hls') startHls(source);
+    else if (player.engine === 'avplay') startAvplaySource(source);
+    else startNativeVideo(source);
   }
 
-  function nextSource(reason) {
+  function attemptFailed(reason) {
     var player = state.player;
+    var detail;
+    player.attempts.push(engineLabel(player.engine) + ': ' + reason);
+    disarmWatchdog();
+    teardownEngine();
+    if (player.strategyIndex + 1 < (player.strategies || []).length) {
+      player.strategyIndex += 1;
+      beginAttempt();
+      return;
+    }
     if (player.sourceIndex + 1 < player.sources.length) {
       player.sourceIndex += 1;
-      $('playerBadge').textContent = player.sources[player.sourceIndex].quality || 'HLS';
-      if (player.mode === 'avplay') startAvplay(player.sourceIndex);
-      else startVideo(player.sourceIndex);
-      return true;
+      player.strategyIndex = 0;
+      beginAttempt();
+      return;
     }
-    // Native playback gave up on every source: retry the whole list in the HTML5 player.
-    if (player.mode === 'avplay') {
-      player.noAvplay = true;
-      player.mode = 'video';
-      player.sourceIndex = 0;
-      stopAvplay();
-      avplaySurface(false);
-      startVideo(0);
-      return true;
-    }
-    playerError(reason);
-    return false;
+    detail = player.attempts.slice(-3).join('; ');
+    player.failed = true;
+    state.playbackInfo = 'ошибка · ' + detail;
+    playerError('Не удалось воспроизвести поток (' + detail + '). Проверьте подписку и соединение.');
   }
 
-  function startVideo(index) {
+  function armWatchdog() {
+    disarmWatchdog();
+    state.player.watchdog = setTimeout(function () {
+      if (state.player.active && !state.player.started) attemptFailed('нет старта за 15 с');
+    }, 15000);
+  }
+
+  function disarmWatchdog() {
+    if (state.player.watchdog) {
+      clearTimeout(state.player.watchdog);
+      state.player.watchdog = null;
+    }
+  }
+
+  function onPlaybackStarted() {
     var player = state.player;
+    player.started = true;
+    state.playbackInfo = 'ok · ' + engineLabel(player.engine) + ' · ' + hostOf((player.sources[player.sourceIndex] || {}).url);
+    disarmWatchdog();
+    setHidden($('playerSpinner'), true);
+    setHidden($('playerStatus'), true);
+    hideOsdSoon();
+  }
+
+  function attachVideoEvents() {
     var video = $('video');
-    var source = player.sources[index];
-    player.mode = 'video';
-    avplaySurface(false);
-    try { $('video').classList.remove('hidden'); } catch (e) {}
-    player.sourceIndex = index;
-    $('playerBadge').textContent = source.quality || 'HLS';
-    setHidden($('playerSpinner'), false);
     video.onloadedmetadata = function () {
-      var startAt = player.startAt;
+      var startAt = state.player.startAt;
       if (startAt > 5 && isFinite(video.duration) && startAt < video.duration - 20) {
         try { video.currentTime = startAt; } catch (e) {}
         toast('Продолжаем с ' + formatTime(startAt), 2600);
@@ -1473,60 +1547,122 @@
     };
     video.oncanplay = function () { setHidden($('playerSpinner'), true); };
     video.onwaiting = function () { setHidden($('playerSpinner'), false); };
-    video.onplaying = function () {
-      setHidden($('playerSpinner'), true);
-      setHidden($('playerStatus'), true);
-      hideOsdSoon();
-    };
+    video.onplaying = function () { onPlaybackStarted(); };
     video.onerror = function () {
+      if (state.player.engine === 'avplay') return;
       var code = video.error ? video.error.code : 0;
-      if (nextSource('Телевизор не смог воспроизвести поток' + (code ? ' (код ' + code + ')' : '') +
-          '. Возможна несовместимость формата или ограничение сервиса.')) return;
+      attemptFailed('video' + (code ? ' ' + code : ''));
     };
     video.onended = function () {
-      player.ending = true;
+      state.player.ending = true;
       reportProgress();
       exitPlayer();
     };
+  }
+
+  function detachVideoEvents() {
+    var video = $('video');
     try {
-      video.src = source.url;
-      video.load();
-      var promise = video.play();
-      if (promise && promise['catch']) {
-        promise['catch'](function () {
-          showOsd(true);
-          playerMessage('Нажмите OK, чтобы начать воспроизведение.');
-        });
-      }
+      video.onloadedmetadata = null;
+      video.oncanplay = null;
+      video.onwaiting = null;
+      video.onplaying = null;
+      video.onerror = null;
+      video.onended = null;
+    } catch (e) {}
+  }
+
+  function startHls(source) {
+    var player = state.player;
+    var video = $('video');
+    var hls;
+    avplaySurface(false);
+    try { video.classList.remove('hidden'); } catch (e) {}
+    try {
+      hls = new window.Hls({
+        enableWorker: false,
+        lowLatencyMode: false,
+        backBufferLength: 60,
+        maxBufferLength: 30,
+        manifestLoadingTimeOut: 12000,
+        fragLoadingTimeOut: 20000
+      });
     } catch (e) {
-      nextSource('Не удалось запустить плеер телевизора.');
+      attemptFailed('hls init');
+      return;
+    }
+    player.hls = hls;
+    attachVideoEvents();
+    hls.on(window.Hls.Events.ERROR, function (event, data) {
+      if (!data || !data.fatal) return;
+      var code = data.response && data.response.code ? ' HTTP ' + data.response.code : '';
+      attemptFailed('hls ' + (data.details || data.type || 'error') + code);
+    });
+    hls.on(window.Hls.Events.MEDIA_ATTACHED, function () { hls.loadSource(source.url); });
+    hls.on(window.Hls.Events.MANIFEST_PARSED, function () { playVideoElement(); });
+    try {
+      hls.attachMedia(video);
+    } catch (e) {
+      attemptFailed('hls attach');
     }
   }
 
-  function startAvplay(index) {
-    var player = state.player;
-    var api = avplayApi();
-    var source = player.sources[index];
-    if (!api) {
-      player.noAvplay = true;
-      startVideo(0);
+  function startNativeVideo(source) {
+    var video = $('video');
+    avplaySurface(false);
+    try { video.classList.remove('hidden'); } catch (e) {}
+    attachVideoEvents();
+    try {
+      video.src = source.url;
+      video.load();
+    } catch (e) {
+      attemptFailed('video src');
       return;
     }
-    player.mode = 'avplay';
-    player.sourceIndex = index;
-    player.avError = false;
+    playVideoElement();
+  }
+
+  function playVideoElement() {
+    var player = state.player;
+    var video = $('video');
+    var startAt = player.startAt;
+    var promise;
+    if (player.engine === 'avplay') return;
+    if (startAt > 5 && isFinite(video.duration) && startAt < video.duration - 20) {
+      try { video.currentTime = startAt; } catch (e) {}
+    }
+    try {
+      promise = video.play();
+    } catch (e) {
+      attemptFailed('play');
+      return;
+    }
+    if (promise && promise['catch']) {
+      promise['catch'](function () {
+        if (!player.active) return;
+        // Most often this is the TV's autoplay policy: the stream is fine, it just waits
+        // for a key press. Do not degrade the engine in that case.
+        disarmWatchdog();
+        showOsd(true);
+        playerMessage('Нажмите OK, чтобы начать воспроизведение');
+      });
+    }
+  }
+
+  function startAvplaySource(source) {
+    var player = state.player;
+    var api = avplayApi();
+    var failed = false;
+    if (!api) { player.noAvplay = true; attemptFailed('avplay недоступен'); return; }
     player.avPlaying = false;
     player.avOpened = false;
-    $('playerBadge').textContent = source.quality || 'HLS';
-    setHidden($('playerSpinner'), false);
-    try { $('video').classList.add('hidden'); } catch (e) {}
     avplaySurface(true);
-    var failed = false;
-    var fail = function (message) {
-      if (failed) return;
+    try { $('video').classList.add('hidden'); } catch (e) {}
+    function fail(reason) {
+      if (failed || !player.active) return;
       failed = true;
-      nextSource(message || 'Телевизор не смог воспроизвести поток.');
-    };
+      attemptFailed(reason || 'avplay error');
+    }
     try {
       api.open(source.url);
       player.avOpened = true;
@@ -1537,16 +1673,20 @@
         onbufferingcomplete: function () { setHidden($('playerSpinner'), true); },
         oncurrentplaytime: function (ms) {
           player.avTime = (Number(ms) || 0) / 1000;
+          if (!player.avPlaying) {
+            player.avPlaying = true;
+            onPlaybackStarted();
+          }
         },
         onstreamcompleted: function () {
           player.ending = true;
           reportProgress();
           exitPlayer();
         },
-        onerror: function () { fail('Телевизор не смог воспроизвести поток. Возможна несовместимость формата.'); }
+        onerror: function () { fail('avplay error'); }
       });
       api.prepareAsync(function () {
-        if (!player.active || player.mode !== 'avplay') return;
+        if (!player.active || player.engine !== 'avplay') return;
         try {
           if (player.startAt > 5) api.seekTo(Math.round(player.startAt * 1000));
           api.play();
@@ -1555,11 +1695,11 @@
           hideOsdSoon();
           startAvplayTicker();
         } catch (e) {
-          fail('Не удалось запустить воспроизведение на телевизоре.');
+          fail('avplay play');
         }
       });
     } catch (e) {
-      fail('Не удалось открыть поток на телевизоре.');
+      fail('avplay open');
     }
   }
 
@@ -1577,7 +1717,7 @@
   function startAvplayTicker() {
     stopAvplayTicker();
     state.player.ticker = setInterval(function () {
-      if (!state.player.active || state.player.mode !== 'avplay') return;
+      if (!state.player.active || state.player.engine !== 'avplay') return;
       var api = avplayApi();
       if (!api) return;
       try {
@@ -1595,9 +1735,28 @@
     }
   }
 
+  function teardownEngine() {
+    var player = state.player;
+    var video = $('video');
+    stopAvplayTicker();
+    if (player.hls) {
+      try { player.hls.destroy(); } catch (e) {}
+      player.hls = null;
+    }
+    stopAvplay();
+    avplaySurface(false);
+    detachVideoEvents();
+    try { video.pause(); } catch (e) {}
+    try {
+      video.removeAttribute('src');
+      video.load();
+    } catch (e) {}
+    try { video.classList.remove('hidden'); } catch (e) {}
+  }
+
   function playbackNow() {
     var player = state.player;
-    if (player.mode === 'avplay') {
+    if (player.engine === 'avplay') {
       var api = avplayApi();
       var current = Number(player.avTime) || 0;
       var duration = Number(player.avDuration) || 0;
@@ -1610,9 +1769,7 @@
     var video = $('video');
     var buffered = 0;
     if (video.buffered && video.buffered.length) {
-      try {
-        buffered = video.buffered.end(video.buffered.length - 1) / (video.duration || 1);
-      } catch (e) {}
+      try { buffered = video.buffered.end(video.buffered.length - 1) / (video.duration || 1); } catch (e) {}
     }
     return { current: video.currentTime || 0, duration: video.duration || 0, paused: !!video.paused, buffered: buffered };
   }
@@ -1631,7 +1788,7 @@
 
   function togglePlayback() {
     var player = state.player;
-    if (player.mode === 'avplay') {
+    if (player.engine === 'avplay') {
       var api = avplayApi();
       if (!api) return;
       try {
@@ -1645,18 +1802,18 @@
           hideOsdSoon();
         }
       } catch (e) {
-        playerMessage('Не удалось управлять воспроизведением.');
+        playerMessage('Не удалось управлять воспроизведением');
       }
       showOsd(true);
       return;
     }
     var video = $('video');
     var promise;
-    if (!video.src) return;
+    if (!video.src && !player.hls) return;
     if (video.paused) {
       promise = video.play();
       if (promise && promise['catch']) {
-        promise['catch'](function () { playerMessage('Не удалось начать воспроизведение.'); });
+        promise['catch'](function () { playerMessage('Не удалось начать воспроизведение'); });
       }
     } else {
       video.pause();
@@ -1667,11 +1824,11 @@
 
   function seek(delta) {
     var player = state.player;
-    var state0 = playbackNow();
+    var info = playbackNow();
     var target;
-    if (!state0.duration) return;
-    target = Math.max(0, Math.min(state0.duration - 1, state0.current + delta));
-    if (player.mode === 'avplay') {
+    if (!info.duration) return;
+    target = Math.max(0, Math.min(info.duration - 1, info.current + delta));
+    if (player.engine === 'avplay') {
       var api = avplayApi();
       if (api) {
         try { api.seekTo(Math.round(target * 1000)); } catch (e) {}
@@ -1686,18 +1843,18 @@
   }
 
   function updateProgress() {
-    var state0 = playbackNow();
-    var duration = state0.duration || 0;
-    var current = state0.current || 0;
+    var info = playbackNow();
+    var duration = info.duration || 0;
+    var current = info.current || 0;
     var percent = duration ? (current / duration) * 100 : 0;
-    var buffered = (state0.buffered || 0) * 100;
+    var buffered = (info.buffered || 0) * 100;
     $('progressFill').style.width = percent + '%';
     $('progressKnob').style.left = percent + '%';
     $('progressBuffer').style.width = Math.min(100, buffered) + '%';
     $('timeNow').textContent = formatTime(current);
     $('timeTotal').textContent = formatTime(duration);
     state.player.duration = duration;
-    if (state.player.trackProgress && duration && current - state.player.reported > 20 && !state0.paused) {
+    if (state.player.trackProgress && duration && current - state.player.reported > 20 && !info.paused) {
       state.player.reported = current;
       reportProgress();
     }
@@ -1705,10 +1862,10 @@
 
   function reportProgress() {
     var player = state.player;
-    var state0 = playbackNow();
+    var info = playbackNow();
     if (!player.active || !player.trackProgress || !player.movieId) return;
-    if (!isFinite(state0.current) || state0.current < 3) return;
-    Belet.lastWatchTime(player.movieId, player.seasonId, state0.current, state0.duration, function (err) {
+    if (!isFinite(info.current) || info.current < 3) return;
+    Belet.lastWatchTime(player.movieId, player.seasonId, info.current, info.duration, function (err) {
       if (err && err.kind === 'auth') handleAuthError(err);
     });
   }
@@ -1742,7 +1899,6 @@
 
   function cancelPlayback(silent) {
     var player = state.player;
-    var video = $('video');
     if (player.active && !silent) reportProgress();
     player.active = false;
     player.ending = false;
@@ -1750,20 +1906,8 @@
       clearTimeout(player.osdTimer);
       player.osdTimer = null;
     }
-    stopAvplay();
-    avplaySurface(false);
-    try { video.classList.remove('hidden'); } catch (e) {}
-    try { video.pause(); } catch (e) {}
-    try {
-      video.onloadedmetadata = null;
-      video.onerror = null;
-      video.onended = null;
-      video.onplaying = null;
-      video.onwaiting = null;
-      video.oncanplay = null;
-      video.removeAttribute('src');
-      video.load();
-    } catch (e) {}
+    disarmWatchdog();
+    teardownEngine();
     showOsd(false);
   }
 
@@ -1826,10 +1970,22 @@
         row.appendChild(status);
         host.appendChild(row);
       });
+      var modelRow = el('div', 'about-row');
+      modelRow.appendChild(el('span', '', 'Модель телевизора'));
+      modelRow.appendChild(el('span', '', Belet.model()));
+      host.appendChild(modelRow);
       var deviceRow = el('div', 'about-row');
       deviceRow.appendChild(el('span', '', 'Идентификатор устройства'));
       deviceRow.appendChild(el('span', '', Belet.device() || '—'));
       host.appendChild(deviceRow);
+      var listRow = el('div', 'about-row');
+      listRow.appendChild(el('span', '', 'Список устройств Belet'));
+      listRow.appendChild(el('span', '', deviceRegistration.state));
+      host.appendChild(listRow);
+      var playRow = el('div', 'about-row');
+      playRow.appendChild(el('span', '', 'Последнее воспроизведение'));
+      playRow.appendChild(el('span', '', state.playbackInfo));
+      host.appendChild(playRow);
       var sessionRow = el('div', 'about-row');
       sessionRow.appendChild(el('span', '', 'Сессия'));
       sessionRow.appendChild(el('span', '', Belet.hasSession() ? 'активна' : 'не выполнен вход'));
@@ -1917,8 +2073,22 @@
   }
 
   function handlePlayerKey(key) {
+    var player = state.player;
     var paused = playbackNow().paused;
-    if (key === KEYS.OK) { togglePlayback(); return true; }
+    if (key === KEYS.OK) {
+      // After a failed start, OK retries every engine/source combination once more.
+      if (player.failed) {
+        player.failed = false;
+        player.attempts = [];
+        player.sourceIndex = 0;
+        player.strategyIndex = 0;
+        setHidden($('playerStatus'), true);
+        beginAttempt();
+        return true;
+      }
+      togglePlayback();
+      return true;
+    }
     if (key === KEYS.LEFT || key === KEYS.REWIND) { seek(-10); return true; }
     if (key === KEYS.RIGHT || key === KEYS.FORWARD) { seek(10); return true; }
     if (key === KEYS.UP || key === KEYS.DOWN) { showOsd(true); return true; }
@@ -2061,7 +2231,7 @@
     on($('video'), 'timeupdate', updateProgress);
     on($('video'), 'progress', updateProgress);
     on($('video'), 'pause', function () {
-      if (state.player.mode === 'video') { showOsd(true); reportProgress(); }
+      if (state.player.engine !== 'avplay') { showOsd(true); reportProgress(); }
     });
     on($('video'), 'play', function () { hideOsdSoon(); });
 
@@ -2117,6 +2287,7 @@
     session = Belet.init();
     if (session) {
       $('bootStatus').textContent = 'Восстанавливаем сессию…';
+      registerDevice();
       loadHome(true);
     } else {
       $('bootStatus').textContent = 'Требуется вход в аккаунт Belet';
