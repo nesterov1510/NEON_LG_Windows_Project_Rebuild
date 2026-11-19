@@ -10,6 +10,16 @@ from samsung_tizen import BELET_PKG_ID
 from scripts.build_belet_samsung import FILES, SRC, build
 
 
+TEXT_MEMBERS = ('.xml', '.html', '.css', '.js', '.LICENSE')
+
+
+def _same_member(archive_bytes, source_bytes, name):
+    """Text members are compared line-wise: a Windows checkout may hold CRLF."""
+    if name.endswith(TEXT_MEMBERS):
+        return archive_bytes.replace(b'\r\n', b'\n') == source_bytes.replace(b'\r\n', b'\n')
+    return archive_bytes == source_bytes
+
+
 def _client_source(name):
     return (SRC / name).read_text(encoding='utf-8')
 
@@ -50,7 +60,7 @@ def test_package_is_isolated_and_contains_only_local_app(tmp_path):
     with zipfile.ZipFile(output) as archive:
         assert set(archive.namelist()) == set(FILES)
         for name in FILES:
-            assert archive.read(name) == (SRC / name).read_bytes()
+            assert _same_member(archive.read(name), (SRC / name).read_bytes(), name), name
         html = archive.read('index.html').decode('utf-8')
         config = archive.read('config.xml').decode('utf-8')
         assert '<iframe' not in html.lower()
@@ -142,7 +152,7 @@ def test_bundled_wgt_matches_sources():
     with zipfile.ZipFile(root / 'samsung-belet/BeletSamsungClient-unsigned.wgt') as archive:
         assert set(archive.namelist()) == set(FILES)
         for name in FILES:
-            assert archive.read(name) == (SRC / name).read_bytes()
+            assert _same_member(archive.read(name), (SRC / name).read_bytes(), name), name
 
 
 def test_neon_embeds_client_in_all_packaging_configs():

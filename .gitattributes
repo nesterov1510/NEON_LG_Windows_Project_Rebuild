@@ -12,3 +12,5 @@ belet_samsung_native/*.xml text eol=lf
 belet_samsung_native/*.js text eol=lf
 belet_samsung_native/*.css text eol=lf
 *.wgt binary
+belet_samsung_native/*.LICENSE text eol=lf
+belet_samsung_native/hls.min.js text eol=lf
