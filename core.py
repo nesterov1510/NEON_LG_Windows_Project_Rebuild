@@ -3755,6 +3755,22 @@ class Api:
     def install_samsung_belet_direct(self, ip=None):
         return self.install_samsung_belet(ip=ip, _direct=True)
 
+    def debug_samsung_belet_direct(self, ip=None):
+        """Explicitly start the isolated Direct Test in Tizen Web Inspector mode."""
+        try:
+            clean_ip = self._resolve_samsung_ip(ip)
+            with SdbClient(clean_ip, timeout=10.0) as sdb:
+                output = sdb.run_shell('0 debug ' + belet_direct.APP, timeout=20.0,
+                                       done_pattern=r'(?i)(?:debug\s+\d+\s+port\s*:\s*\d+|failed|error|refused)')
+            match = re.search(r'(?i)\bdebug\s+\d+\s+port\s*:\s*(\d{1,5})\b', output)
+            if not match or not 1 <= int(match.group(1)) <= 65535:
+                return {'ok': False, 'error': 'TV did not return a Web Inspector port. Check Developer Mode and that Belet Direct Test is installed.'}
+            port = int(match.group(1))
+            return {'ok': True, 'port': port, 'url': 'http://%s:%d' % (clean_ip, port),
+                    'output': '[+] Web Inspector port %d. Open http://%s:%d on this computer. Close the test app when finished.' % (port, clean_ip, port)}
+        except Exception as exc:
+            return {'ok': False, 'error': 'Could not start Samsung Web Inspector: ' + str(exc)}
+
     def launch_samsung_belet(self, ip=None):
         try:
             clean_ip = self._resolve_samsung_ip(ip)

@@ -856,6 +856,10 @@ class NeonWindow(QMainWindow):
         btn_belet_direct = QPushButton('BELET DIRECT TEST · БЕЗ ПРОКСИ')
         btn_belet_direct.clicked.connect(self.install_samsung_belet_direct)
         sbl.addWidget(btn_belet_direct)
+        btn_belet_debug = QPushButton('ДИАГНОСТИКА DIRECT TEST')
+        btn_belet_debug.setToolTip('Запустит приложение с Web Inspector. Используйте только в доверенной сети и закройте приложение после проверки.')
+        btn_belet_debug.clicked.connect(self.debug_samsung_belet_direct)
+        sbl.addWidget(btn_belet_debug)
 
         sbl_row = QHBoxLayout()
         sbl_row.setSpacing(8)
@@ -2781,6 +2785,14 @@ class NeonWindow(QMainWindow):
                 )
 
         self._run_async('sam', lambda: self.api.samsung_auth_create_cert(ip), done)
+
+    def debug_samsung_belet_direct(self):
+        ip = self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast('Введите IP Samsung', 'warn')
+            return
+        self._run_async('sam', lambda: self.api.debug_samsung_belet_direct(ip),
+                        lambda r: self.toast.show_toast('Адрес диагностики указан в журнале NEON', 'info') if r.get('ok') else None)
 
     def install_samsung_belet_direct(self):
         ip = self.sam_ip.text().strip()

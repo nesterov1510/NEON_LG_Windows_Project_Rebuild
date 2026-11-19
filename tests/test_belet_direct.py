@@ -80,3 +80,22 @@ assert.deepStrictEqual(urls,['https://belet.tm/','https://belet.tm/']);
     script.write_text(runner, encoding='utf-8')
     p = subprocess.run([node, str(script)], capture_output=True, text=True, encoding='utf-8', timeout=10)
     assert p.returncode == 0, p.stderr
+
+
+def test_direct_debug_validates_and_hides_unexpected_output(monkeypatch):
+    commands = []
+    class Sdb:
+        def __init__(self, *args, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def run_shell(self, command, **kwargs):
+            commands.append(command)
+            return 'successfully launched with debug 1 port: 34541'
+    monkeypatch.setattr('core.SdbClient', Sdb)
+    api = Api()
+    result = api.debug_samsung_belet_direct('192.168.1.5')
+    assert result['ok'] and result['url'] == 'http://192.168.1.5:34541'
+    assert commands == ['0 debug ' + belet_direct.APP]
+    monkeypatch.setattr(Sdb, 'run_shell', lambda *a, **k: 'error secret credentials')
+    result = api.debug_samsung_belet_direct('192.168.1.5')
+    assert not result['ok'] and 'secret' not in str(result)
