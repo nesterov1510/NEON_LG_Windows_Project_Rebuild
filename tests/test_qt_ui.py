@@ -343,10 +343,6 @@ def test_new_buttons_have_neon_styles(qt_app, tmp_path, monkeypatch):
     for text, style in [
         ('Подключить пульт', 'PrimaryBtn'), ('Отключить', 'GhostBtn'),
         ('▲', 'SamKeyPrimary'), ('HOME', 'SamKeyBtn'),
-        ('УСТАНОВИТЬ BELET TEST (ЭКСПЕРИМЕНТ)', 'NormalBtn'),
-        ('BELET DIRECT TEST · БЕЗ ПРОКСИ', 'NormalBtn'),
-        ('BELET BROWSER TEST · ПРЯМОЙ САЙТ', 'NormalBtn'),
-        ('ДИАГНОСТИКА DIRECT TEST', 'NormalBtn'),
         ('УСТАНОВИТЬ НА LG', 'PrimaryBtn'), ('УСТАНОВИТЬ НА SAMSUNG', 'PrimaryBtn'),
     ]:
         assert any(button.objectName() == style for button in by_text(text))

@@ -7,7 +7,16 @@ from unittest.mock import patch
 
 import msb_callback
 from core import Api
-from test_belet_experimental import members
+
+def members(ipk):
+    pos = 8
+    while pos < len(ipk):
+        header = ipk[pos:pos + 60]
+        size = int(header[48:58].decode().strip())
+        name = header[:16].decode().strip().rstrip('/')
+        data = ipk[pos + 60:pos + 60 + size]
+        yield name, data
+        pos += 60 + size + (size % 2)
 
 
 class Resources(HTMLParser):

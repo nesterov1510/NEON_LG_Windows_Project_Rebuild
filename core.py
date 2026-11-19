@@ -25,8 +25,6 @@ import urllib.request
 import paramiko
 
 from lg_remote import LGRemote, ALLOWED_KEYS as LG_REMOTE_KEYS
-import belet_experimental
-import belet_direct
 import msb_callback
 
 from samsung_tv import (
@@ -562,8 +560,8 @@ class Api:
             out += b'\n'
         return out
 
-    def build_belet_ipk(self, target_url='https://belet.tm/', experimental=False):
-        app_id = 'tm.belet.neontest' if experimental else 'tm.belet.webos'
+    def build_belet_ipk(self, target_url='https://belet.tm/'):
+        app_id = 'tm.belet.webos'
         version = '1.0.2'
         mtime = int(time.time())
 
@@ -573,7 +571,7 @@ class Api:
             'vendor': 'Belet',
             'type': 'web',
             'main': 'index.html',
-            'title': 'Belet Test' if experimental else 'Belet',
+            'title': 'Belet',
             'icon': 'icon.png',
             'largeIcon': 'largeIcon.png',
             'splashBackground': 'splash.png',
@@ -652,9 +650,6 @@ class Api:
             '</body>\n'
             '</html>\n'
         ).encode('utf-8')
-
-        if experimental:
-            index_html = belet_experimental.html().encode('utf-8')
 
         with open(resource('assets/belet_icon.png'), 'rb') as f:
             icon_bytes = f.read()
@@ -735,7 +730,7 @@ class Api:
     def _tv_temp_dir(self):
         return '/media/developer/temp' if '/media/developer/temp/' in str(self.remote_script) else '/tmp'
 
-    def install_belet_app(self, experimental=False):
+    def install_belet_app(self):
         if not self.client:
             return {'ok': False, 'disconnected': True, 'error': 'Not connected to a TV.', 'output': '[!] Not connected.'}
         transport = self.client.get_transport() if hasattr(self.client, 'get_transport') else None
@@ -743,9 +738,9 @@ class Api:
             self.disconnect_tv()
             return {'ok': False, 'disconnected': True, 'error': 'TV SSH session closed. Reconnect first.', 'output': '[!] SSH session closed.'}
 
-        lines = ['[+] Packaging Belet Test (experimental)…' if experimental else '[+] Packaging Belet webOS fullscreen app (tm.belet.webos)…']
+        lines = ['[+] Packaging Belet webOS fullscreen app (tm.belet.webos)…']
         try:
-            ipk_bytes = self.build_belet_ipk(experimental=True) if experimental else self.build_belet_ipk()
+            ipk_bytes = self.build_belet_ipk()
             remote_dir = self._tv_temp_dir()
             remote_ipk = f'{remote_dir}/tm.belet.webos.ipk'
             remote_fifo = f'{remote_dir}/belet_luna_fifo'
@@ -798,7 +793,7 @@ class Api:
                     'error': f'webOS app install failed (status {exit_code}). Check console output.',
                     'output': '\n'.join(lines),
                 }
-            lines.append('[+] Belet Test installed. Open Belet Test on the TV Home launcher.' if experimental else '[+] Belet installed cleanly! Find it on the TV Home launcher or click Launch.')
+            lines.append('[+] Belet installed cleanly! Find it on the TV Home launcher or click Launch.')
             self._logger.info('Installed Belet IPK on TV')
             return {'ok': True, 'output': '\n'.join(lines)}
         except (paramiko.SSHException, EOFError, OSError, socket.error) as exc:
@@ -3542,14 +3537,14 @@ class Api:
                 'output': '\n'.join(lines),
             }
 
-    def install_samsung_belet(self, ip=None, target_url=BELET_URL, cert_mode='auto', _direct=False, _browser=False):
+    def install_samsung_belet(self, ip=None, target_url=BELET_URL, cert_mode='auto'):
         try:
             clean_ip = self._resolve_samsung_ip(ip)
         except ValueError as exc:
             return {'ok': False, 'error': str(exc)}
 
-        pkg_id = belet_direct.BROWSER_PACKAGE if _browser else (belet_direct.PACKAGE if _direct else BELET_PKG_ID)
-        app_id = belet_direct.BROWSER_APP if _browser else (belet_direct.APP if _direct else BELET_APP_ID)
+        pkg_id = BELET_PKG_ID
+        app_id = BELET_APP_ID
         pc_ip = _tizen_local_ip(clean_ip)
         cert_mgr = self._samsung_cert_manager()
         self._samsung_auth_stop.clear()
@@ -3599,11 +3594,11 @@ class Api:
 
                 # Prefer the fullscreen in-app proxy. If the TV rejects the service
                 # manifest, retry with the service-free in-app WebView package.
-                enable_service = not (_direct or _browser)
+                enable_service = True
                 remote_wgt = f'{sdk_toolpath}/{pkg_id}.wgt'
 
                 def _build_sign_push(use_service, active_bundle):
-                    u_wgt = belet_direct.build_browser_wgt(self._belet_wgt_icon()) if _browser else belet_direct.build_wgt(self._belet_wgt_icon()) if _direct else build_belet_wgt(
+                    u_wgt = build_belet_wgt(
                         target_url=target_url,
                         pkg_id=pkg_id,
                         app_name='Belet',
@@ -3751,28 +3746,6 @@ class Api:
                 )
             lines.append(f'[!] Belet install failed: {err}')
             return {'ok': False, 'error': err, 'output': '\n'.join(lines)}
-
-    def install_samsung_belet_browser(self, ip=None):
-        return self.install_samsung_belet(ip=ip, _browser=True)
-
-    def install_samsung_belet_direct(self, ip=None):
-        return self.install_samsung_belet(ip=ip, _direct=True)
-
-    def debug_samsung_belet_direct(self, ip=None):
-        """Explicitly start the isolated Direct Test in Tizen Web Inspector mode."""
-        try:
-            clean_ip = self._resolve_samsung_ip(ip)
-            with SdbClient(clean_ip, timeout=10.0) as sdb:
-                output = sdb.run_shell('0 debug ' + belet_direct.APP, timeout=20.0,
-                                       done_pattern=r'(?i)(?:debug\s+\d+\s+port\s*:\s*\d+|failed|error|refused)')
-            match = re.search(r'(?i)\bdebug\s+\d+\s+port\s*:\s*(\d{1,5})\b', output)
-            if not match or not 1 <= int(match.group(1)) <= 65535:
-                return {'ok': False, 'error': 'TV did not return a Web Inspector port. Check Developer Mode and that Belet Direct Test is installed.'}
-            port = int(match.group(1))
-            return {'ok': True, 'port': port, 'url': 'http://%s:%d' % (clean_ip, port),
-                    'output': '[+] Web Inspector port %d. Open http://%s:%d on this computer. Close the test app when finished.' % (port, clean_ip, port)}
-        except Exception as exc:
-            return {'ok': False, 'error': 'Could not start Samsung Web Inspector: ' + str(exc)}
 
     def launch_samsung_belet(self, ip=None):
         try:

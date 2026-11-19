@@ -555,12 +555,6 @@ class NeonWindow(QMainWindow):
         self.btn_belet_install.setCursor(Qt.PointingHandCursor)
         self.btn_belet_install.clicked.connect(self.install_belet)
         bl.addWidget(self.btn_belet_install)
-        btn_belet_test = QPushButton('УСТАНОВИТЬ BELET TEST (ЭКСПЕРИМЕНТ)')
-        btn_belet_test.setObjectName('NormalBtn')
-        btn_belet_test.setCursor(Qt.PointingHandCursor)
-        btn_belet_test.clicked.connect(self.install_belet_test)
-        bl.addWidget(btn_belet_test)
-
         b_row = QHBoxLayout()
         b_row.setSpacing(8)
         self.btn_belet_launch = QPushButton()
@@ -861,24 +855,6 @@ class NeonWindow(QMainWindow):
         self.btn_sam_belet_install.setCursor(Qt.PointingHandCursor)
         self.btn_sam_belet_install.clicked.connect(self.install_samsung_belet)
         sbl.addWidget(self.btn_sam_belet_install)
-        btn_belet_browser = QPushButton('BELET BROWSER TEST · ПРЯМОЙ САЙТ')
-        btn_belet_browser.setObjectName('NormalBtn')
-        btn_belet_browser.setCursor(Qt.PointingHandCursor)
-        btn_belet_browser.setToolTip('Отдельная оболочка сайта belet.tm. Управление зависит от сайта и телевизора.')
-        btn_belet_browser.clicked.connect(self.install_samsung_belet_browser)
-        sbl.addWidget(btn_belet_browser)
-        btn_belet_direct = QPushButton('BELET DIRECT TEST · БЕЗ ПРОКСИ')
-        btn_belet_direct.setObjectName('NormalBtn')
-        btn_belet_direct.setCursor(Qt.PointingHandCursor)
-        btn_belet_direct.clicked.connect(self.install_samsung_belet_direct)
-        sbl.addWidget(btn_belet_direct)
-        btn_belet_debug = QPushButton('ДИАГНОСТИКА DIRECT TEST')
-        btn_belet_debug.setObjectName('NormalBtn')
-        btn_belet_debug.setCursor(Qt.PointingHandCursor)
-        btn_belet_debug.setToolTip('Запустит приложение с Web Inspector. Используйте только в доверенной сети и закройте приложение после проверки.')
-        btn_belet_debug.clicked.connect(self.debug_samsung_belet_direct)
-        sbl.addWidget(btn_belet_debug)
-
         sbl_row = QHBoxLayout()
         sbl_row.setSpacing(8)
         self.btn_sam_belet_launch = QPushButton()
@@ -2407,12 +2383,6 @@ class NeonWindow(QMainWindow):
         dlg = SystemTuneDialog(self, lang=self.lang)
         dlg.exec_()
 
-    def install_belet_test(self):
-        if not self.tv_connected:
-            self.toast.show_toast('Сначала подключите телевизор по SSH', 'error')
-            return
-        self._run_async('tv', lambda: self.api.install_belet_app(True))
-
     def install_belet(self):
         if not self.tv_connected:
             self.toast.show_toast(
@@ -2804,30 +2774,6 @@ class NeonWindow(QMainWindow):
                 )
 
         self._run_async('sam', lambda: self.api.samsung_auth_create_cert(ip), done)
-
-    def debug_samsung_belet_direct(self):
-        ip = self.sam_ip.text().strip()
-        if not ip:
-            self.toast.show_toast('Введите IP Samsung', 'warn')
-            return
-        self._run_async('sam', lambda: self.api.debug_samsung_belet_direct(ip),
-                        lambda r: self.toast.show_toast('Адрес диагностики указан в журнале NEON', 'info') if r.get('ok') else None)
-
-    def install_samsung_belet_browser(self):
-        ip = self.sam_ip.text().strip()
-        if not ip:
-            self.toast.show_toast('Введите IP Samsung', 'warn')
-            return
-        self._run_async('sam', lambda: self.api.install_samsung_belet_browser(ip),
-                        lambda r: self.toast.show_toast('Belet Browser Test установлен', 'info') if r.get('ok') else None)
-
-    def install_samsung_belet_direct(self):
-        ip = self.sam_ip.text().strip()
-        if not ip:
-            self.toast.show_toast('Введите IP Samsung', 'warn')
-            return
-        self._run_async('sam', lambda: self.api.install_samsung_belet_direct(ip),
-                        lambda r: self.toast.show_toast('Belet Direct Test установлен', 'info') if r.get('ok') else None)
 
     def install_samsung_belet(self):
         ip = self.sam_ip.text().strip()
