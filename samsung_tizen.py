@@ -568,6 +568,7 @@ def _build_belet_nav_js(target_url=BELET_URL):
         '  var rest=m[2]||"/";\n'
         '  if(rest.charAt(0)==="?"||rest.charAt(0)==="#")rest="/"+rest;\n'
         '  if(h===TARGET_HOST)return location.origin+rest;\n'
+        '  if(TARGET_HOST==="belet.tm"&&h==="homepage.belet.me"&&s.toLowerCase().indexOf("https://")===0)return location.origin+"/__neon_host/"+h+rest;\n'
         '  if(isTargetHost(h))return location.origin+"/__neon_host/"+h+rest;\n'
         '  return raw;\n'
         '}\n'
@@ -2589,12 +2590,15 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "  }catch(e){}\n"
         "}\n"
         "function scheduleSaveJar(){\n"
-        "  if(!JAR_FILE||!fs||typeof fs.writeFile!=='function')return;\n"
-        "  if(jarSaveTimer)clearTimeout(jarSaveTimer);\n"
-        "  jarSaveTimer=setTimeout(function(){\n"
-        "    jarSaveTimer=null;\n"
-        "    try{fs.writeFile(JAR_FILE,JSON.stringify(cookieJar),'utf8',function(){});}catch(e){}\n"
-        "  },180);\n"
+        "  if(!JAR_FILE||!fs)return;\n"
+        "  try{\n"
+        "    if(typeof fs.writeFileSync==='function'){\n"
+        "      fs.writeFileSync(JAR_FILE,JSON.stringify(cookieJar),{encoding:'utf8',mode:384});\n"
+        "      if(typeof fs.chmodSync==='function')fs.chmodSync(JAR_FILE,384);\n"
+        "    }else if(typeof fs.writeFile==='function'){\n"
+        "      fs.writeFile(JAR_FILE,JSON.stringify(cookieJar),{encoding:'utf8',mode:384},function(){});\n"
+        "    }\n"
+        "  }catch(e){}\n"
         "}\n"
         "loadJar();\n"
         "function defaultCookiePath(reqPath){\n"
@@ -2724,7 +2728,7 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "}\n"
         "function isAllowedUpstreamHost(h){\n"
         "  var low=String(h||'').toLowerCase().replace(/:\\d+$/,'');\n"
-        "  return low===BASE_HOSTNAME||(low.length>BASE_HOSTNAME.length+1&&low.slice(-BASE_HOSTNAME.length-1)==='.'+BASE_HOSTNAME);\n"
+        "  return low===BASE_HOSTNAME||(low.length>BASE_HOSTNAME.length+1&&low.slice(-BASE_HOSTNAME.length-1)==='.'+BASE_HOSTNAME)||(BASE_HOSTNAME==='belet.tm'&&BASE_PROTOCOL==='https:'&&low==='homepage.belet.me');\n"
         "}\n"
         "function ownAddresses(){\n"
         "  var out=['127.0.0.1'],ifs;\n"
@@ -2935,12 +2939,12 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "    targetRes.writeHead(entry.status||200,outH);\n"
         "    targetRes.end(entry.body);\n"
         "  }\n"
-        "  var canStaticCache=(reqMethod==='GET'&&!inH.range&&!inH['if-range']&&!inH.authorization&&isStaticPath(upPathname,''));\n"
+        "  var canStaticCache=(upHost!=='homepage.belet.me'&&reqMethod==='GET'&&!inH.range&&!inH['if-range']&&!inH.authorization&&isStaticPath(upPathname,''));\n"
         "  var sKey=canStaticCache?(upHost+'|'+upPath):'';\n"
-        "  var canHtmlCache=(reqMethod==='GET'&&!inH.range&&!inH['if-range']&&!inH.authorization&&isHtmlCacheable(upPathname));\n"
+        "  var canHtmlCache=(upHost!=='homepage.belet.me'&&reqMethod==='GET'&&!inH.range&&!inH['if-range']&&!inH.authorization&&isHtmlCacheable(upPathname));\n"
         "  var hKey=canHtmlCache?('html|'+jarEpoch+'|'+upHost+'|'+upPath):'';\n"
         "  var rscHdr=String(inH['rsc']||'')+'|'+String(inH['next-router-state-tree']||'');\n"
-        "  var dKey=(reqMethod==='GET'&&!inH.range&&!inH['if-range']&&!inH.authorization)?(jarEpoch+'|'+upHost+'|'+upPath+'|'+rscHdr):'';\n"
+        "  var dKey=(upHost!=='homepage.belet.me'&&reqMethod==='GET'&&!inH.range&&!inH['if-range']&&!inH.authorization)?(jarEpoch+'|'+upHost+'|'+upPath+'|'+rscHdr):'';\n"
         "  if(canStaticCache){\n"
         "    var sHit=lruGet(staticMap,staticOrder,sKey,STATIC_TTL_MS);\n"
         "    if(!sHit){\n"
@@ -2971,7 +2975,7 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "    if(lk==='host'||lk==='connection'||lk==='keep-alive'||lk==='proxy-connection'||lk==='origin'||lk==='referer'||lk==='cookie'||lk==='accept-encoding'||lk==='x-forwarded-host'||lk==='x-forwarded-proto'||lk==='x-forwarded-for'||lk==='sec-fetch-dest'||lk==='sec-fetch-mode'||lk==='sec-fetch-site'||lk==='sec-fetch-user'||lk==='upgrade-insecure-requests'||lk==='if-none-match'||lk==='if-modified-since')continue;\n"
         "    outHeaders[k]=inH[k];\n"
         "  }\n"
-        "  var mergedCk=buildUpstreamCookieHeader(upHost,upPathname,inH.cookie||'');\n"
+        "  var mergedCk=buildUpstreamCookieHeader(upHost,upPathname,upHost==='homepage.belet.me'?'':(inH.cookie||''));\n"
         "  if(mergedCk)outHeaders['cookie']=mergedCk;\n"
         "  var hostHdr=upHost;\n"
         "  if((BASE_PROTOCOL==='https:'&&upPort!==443)||(BASE_PROTOCOL==='http:'&&upPort!==80))hostHdr+=':'+upPort;\n"
@@ -2988,7 +2992,7 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "    headers:outHeaders\n"
         "  };\n"
         "  if(BASE_PROTOCOL==='https:'){\n"
-        "    reqOpts.rejectUnauthorized=false;\n"
+        "    reqOpts.rejectUnauthorized=(upHost==='homepage.belet.me');\n"
         "    reqOpts.servername=upHost;\n"
         "    if(httpsAgent)reqOpts.agent=httpsAgent;\n"
         "  }else if(httpAgent){\n"
@@ -3045,6 +3049,7 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "        hasSetCookie=true;\n"
         "        var sc=upH[hk];\n"
         "        jarStore(sc,upHost,upPathname);\n"
+        "        if(upHost==='homepage.belet.me'){continue;}\n"
         "        if(Object.prototype.toString.call(sc)==='[object Array]'){\n"
         "          var mapped=[];\n"
         "          for(var sci=0;sci<sc.length;sci++)mapped.push(rewriteSetCookie(sc[sci]));\n"
@@ -3653,8 +3658,6 @@ def build_belet_wgt(
     tv_ip=None,
 ):
     """Build an unsigned Tizen .wgt package rendering Belet in a fullscreen WebView with TV D-pad navigation."""
-    if not enable_service:
-        return _build_legacy_belet_wgt(target_url, pkg_id, app_name, icon_bytes)
     if not re.fullmatch(r'[A-Za-z0-9]{10}', str(pkg_id)):
         raise ValueError(f'Tizen package ID must be exactly 10 alphanumeric chars, got {pkg_id!r}')
 
@@ -3697,7 +3700,7 @@ def build_belet_wgt(
     config_xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" '
-        'id="https://belet.tm/tizen" version="1.2.7" viewmodes="maximized">\n'
+        'id="https://belet.tm/tizen" version="1.3.2" viewmodes="maximized">\n'
         f'    <tizen:application id="{safe_app_id}" package="{pkg_id}" required_version="{req_ver}"/>\n'
         '    <content src="index.html"/>\n'
         '    <feature name="http://tizen.org/feature/screen.size.all"/>\n'
@@ -3705,6 +3708,7 @@ def build_belet_wgt(
         + '    <icon src="icon.png"/>\n'
         + f'    <name>{safe_app_name}</name>\n'
         + '    <access origin="*" subdomains="true"/>\n'
+        + '    <tizen:allow-navigation>*</tizen:allow-navigation>\n'
         + '    <tizen:allow-mixed-content>true</tizen:allow-mixed-content>\n'
         + '    <tizen:content-security-policy>'
         + "default-src 'self' * 'unsafe-inline' 'unsafe-eval' data: blob:; "
@@ -3772,7 +3776,7 @@ def build_belet_wgt(
         '<div id="spinner" class="spin"></div>\n'
         '<div id="errBox">\n'
         '<button id="btnRetry" class="btn is-focus" type="button">Повторить / Retry</button>\n'
-        '<button id="btnDirect" class="btn" type="button">Открыть напрямую / Direct</button>\n'
+        '<button id="btnDirect" class="btn" type="button">Выход / Exit</button>\n'
         '</div>\n'
         '</div>\n'
         '</div>\n'
@@ -4026,10 +4030,6 @@ def build_belet_wgt(
         '  try{frameEl.focus();}catch(e){}\n'
         '  try{if(frameEl.contentWindow)frameEl.contentWindow.focus();}catch(e){}\n'
         '}\n'
-        'function openDirectTopLevel(u){\n'
-        '  var dest=u||lastTier2Url||TARGET;\n'
-        '  try{window.location.replace(dest);}catch(e){window.location.href=dest;}\n'
-        '}\n'
         'function formatBootDiag(){\n'
         '  return svcTimeoutDiag?(bootDiag+" / "+svcTimeoutDiag):bootDiag;\n'
         '}\n'
@@ -4041,15 +4041,15 @@ def build_belet_wgt(
         '      var _d=frameEl.contentDocument||(frameEl.contentWindow&&frameEl.contentWindow.document);\n'
         '      var _loc="";\n'
         '      try{_loc=String(frameEl.contentWindow&&frameEl.contentWindow.location&&frameEl.contentWindow.location.href||"");}catch(e2){}\n'
-        '      if(!_d){frameNavReady=false;bootDiag="tier2_cross_origin";showErrorUi("Страница Belet перенаправлена ("+formatBootDiag()+"). Нажмите Повторить или Открыть напрямую.");return;}\n'
-        '      if(_loc.indexOf("chrome-error:")===0){frameNavReady=false;bootDiag="tier2_blocked_frame";showErrorUi("Встроенный фрейм заблокирован ("+formatBootDiag()+"). Нажмите Повторить или Открыть напрямую.");return;}\n'
-        '    }catch(e){frameNavReady=false;bootDiag="tier2_cross_origin";showErrorUi("Страница Belet перенаправлена ("+formatBootDiag()+"). Нажмите Повторить или Открыть напрямую.");return;}\n'
+        '      if(!_d){frameNavReady=false;bootDiag="tier2_cross_origin";showErrorUi("Страница Belet перенаправлена ("+formatBootDiag()+"). Нажмите Повторить или Выход.");return;}\n'
+        '      if(_loc.indexOf("chrome-error:")===0){frameNavReady=false;bootDiag="tier2_blocked_frame";showErrorUi("Встроенный фрейм заблокирован ("+formatBootDiag()+"). Нажмите Повторить или Выход.");return;}\n'
+        '    }catch(e){frameNavReady=false;bootDiag="tier2_cross_origin";showErrorUi("Страница Belet перенаправлена ("+formatBootDiag()+"). Нажмите Повторить или Выход.");return;}\n'
         '  }\n'
         '  try{if(frameEl&&frameEl.contentWindow)frameEl.contentWindow.postMessage({type:"neon-ping"},"*");}catch(e){}\n'
         '  navPingTimer=setTimeout(function(){\n'
         '    if(!navAck){\n'
         '      frameNavReady=false;\n'
-        '      if(usingTier2){bootDiag="tier2_no_nav";showErrorUi("Нет ответа от навигации Belet ("+formatBootDiag()+"). Нажмите Повторить или Открыть напрямую.");return;}\n'
+        '      if(usingTier2){bootDiag="tier2_no_nav";showErrorUi("Нет ответа от навигации Belet ("+formatBootDiag()+"). Нажмите Повторить или Выход.");return;}\n'
         '      if(!everHadNav){bootDiag="proxy_no_nav";svcTimeoutDiag=bootDiag;loadViaWebViewFetch(TARGET);}\n'
         '      else if(activeProxyBase&&proxyRecoverTries<2){proxyRecoverTries++;frameEl.src=activeProxyBase+TARGET_PATH;}\n'
         '    }\n'
@@ -4389,7 +4389,7 @@ def build_belet_wgt(
         '    else if(code===39||code===40){ev.preventDefault();setErrFocus(errFocusIdx+1);}\n'
         '    else if(code===13||keyStr==="Enter"){\n'
         '      ev.preventDefault();\n'
-        '      if(errFocusIdx===0)startBoot();else openDirectTopLevel(lastTier2Url||TARGET);\n'
+        '      if(errFocusIdx===0)startBoot();else exitApp();\n'
         '    }\n'
         '  }\n'
         '},true);\n'
@@ -4400,7 +4400,7 @@ def build_belet_wgt(
         '  }\n'
         '});\n'
         'if(btnRetry)btnRetry.onclick=function(){startBoot();};\n'
-        'if(btnDirect)btnDirect.onclick=function(){openDirectTopLevel(lastTier2Url||TARGET);};\n'
+        'if(btnDirect)btnDirect.onclick=function(){exitApp();};\n'
         'registerRemoteKeys();\n'
         'startBoot();\n'
         '})();\n'

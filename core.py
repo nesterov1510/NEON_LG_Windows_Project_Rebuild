@@ -21,8 +21,13 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 import paramiko
+
+from lg_remote import LGRemote, ALLOWED_KEYS as LG_REMOTE_KEYS
+import msb_callback
+from local_tv_packages import read_package, validate_ipk, validate_wgt
 
 from samsung_tv import (
     SAMSUNG_LOCAL_SETS,
@@ -88,6 +93,7 @@ class Api:
         self.hotspot_mode = None
         self.ethernet_active = False
         self.ethernet_adapter = None
+        self._combined_sharing = None
         self.vpn_adapter_name = None
         self.vpn_adapter_guid = None
         self.vpn_ifindex = None
@@ -97,6 +103,8 @@ class Api:
         self._vpn_stop_requested = False
         self._auth_temp_file = None
         self._mgmt_port = None
+        self.lg_remote = None
+        self._lg_remote_lock = threading.RLock()
         self.samsung_client = None
         self.samsung_ip = None
         self.samsung_port = None
@@ -464,8 +472,8 @@ class Api:
             self.client = None
         return {'ok': True, 'disconnected': True, 'output': '[+] Disconnected from TV SSH session.'}
 
-    def _exec(self, command, lines):
-        _stdin, stdout, stderr = self.client.exec_command(command, timeout=30)
+    def _exec(self, command, lines, timeout=30):
+        _stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
         out = stdout.read().decode(errors='replace').strip()
         err = stderr.read().decode(errors='replace').strip()
         if out:
@@ -741,9 +749,9 @@ class Api:
 
             fd, local_ipk = tempfile.mkstemp(prefix='belet_', suffix='.ipk')
             try:
-                os.write(fd, ipk_bytes)
-                os.close(fd)
-                fd = None
+                with os.fdopen(fd, 'wb') as tmp_file:
+                    fd = None
+                    tmp_file.write(ipk_bytes)
                 sftp = self.client.open_sftp()
                 try:
                     sftp.put(local_ipk, remote_ipk)
@@ -780,7 +788,7 @@ class Api:
                 'rm -f "$FIFO" "$IPK"; '
                 'exit $STATUS'
             )
-            exit_code = self._exec(install_cmd, lines)
+            exit_code = self._exec(install_cmd, lines, timeout=45)
             if exit_code != 0:
                 return {
                     'ok': False,
@@ -810,6 +818,13 @@ class Api:
             out = '\n'.join(lines) if lines else '[+] Launch command sent.'
             if rc != 0:
                 return {'ok': False, 'error': f'Launch failed (status {rc}).', 'output': out}
+            try:
+                response = json.loads('\n'.join(lines))
+            except (ValueError, TypeError):
+                response = None
+            if isinstance(response, dict) and response.get('returnValue') is False:
+                reason = response.get('errorText') or response.get('errorMessage') or 'webOS rejected the launch request.'
+                return {'ok': False, 'error': str(reason), 'output': out}
             return {'ok': True, 'output': out}
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': '[!] ' + str(exc)}
@@ -876,8 +891,10 @@ class Api:
             splash_bytes=splash_bytes,
         )
 
-    def install_alemtv_app(self, target_url=ALEMTV_DEFAULT_PORTAL):
+    def install_alemtv_app(self, target_url=ALEMTV_DEFAULT_PORTAL, _callback=False):
         clean_url = self._normalize_portal_url(target_url)
+        app_id = msb_callback.LG_ID if _callback else ALEMTV_WEBOS_ID
+        app_name = "MSB Callback" if _callback else "Alem TV"
         if not self.client:
             return {'ok': False, 'disconnected': True, 'error': 'Not connected to a TV.', 'output': '[!] Not connected.'}
         transport = self.client.get_transport() if hasattr(self.client, 'get_transport') else None
@@ -885,18 +902,18 @@ class Api:
             self.disconnect_tv()
             return {'ok': False, 'disconnected': True, 'error': 'TV SSH session closed. Reconnect first.', 'output': '[!] SSH session closed.'}
 
-        lines = [f'[+] Packaging Alem TV webOS fullscreen app ({ALEMTV_WEBOS_ID})…']
+        lines = [f'[+] Packaging {app_name} webOS app ({app_id})…']
         try:
-            ipk_bytes = self.build_alemtv_ipk(target_url=clean_url)
+            ipk_bytes = msb_callback.build_ipk() if _callback else self.build_alemtv_ipk(target_url=clean_url)
             remote_dir = self._tv_temp_dir()
-            remote_ipk = f'{remote_dir}/{ALEMTV_WEBOS_ID}.ipk'
+            remote_ipk = f'{remote_dir}/{app_id}.ipk'
             remote_fifo = f'{remote_dir}/alemtv_luna_fifo'
 
             fd, local_ipk = tempfile.mkstemp(prefix='alemtv_', suffix='.ipk')
             try:
-                os.write(fd, ipk_bytes)
-                os.close(fd)
-                fd = None
+                with os.fdopen(fd, 'wb') as tmp_file:
+                    fd = None
+                    tmp_file.write(ipk_bytes)
                 sftp = self.client.open_sftp()
                 try:
                     sftp.put(local_ipk, remote_ipk)
@@ -933,14 +950,14 @@ class Api:
                 'rm -f "$FIFO" "$IPK"; '
                 'exit $STATUS'
             )
-            exit_code = self._exec(install_cmd, lines)
+            exit_code = self._exec(install_cmd, lines, timeout=45)
             if exit_code != 0:
                 return {
                     'ok': False,
                     'error': f'webOS app install failed (status {exit_code}). Check console output.',
                     'output': '\n'.join(lines),
                 }
-            lines.append('[+] Alem TV installed cleanly! Find it on the TV Home launcher or click Launch.')
+            lines.append(f'[+] {app_name} installed. Open it from the TV Home launcher.')
             self._logger.info('Installed Alem TV IPK on TV')
             return {'ok': True, 'output': '\n'.join(lines)}
         except (paramiko.SSHException, EOFError, OSError, socket.error) as exc:
@@ -948,6 +965,9 @@ class Api:
             return {'ok': False, 'disconnected': True, 'error': f'SSH connection lost: {exc}', 'output': '\n'.join(lines + ['[!] ' + str(exc)])}
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': '\n'.join(lines + ['[!] ' + str(exc)])}
+
+    def install_lg_callback(self):
+        return self.install_alemtv_app(_callback=True)
 
     def launch_alemtv_app(self):
         if not self.client:
@@ -1098,6 +1118,126 @@ class Api:
         self.profile_map = valid_map
         self._save_profile_map(self.profile_map)
         return {'profiles': sorted(self.profile_map.keys(), key=str.casefold)}
+
+    def browse_tv_package(self, platform_name):
+        filters = {'lg': 'webOS application (*.ipk)', 'samsung': 'Tizen application (*.wgt)'}
+        if platform_name not in filters:
+            return {'error': 'Unsupported TV platform.'}
+        if not self.window:
+            return {'error': 'File picker is not ready.'}
+        try:
+            selected = self.window.create_file_dialog(self.open_dialog_type, allow_multiple=False,
+                                                      file_types=[filters[platform_name]])
+            if not selected:
+                return {'cancelled': True}
+            return {'path': selected[0] if isinstance(selected, (list, tuple)) else selected}
+        except Exception as exc:
+            return {'error': str(exc)}
+
+    def install_local_lg_ipk(self, path):
+        if not self.client:
+            return {'ok': False, 'error': 'Connect to LG Developer Mode over SSH first.'}
+        try:
+            data = read_package(path, '.ipk')
+            validate_ipk(data)
+        except (ValueError, OSError) as exc:
+            return {'ok': False, 'error': str(exc)}
+        transport = self.client.get_transport() if hasattr(self.client, 'get_transport') else None
+        if transport is not None and not transport.is_active():
+            return {'ok': False, 'error': 'LG SSH session closed. Reconnect first.'}
+        token = uuid.uuid4().hex
+        remote_ipk = self._tv_temp_dir() + '/neon_custom_' + token + '.ipk'
+        fifo = self._tv_temp_dir() + '/neon_custom_' + token + '.fifo'
+        lines = ['[+] Installing selected IPK without modifying or signing it.']
+        try:
+            sftp = self.client.open_sftp()
+            try:
+                with sftp.open(remote_ipk, 'wb') as remote:
+                    remote.write(data)
+            finally:
+                sftp.close()
+            payload = json.dumps({'id': 'com.ares.defaultName', 'ipkUrl': remote_ipk, 'subscribe': True})
+            cmd = (
+                'LUNA=$(command -v luna-send-pub || command -v luna-send); '
+                '[ -n "$LUNA" ] || { echo "luna-send not found"; exit 1; }; '
+                f'FIFO={shlex.quote(fifo)}; IPK={shlex.quote(remote_ipk)}; '
+                'rm -f "$FIFO"; mkfifo "$FIFO" || exit 1; '
+                f'"$LUNA" -w 35000 -i \'luna://com.webos.appInstallService/dev/install\' {shlex.quote(payload)} >"$FIFO" 2>&1 & '
+                'LPID=$!; STATUS=1; '
+                'while IFS= read -r line; do echo "$line"; case "$line" in '
+                '*\'"state":"installed"\'*|*\'"state": "installed"\'*) STATUS=0; break;; '
+                '*\'"returnValue":false\'*|*\'"returnValue": false\'*|*\'"errorText"\'*|*\'install failed\'*|*\'FAILED\'*) STATUS=1; break;; '
+                'esac; done < "$FIFO"; kill "$LPID" 2>/dev/null || true; '
+                'rm -f "$FIFO" "$IPK"; exit $STATUS'
+            )
+            code = self._exec(cmd, lines, timeout=45)
+            if code != 0:
+                return {'ok': False, 'error': 'LG rejected IPK installation; see log.', 'output': '\n'.join(lines)}
+            lines.append('[+] LG reported installation complete. Open the app on the TV.')
+            return {'ok': True, 'output': '\n'.join(lines)}
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': '\n'.join(lines)}
+        finally:
+            try:
+                cleanup = self.client.open_sftp()
+                try:
+                    cleanup.remove(remote_ipk)
+                finally:
+                    cleanup.close()
+            except Exception:
+                pass
+
+    def install_local_samsung_wgt(self, ip, path, _expected_pkg=None, _launch=False):
+        try:
+            clean_ip = self._resolve_samsung_ip(ip)
+            data = read_package(path, '.wgt')
+            pkg_id, app_id = validate_wgt(data)
+            if _expected_pkg and pkg_id != _expected_pkg:
+                raise ValueError('Bundled application has an unexpected package ID.')
+        except (ValueError, OSError) as exc:
+            return {'ok': False, 'error': str(exc)}
+        lines = ['[+] Installing selected WGT: ' + pkg_id + '. Existing signatures will be replaced.']
+        self._samsung_auth_stop.clear()
+        try:
+            with SdbClient(clean_ip, timeout=10.0) as sdb:
+                caps = sdb.capability()
+                duid = sdb.get_duid(caps=caps)
+                sdk_path = sdb.resolve_sdk_toolpath(caps)
+                if not re.fullmatch(r'/[A-Za-z0-9_./-]+', sdk_path) or '..' in sdk_path.split('/'):
+                    raise ValueError('Invalid SDK upload path returned by TV.')
+                cert_mgr = self._samsung_cert_manager()
+                bundle = cert_mgr.find_saved_samsung_certs(duid)
+                if bundle is None:
+                    self._sam_log('[CERT] Samsung Account sign-in may be required...')
+                    bundle = cert_mgr.sign_in_and_provision(duid, open_browser=True, timeout=240.0,
+                                stop_event=self._samsung_auth_stop,
+                                url_cb=lambda u: self._sam_log('[CERT] Sign-in URL: ' + u))
+                signed = sign_wgt_bytes(data, bundle['author_key'], bundle['author_certs'], bundle['dist_key'], bundle['dist_certs'])
+                verify_wgt_signatures(signed)
+                remote = sdk_path + '/' + pkg_id + '.wgt'
+                sdb.push_bytes(signed, remote)
+                result = sdb.install_wgt(pkg_id, remote, timeout=120.0)
+                if result.strip():
+                    lines.extend(result.strip().splitlines())
+                diag = diagnose_install_output(result, pkg_id)
+                if diag.get('status') != 'ok':
+                    return {'ok': False, 'error': diag.get('reason') or 'TV did not confirm WGT installation; see log.', 'output': '\n'.join(lines)}
+                lines.append('[+] Samsung reported installation complete. Open the app on the TV.')
+                if _launch:
+                    try:
+                        launch = sdb.launch_app(app_id)
+                        lines.append('[+] Launch command sent: ' + str(launch))
+                    except Exception as exc:
+                        lines.append('[i] Installed, but automatic launch failed: ' + str(exc))
+                return {'ok': True, 'pkg_id': pkg_id, 'app_id': app_id, 'output': '\n'.join(lines)}
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': '\n'.join(lines)}
+
+    def install_samsung_belet_client(self, ip=None):
+        """Sign and install the separate experimental client, never the ordinary Belet."""
+        return self.install_local_samsung_wgt(
+            ip, resource('samsung-belet/BeletSamsungClient-unsigned.wgt'),
+            _expected_pkg='BeletFilm1', _launch=True)
 
     def browse_profile(self):
         if not self.window:
@@ -1983,7 +2123,9 @@ class Api:
 
         # Refresh active ICS route if sharing is live so Windows SharedAccess (192.168.137.1:53) picks up new upstream DNS immediately.
         ics_refreshed = False
-        if reapply_ics and pub_name and self.app_shared_pair and self.app_shared_pair[1]:
+        if reapply_ics and self._combined_sharing:
+            lines.append('[i] Restart combined sharing to refresh the ICS DNS proxy.')
+        elif reapply_ics and pub_name and self.app_shared_pair and self.app_shared_pair[1]:
             pair_pub, pair_priv = self.app_shared_pair
             if self.hotspot_active and self.hotspot_mode == 'winrt':
                 lines.append('[i] Win10/11 Mobile Hotspot is live: Windows DNS cache flushed. If TV keeps cached DNS, restart the hotspot (Stop -> Start).')
@@ -2148,6 +2290,8 @@ class Api:
             return {'error': str(exc)}
 
     def stop_sharing(self):
+        if self._combined_sharing:
+            return self.stop_combined_sharing()
         if platform.system() != 'Windows':
             return {'error': 'Windows only.'}
         script = (
@@ -2450,7 +2594,202 @@ class Api:
             'output': '\n'.join(lines),
         }
 
+    def _configure_combined_ics(self, public, ethernet, hotspot):
+        # Never alter an existing ICS configuration; rollback only adapters we enabled.
+        payload = base64.b64encode(json.dumps([public, ethernet, hotspot]).encode('utf-8')).decode('ascii')
+        script = (
+            f"$n=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}'))|ConvertFrom-Json; "
+            "$m=New-Object -ComObject HNetCfg.HNetShare; $cs=@{}; "
+            "foreach($c in $m.EnumEveryConnection){"
+            "$p=$m.NetConnectionProps.Invoke($c); $q=$m.INetSharingConfigurationForINetConnection.Invoke($c); "
+            "if($q.SharingEnabled){throw 'Another ICS configuration is active; it was not changed.'}; "
+            "if($p.Name -in $n){$cs[$p.Name]=$c}}; "
+            "foreach($name in $n){if(-not $cs.ContainsKey($name)){throw ('Adapter not found: '+$name)}}; "
+            "$enabled=@(); try{ "
+            "foreach($i in @(0,1,2)){ $q=$m.INetSharingConfigurationForINetConnection.Invoke($cs[$n[$i]]); "
+            "$q.EnableSharing([int]($i -ne 0)); $enabled+=,$q }; "
+            "foreach($i in @(0,1,2)){ $q=$m.INetSharingConfigurationForINetConnection.Invoke($cs[$n[$i]]); "
+            "if(-not $q.SharingEnabled -or $q.SharingConnectionType -ne [int]($i -ne 0)){throw ('ICS did not retain adapter: '+$n[$i])} }; "
+            "'Combined ICS enabled.' "
+            "}catch{ $failure=$_; $rollbackErrors=@(); "
+            "foreach($q in $enabled){try{$q.DisableSharing()}catch{$rollbackErrors+=($_.Exception.Message)}}; "
+            "if($rollbackErrors.Count){throw ('ICS setup failed and rollback failed: '+$failure+'; '+($rollbackErrors -join '; '))}; throw $failure }"
+        )
+        return self._powershell(script, timeout=45)
+
+    def start_combined_sharing(self, ssid, password, ethernet_name=None, use_vpn=True):
+        """Attempt ICS on Ethernet and Hosted Network; never switch VPN traffic to the uplink."""
+        if platform.system() != 'Windows':
+            return {'error': 'Combined sharing is Windows-only.'}
+        if not isinstance(use_vpn, bool):
+            return {'error': 'Choose VPN or direct sharing explicitly.'}
+        if self.hotspot_active or self.ethernet_active or self.app_shared_pair or self._combined_sharing:
+            return {'error': 'Stop existing NEON sharing before starting combined sharing.'}
+        if use_vpn and self.vpn_state != 'CONNECTED':
+            return {'error': 'Connect Conf / OpenVPN before starting VPN sharing.'}
+        if not use_vpn and self.vpn_state != 'DISCONNECTED':
+            return {'error': 'Disconnect Conf / OpenVPN before starting direct sharing.'}
+        ssid = str(ssid or '').strip()
+        password = str(password or '')
+        if not re.fullmatch(r'[A-Za-z0-9 _.-]{1,32}', ssid):
+            return {'error': 'SSID must be 1–32 ASCII letters, numbers, spaces, dots, underscores or hyphens.'}
+        if not re.fullmatch(r'[A-Za-z0-9!@#$%^&*()_+\-=.]{8,63}', password):
+            return {'error': 'Hotspot password must be 8–63 supported ASCII characters.'}
+        if self._driver_supports_hosted_network() is not True:
+            return {'error': 'Simultaneous sharing requires Hosted Network support. This Wi-Fi driver does not report support; Windows Mobile Hotspot is not supported for this mode.'}
+        found = self.network_connections()
+        adapters = found.get('adapters', [])
+        if found.get('error') and not adapters:
+            return {'error': found['error']}
+        if any(a.get('shared') for a in adapters):
+            return {'error': 'Windows ICS is already active. Stop the existing configuration first; it was not changed.'}
+        if use_vpn:
+            pub = self._select_vpn_public_adapter(adapters)
+            if (not pub or not self._is_matching_vpn_adapter(pub)
+                    or not (pub.get('status') == 2 or pub.get('has_vpn_route'))):
+                return {'error': 'The NEON VPN adapter could not be verified; no sharing was started.'}
+        else:
+            choices = [a for a in adapters if a.get('status') == 2 and a.get('has_default_gw')
+                       and (a.get('category') or self._classify_adapter(a)) in ('wifi', 'ethernet')]
+            if len(choices) != 1:
+                return {'error': 'Expected exactly one connected physical internet uplink with a default gateway.'}
+            pub = choices[0]
+        public = pub.get('name')
+        wired = [a for a in adapters if a.get('name') != public and not a.get('has_default_gw')
+                 and (a.get('category') or self._classify_adapter(a)) == 'ethernet']
+        requested = str(ethernet_name or '').strip()
+        if requested:
+            wired = [a for a in wired if a.get('name') == requested]
+        else:
+            wired.sort(key=lambda a: (a.get('status') != 2, a.get('hardware') is not True))
+        if not wired:
+            return {'error': 'A separate physical Ethernet target is required.'}
+        ethernet = wired[0]['name']
+        started = False
+        configured = False
+        try:
+            rc, out, err = self._run_netsh('wlan', 'set', 'hostednetwork', 'mode=allow',
+                                           'ssid=' + ssid, 'key=' + password, 'keyUsage=persistent', timeout=15)
+            if rc:
+                raise RuntimeError(err or out or 'Hosted Network configuration failed.')
+            rc, out, err = self._run_netsh('wlan', 'start', 'hostednetwork', timeout=15)
+            if rc:
+                raise RuntimeError(err or out or 'Hosted Network failed to start.')
+            started = True
+            hotspot = None
+            for _ in range(8):
+                _, hotspot, _ = self._detect_hotspot_and_vpn_adapters()
+                if hotspot:
+                    break
+                time.sleep(1)
+            if not hotspot or hotspot in (public, ethernet):
+                raise RuntimeError('Could not identify a separate hotspot adapter.')
+            self._configure_combined_ics(public, ethernet, hotspot)
+            configured = True
+            self._combined_sharing = {'public': public, 'ethernet': ethernet, 'hotspot': hotspot, 'vpn': use_vpn}
+            self.app_shared_pair = (public, hotspot)
+            self.hotspot_active, self.hotspot_mode = True, 'hostednetwork'
+            self.ethernet_active, self.ethernet_adapter = True, ethernet
+            # If the tunnel exited while the hotspot/ICS were being configured, tear down immediately.
+            if use_vpn and self.vpn_state != 'CONNECTED':
+                stopped = self.stop_combined_sharing()
+                return {'error': 'VPN disconnected during setup. Combined sharing was stopped.' +
+                        (' Cleanup failed: ' + stopped['error'] if stopped.get('error') else '')}
+            self.save_settings({'ethernet_adapter': ethernet, 'hotspot_ssid': ssid})
+            return {'ok': True, 'public_adapter': public, 'ethernet_adapter': ethernet,
+                    'hotspot_adapter': hotspot, 'vpn': use_vpn,
+                    'output': 'ICS configured for Ethernet and hotspot. Verify public IP and DNS on BOTH clients; this is not an OS-level kill switch.'}
+        except Exception as exc:
+            if configured:
+                self.stop_combined_sharing()
+            elif started:
+                try:
+                    rc, out, err = self._run_netsh('wlan', 'stop', 'hostednetwork', timeout=15)
+                    if rc:
+                        return {'error': str(exc) + '; hotspot cleanup failed: ' + (err or out)}
+                except Exception as cleanup:
+                    return {'error': str(exc) + '; hotspot cleanup failed: ' + str(cleanup)}
+            return {'error': str(exc)}
+
+    def stop_combined_sharing(self):
+        session = self._combined_sharing
+        if not session:
+            return {'ok': True, 'output': 'Combined sharing is not active.'}
+        names = [session['public'], session['ethernet'], session['hotspot']]
+        payload = base64.b64encode(json.dumps(names).encode('utf-8')).decode('ascii')
+        script = (
+            f"$n=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}'))|ConvertFrom-Json; "
+            "$m=New-Object -ComObject HNetCfg.HNetShare; $errors=@(); "
+            "foreach($c in $m.EnumEveryConnection){$p=$m.NetConnectionProps.Invoke($c); "
+            "if($p.Name -in $n){$q=$m.INetSharingConfigurationForINetConnection.Invoke($c); "
+            "if($q.SharingEnabled){try{$q.DisableSharing()}catch{$errors+=($_.Exception.Message)}}}}; "
+            "if($errors.Count){throw ($errors -join '; ')}; 'Combined ICS disabled.'"
+        )
+        errors = []
+        try:
+            self._powershell(script, timeout=30)
+        except Exception as exc:
+            errors.append('ICS: ' + str(exc))
+        try:
+            rc, out, err = self._run_netsh('wlan', 'stop', 'hostednetwork', timeout=15)
+            if rc:
+                errors.append('Hotspot: ' + (err or out or 'stop failed'))
+        except Exception as exc:
+            errors.append('Hotspot: ' + str(exc))
+        if errors:
+            return {'error': 'Cleanup incomplete; inspect Windows ICS and hotspot settings: ' + '; '.join(errors)}
+        self._combined_sharing = None
+        self.app_shared_pair = None
+        self.hotspot_active = False
+        self.hotspot_mode = None
+        self.ethernet_active = False
+        self.ethernet_adapter = None
+        return {'ok': True, 'output': 'Combined Ethernet and hotspot sharing stopped.'}
+
+    def start_direct_ethernet(self, ethernet_name=None):
+        """Share a physical uplink over Ethernet, explicitly without NEON VPN."""
+        if platform.system() != 'Windows':
+            return {'error': 'Ethernet ICS sharing is Windows-only.'}
+        if self.vpn_state != 'DISCONNECTED':
+            return {'error': 'Disconnect Conf / OpenVPN before starting direct Ethernet sharing.'}
+        if self.hotspot_active or self.ethernet_active or self.app_shared_pair:
+            return {'error': 'Stop the existing NEON sharing session before starting direct Ethernet sharing.'}
+        found = self.network_connections()
+        adapters = found.get('adapters', [])
+        if found.get('error') and not adapters:
+            return {'error': found['error']}
+        uplinks = [a for a in adapters if a.get('has_default_gw') and a.get('status') == 2
+                   and (a.get('category') or self._classify_adapter(a)) in ('wifi', 'ethernet')]
+        if len(uplinks) != 1:
+            return {'error': 'Expected one connected Wi-Fi or Ethernet internet uplink with a default gateway. Check adapters and disconnect extra uplinks.'}
+        public = uplinks[0]['name']
+        wired = [a for a in adapters if a.get('name') != public and not a.get('has_default_gw')
+                 and (a.get('category') or self._classify_adapter(a)) == 'ethernet']
+        requested = str(ethernet_name or '').strip()
+        if requested:
+            wired = [a for a in wired if a.get('name') == requested]
+        else:
+            wired.sort(key=lambda a: (a.get('status') != 2, a.get('hardware') is not True))
+        if not wired:
+            return {'error': 'No separate physical Ethernet target found. Do not select the internet uplink.'}
+        private = wired[0]['name']
+        if any(a.get('shared') for a in adapters):
+            return {'error': 'Windows ICS is already active. Stop the existing sharing configuration first; it was not changed.'}
+        sharing = self.set_sharing(public, private)
+        if sharing.get('error'):
+            if self._uplink_dns_backups:
+                self._restore_uplink_dns_backups()
+            return {'error': 'Direct Ethernet sharing failed: ' + sharing['error']}
+        self.ethernet_active = True
+        self.ethernet_adapter = private
+        self.save_settings({'ethernet_adapter': private})
+        return {'ok': True, 'ethernet_adapter': private, 'public_adapter': public,
+                'output': 'Direct internet sharing: ' + public + ' -> ' + private +
+                          '. No NEON VPN is used. Set the client to DHCP and verify its public IP and DNS. Other VPN software may affect routing.'}
+
     def stop_vpn_ethernet(self):
+        if self._combined_sharing:
+            return self.stop_combined_sharing()
         messages = []
         errors = []
         target = self.ethernet_adapter
@@ -2615,6 +2954,8 @@ class Api:
             return {'error': str(exc)}
 
     def stop_vpn_hotspot(self):
+        if self._combined_sharing:
+            return self.stop_combined_sharing()
         messages = []
         errors = []
         if self.app_shared_pair:
@@ -2736,7 +3077,64 @@ class Api:
         self._cleanup_auth_file()
         self.cancel_samsung_auth()
         self.disconnect_tv()
+        self.disconnect_lg_remote()
         self.disconnect_samsung()
+
+    # LG webOS remote: independent of the SSH Developer Mode session.
+    def _lg_remote_key_path(self):
+        return os.path.join(self._data_dir(), 'lg_remote_keys.json')
+
+    def connect_lg_remote(self, ip):
+        host = self._normalize_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Enter a valid LG TV IP address or hostname.'}
+        with self._lg_remote_lock:
+            self.disconnect_lg_remote()
+            path = self._lg_remote_key_path()
+            try:
+                with open(path, 'r', encoding='utf-8') as file:
+                    keys = json.load(file)
+                if not isinstance(keys, dict):
+                    keys = {}
+            except (OSError, ValueError):
+                keys = {}
+            remote = LGRemote(host)
+            try:
+                key = remote.connect(keys.get(host))
+                self.lg_remote = remote
+                keys[host] = key
+                try:
+                    os.makedirs(self._data_dir(), exist_ok=True)
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, 'w', encoding='utf-8') as file:
+                        json.dump(keys, file)
+                except OSError as exc:
+                    return {'ok': True, 'output': 'LG remote connected, but pairing could not be saved: ' + str(exc)}
+                return {'ok': True, 'output': 'LG remote connected. Accept the connection request on the TV if prompted.'}
+            except Exception as exc:
+                remote.close()
+                return {'ok': False, 'error': 'LG remote connection failed: ' + str(exc)}
+
+    def disconnect_lg_remote(self):
+        with self._lg_remote_lock:
+            remote, self.lg_remote = self.lg_remote, None
+            if remote:
+                remote.close()
+        return {'ok': True, 'output': 'LG remote disconnected.'}
+
+    def lg_remote_send_key(self, key):
+        clean = str(key or '').strip().lower()
+        if clean not in LG_REMOTE_KEYS:
+            return {'ok': False, 'error': 'Unsupported LG remote button.'}
+        with self._lg_remote_lock:
+            if not self.lg_remote:
+                return {'ok': False, 'error': 'Connect the LG remote first.'}
+            try:
+                self.lg_remote.send_key(clean)
+                return {'ok': True}
+            except Exception as exc:
+                self.disconnect_lg_remote()
+                return {'ok': False, 'error': 'LG remote disconnected. Reconnect and try again: ' + str(exc)}
 
     # ── Samsung Smart TV (Tizen WS/WSS 8001/8002 + Legacy Orsay 55000) ──────
 
@@ -3267,6 +3665,8 @@ class Api:
         except ValueError as exc:
             return {'ok': False, 'error': str(exc)}
 
+        pkg_id = BELET_PKG_ID
+        app_id = BELET_APP_ID
         pc_ip = _tizen_local_ip(clean_ip)
         cert_mgr = self._samsung_cert_manager()
         self._samsung_auth_stop.clear()
@@ -3314,15 +3714,15 @@ class Api:
                         )
                         lines.append(f'[+] Samsung certificate saved: {bundle["source"]}')
 
-                # Return to the pre-proxy Belet package: older Samsung firmware opens its
-                # TV browser to the Belet site directly instead of navigating to localhost.
-                enable_service = False
-                remote_wgt = f'{sdk_toolpath}/{BELET_PKG_ID}.wgt'
+                # Prefer the fullscreen in-app proxy. If the TV rejects the service
+                # manifest, retry with the service-free in-app WebView package.
+                enable_service = True
+                remote_wgt = f'{sdk_toolpath}/{pkg_id}.wgt'
 
                 def _build_sign_push(use_service, active_bundle):
                     u_wgt = build_belet_wgt(
                         target_url=target_url,
-                        pkg_id=BELET_PKG_ID,
+                        pkg_id=pkg_id,
                         app_name='Belet',
                         icon_bytes=self._belet_wgt_icon(),
                         enable_service=use_service,
@@ -3338,20 +3738,20 @@ class Api:
                     verify_wgt_signatures(s_wgt)
                     a_sum = _format_chain_summary(active_bundle.get('author_certs'))
                     d_sum = _format_chain_summary(active_bundle.get('dist_certs'))
-                    lines.append(f'[+] Signed {BELET_PKG_ID}.wgt ({len(s_wgt) // 1024} KB, service={"on" if use_service else "fallback"})')
+                    lines.append(f'[+] Signed {pkg_id}.wgt ({len(s_wgt) // 1024} KB, service={"on" if use_service else "fallback"})')
                     lines.append(f'[+] Author chain: {a_sum} | Distributor chain: {d_sum}')
-                    self._sam_log(f'[WGT] Signed BeletTV001.wgt ({len(s_wgt) // 1024} KB) · Author ({a_sum}) | Dist ({d_sum}). Uploading via SDB...')
+                    self._sam_log(f'[WGT] Signed {pkg_id}.wgt ({len(s_wgt) // 1024} KB) · Author ({a_sum}) | Dist ({d_sum}). Uploading via SDB...')
                     sdb.push_bytes(s_wgt, remote_wgt)
                     lines.append(f'[+] Uploaded to {remote_wgt}')
                     return u_wgt
 
                 unsigned_wgt = _build_sign_push(enable_service, bundle)
-                self._sam_log(f'[SDB] Installing {BELET_PKG_ID} on TV...')
+                self._sam_log(f'[SDB] Installing {pkg_id} on TV...')
 
-                install_out = sdb.install_wgt(BELET_PKG_ID, remote_wgt, timeout=120.0)
+                install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                 if install_out.strip():
                     lines.extend(install_out.strip().splitlines())
-                diag = diagnose_install_output(install_out, BELET_PKG_ID)
+                diag = diagnose_install_output(install_out, pkg_id)
 
                 if enable_service and diag['status'] in ('manifest_error', 'api_mismatch'):
                     reason_line = (install_out or '').strip().splitlines()[-1] if (install_out or '').strip() else diag['status']
@@ -3359,22 +3759,22 @@ class Api:
                     lines.append(f'[i] TV firmware rejected background service manifest ({reason_line}); retrying pure-WebView package...')
                     enable_service = False
                     unsigned_wgt = _build_sign_push(False, bundle)
-                    install_out = sdb.install_wgt(BELET_PKG_ID, remote_wgt, timeout=120.0)
+                    install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                     if install_out.strip():
                         lines.extend(install_out.strip().splitlines())
-                    diag = diagnose_install_output(install_out, BELET_PKG_ID)
+                    diag = diagnose_install_output(install_out, pkg_id)
 
                 if diag['status'] == 'cert_mismatch':
                     self._sam_log('[SDB] Existing Belet has different cert (118012). Uninstalling old copy and retrying...')
                     lines.append('[i] Removing previous Belet installation (certificate mismatch) and retrying...')
                     try:
-                        sdb.uninstall_app(BELET_PKG_ID)
+                        sdb.uninstall_app(pkg_id)
                     except Exception:
                         pass
-                    install_out = sdb.install_wgt(BELET_PKG_ID, remote_wgt, timeout=120.0)
+                    install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                     if install_out.strip():
                         lines.extend(install_out.strip().splitlines())
-                    diag = diagnose_install_output(install_out, BELET_PKG_ID)
+                    diag = diagnose_install_output(install_out, pkg_id)
 
                 elif diag['status'] == 'cert_invalid_chain' and (
                     used_sdk_local or (bundle.get('source') and os.path.abspath(str(bundle['source'])) != os.path.abspath(cert_mgr.cert_dir))
@@ -3397,10 +3797,10 @@ class Api:
                     )
                     verify_wgt_signatures(signed_wgt)
                     sdb.push_bytes(signed_wgt, remote_wgt)
-                    install_out = sdb.install_wgt(BELET_PKG_ID, remote_wgt, timeout=120.0)
+                    install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                     if install_out.strip():
                         lines.extend(install_out.strip().splitlines())
-                    diag = diagnose_install_output(install_out, BELET_PKG_ID)
+                    diag = diagnose_install_output(install_out, pkg_id)
 
                 applist_out = ''
                 try:
@@ -3408,22 +3808,22 @@ class Api:
                 except Exception:
                     pass
 
-                installed_ok = (diag['status'] == 'ok') or (BELET_PKG_ID in applist_out)
+                installed_ok = (diag['status'] == 'ok') or (pkg_id in applist_out)
                 if not installed_ok:
                     # Some Tizen firmwares expect full app_id (<pkg>.<name>) instead of 10-char pkg_id
                     try:
-                        self._sam_log(f'[SDB] Retrying vd_appinstall with app ID {BELET_APP_ID}...')
-                        install_out_app = sdb.install_wgt(BELET_APP_ID, remote_wgt, timeout=120.0)
+                        self._sam_log(f'[SDB] Retrying vd_appinstall with app ID {app_id}...')
+                        install_out_app = sdb.install_wgt(app_id, remote_wgt, timeout=120.0)
                         if install_out_app.strip():
                             lines.extend(install_out_app.strip().splitlines())
-                        diag_app = diagnose_install_output(install_out_app, BELET_PKG_ID)
+                        diag_app = diagnose_install_output(install_out_app, pkg_id)
                         if diag_app['status'] == 'ok':
                             diag = diag_app
                             installed_ok = True
                         else:
                             try:
                                 applist_out = sdb.list_apps()
-                                if BELET_PKG_ID in applist_out:
+                                if pkg_id in applist_out:
                                     installed_ok = True
                             except Exception:
                                 pass
@@ -3444,19 +3844,19 @@ class Api:
                         'output': '\n'.join(lines),
                     }
 
-                lines.append(f'[+] Belet ({BELET_APP_ID}) installed successfully!')
+                lines.append(f'[+] Belet ({app_id}) installed successfully!')
                 launch_note = ''
                 try:
-                    launch_note = sdb.launch_app(BELET_APP_ID)
-                    lines.append(f'[+] Launched {BELET_APP_ID}: {launch_note}')
+                    launch_note = sdb.launch_app(app_id)
+                    lines.append(f'[+] Launched {app_id}: {launch_note}')
                 except Exception as lex:
                     lines.append(f'[i] Installed OK (auto-launch note: {lex})')
 
                 return {
                     'ok': True,
                     'duid': duid,
-                    'app_id': BELET_APP_ID,
-                    'pkg_id': BELET_PKG_ID,
+                    'app_id': app_id,
+                    'pkg_id': pkg_id,
                     'output': '\n'.join(lines),
                 }
         except Exception as exc:
@@ -3510,17 +3910,20 @@ class Api:
             icon_bytes=self._alemtv_wgt_icon(),
         )
 
-    def install_samsung_alemtv(self, ip=None, target_url=ALEMTV_DEFAULT_PORTAL, cert_mode='auto'):
+    def install_samsung_alemtv(self, ip=None, target_url=ALEMTV_DEFAULT_PORTAL, cert_mode='auto', _callback=False):
         try:
             clean_ip = self._resolve_samsung_ip(ip)
         except ValueError as exc:
             return {'ok': False, 'error': str(exc)}
 
         clean_url = self._normalize_portal_url(target_url)
+        pkg_id = msb_callback.SAMSUNG_PKG_ID if _callback else ALEMTV_PKG_ID
+        app_id = msb_callback.SAMSUNG_APP_ID if _callback else ALEMTV_APP_ID
+        app_name = "MSB Callback" if _callback else "Alem TV"
         pc_ip = _tizen_local_ip(clean_ip)
         cert_mgr = self._samsung_cert_manager()
         self._samsung_auth_stop.clear()
-        lines = [f'[+] Preparing Alem TV (.wgt) for Samsung TV {clean_ip} (PC IP {pc_ip}, portal {clean_url})...']
+        lines = [f'[+] Preparing {app_name} (.wgt) for Samsung TV {clean_ip} (PC IP {pc_ip})' + ('' if _callback else f', portal {clean_url}') + '...']
         try:
             with SdbClient(clean_ip, timeout=10.0) as sdb:
                 caps = sdb.capability()
@@ -3564,8 +3967,8 @@ class Api:
                         )
                         lines.append(f'[+] Samsung certificate saved: {bundle["source"]}')
 
-                remote_wgt = f'{sdk_toolpath}/{ALEMTV_PKG_ID}.wgt'
-                u_wgt = self.build_samsung_alemtv_wgt(target_url=clean_url)
+                remote_wgt = f'{sdk_toolpath}/{pkg_id}.wgt'
+                u_wgt = msb_callback.build_wgt() if _callback else self.build_samsung_alemtv_wgt(target_url=clean_url)
                 s_wgt = sign_wgt_bytes(
                     u_wgt,
                     bundle['author_key'],
@@ -3576,29 +3979,29 @@ class Api:
                 verify_wgt_signatures(s_wgt)
                 a_sum = _format_chain_summary(bundle.get('author_certs'))
                 d_sum = _format_chain_summary(bundle.get('dist_certs'))
-                lines.append(f'[+] Signed {ALEMTV_PKG_ID}.wgt ({len(s_wgt) // 1024} KB)')
+                lines.append(f'[+] Signed {pkg_id}.wgt ({len(s_wgt) // 1024} KB)')
                 lines.append(f'[+] Author chain: {a_sum} | Distributor chain: {d_sum}')
-                self._sam_log(f'[WGT] Signed {ALEMTV_PKG_ID}.wgt ({len(s_wgt) // 1024} KB) · Author ({a_sum}) | Dist ({d_sum}). Uploading via SDB...')
+                self._sam_log(f'[WGT] Signed {pkg_id}.wgt ({len(s_wgt) // 1024} KB) · Author ({a_sum}) | Dist ({d_sum}). Uploading via SDB...')
                 sdb.push_bytes(s_wgt, remote_wgt)
                 lines.append(f'[+] Uploaded to {remote_wgt}')
 
-                self._sam_log(f'[SDB] Installing {ALEMTV_PKG_ID} on TV...')
-                install_out = sdb.install_wgt(ALEMTV_PKG_ID, remote_wgt, timeout=120.0)
+                self._sam_log(f'[SDB] Installing {pkg_id} on TV...')
+                install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                 if install_out.strip():
                     lines.extend(install_out.strip().splitlines())
-                diag = diagnose_install_output(install_out, ALEMTV_PKG_ID)
+                diag = diagnose_install_output(install_out, pkg_id)
 
                 if diag['status'] == 'cert_mismatch':
-                    self._sam_log(f'[SDB] Existing {ALEMTV_PKG_ID} has different cert. Uninstalling old copy and retrying...')
-                    lines.append(f'[i] Removing previous {ALEMTV_PKG_ID} installation (certificate mismatch) and retrying...')
+                    self._sam_log(f'[SDB] Existing {pkg_id} has different cert. Uninstalling old copy and retrying...')
+                    lines.append(f'[i] Removing previous {pkg_id} installation (certificate mismatch) and retrying...')
                     try:
-                        sdb.uninstall_app(ALEMTV_PKG_ID)
+                        sdb.uninstall_app(pkg_id)
                     except Exception:
                         pass
-                    install_out = sdb.install_wgt(ALEMTV_PKG_ID, remote_wgt, timeout=120.0)
+                    install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                     if install_out.strip():
                         lines.extend(install_out.strip().splitlines())
-                    diag = diagnose_install_output(install_out, ALEMTV_PKG_ID)
+                    diag = diagnose_install_output(install_out, pkg_id)
 
                 elif diag['status'] == 'cert_invalid_chain' and (
                     used_sdk_local or (bundle.get('source') and os.path.abspath(str(bundle['source'])) != os.path.abspath(cert_mgr.cert_dir))
@@ -3621,10 +4024,10 @@ class Api:
                     )
                     verify_wgt_signatures(signed_wgt)
                     sdb.push_bytes(signed_wgt, remote_wgt)
-                    install_out = sdb.install_wgt(ALEMTV_PKG_ID, remote_wgt, timeout=120.0)
+                    install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                     if install_out.strip():
                         lines.extend(install_out.strip().splitlines())
-                    diag = diagnose_install_output(install_out, ALEMTV_PKG_ID)
+                    diag = diagnose_install_output(install_out, pkg_id)
 
                 applist_out = ''
                 try:
@@ -3632,21 +4035,21 @@ class Api:
                 except Exception:
                     pass
 
-                installed_ok = (diag['status'] == 'ok') or (ALEMTV_PKG_ID in applist_out)
+                installed_ok = (diag['status'] == 'ok') or (pkg_id in applist_out)
                 if not installed_ok:
                     try:
-                        self._sam_log(f'[SDB] Retrying vd_appinstall with app ID {ALEMTV_APP_ID}...')
-                        install_out_app = sdb.install_wgt(ALEMTV_APP_ID, remote_wgt, timeout=120.0)
+                        self._sam_log(f'[SDB] Retrying vd_appinstall with app ID {app_id}...')
+                        install_out_app = sdb.install_wgt(app_id, remote_wgt, timeout=120.0)
                         if install_out_app.strip():
                             lines.extend(install_out_app.strip().splitlines())
-                        diag_app = diagnose_install_output(install_out_app, ALEMTV_PKG_ID)
+                        diag_app = diagnose_install_output(install_out_app, pkg_id)
                         if diag_app['status'] == 'ok':
                             diag = diag_app
                             installed_ok = True
                         else:
                             try:
                                 applist_out = sdb.list_apps()
-                                if ALEMTV_PKG_ID in applist_out:
+                                if pkg_id in applist_out:
                                     installed_ok = True
                             except Exception:
                                 pass
@@ -3654,11 +4057,11 @@ class Api:
                         pass
 
                 if not installed_ok:
-                    reason = diag.get('reason') or 'Samsung TV did not complete Alem TV installation.'
+                    reason = diag.get('reason') or f'Samsung TV did not complete {app_name} installation.'
                     if diag['status'] in ('cert_not_yet_valid', 'cert_expired'):
                         reason += ' Check TV Date/Time & internet connection.'
                     elif diag['status'] == 'pkg_blocked':
-                        reason += ' Uninstall any old Alem TV copy from TV Apps or run Smart Hub reset.'
+                        reason += f' Check for a blocked or conflicting {app_name} package on TV.'
                     return {
                         'ok': False,
                         'duid': duid,
@@ -3667,19 +4070,19 @@ class Api:
                         'output': '\n'.join(lines),
                     }
 
-                lines.append(f'[+] Alem TV ({ALEMTV_APP_ID}) installed successfully!')
+                lines.append(f'[+] {app_name} ({app_id}) installed successfully!')
                 launch_note = ''
                 try:
-                    launch_note = sdb.launch_app(ALEMTV_APP_ID)
-                    lines.append(f'[+] Launched {ALEMTV_APP_ID}: {launch_note}')
+                    launch_note = sdb.launch_app(app_id)
+                    lines.append(f'[+] Launched {app_id}: {launch_note}')
                 except Exception as lex:
                     lines.append(f'[i] Installed OK (auto-launch note: {lex})')
 
                 return {
                     'ok': True,
                     'duid': duid,
-                    'app_id': ALEMTV_APP_ID,
-                    'pkg_id': ALEMTV_PKG_ID,
+                    'app_id': app_id,
+                    'pkg_id': pkg_id,
                     'output': '\n'.join(lines),
                 }
         except Exception as exc:
@@ -3689,8 +4092,11 @@ class Api:
                     f'[i] Enable Developer Mode on Samsung TV: Apps -> 1 2 3 4 5 -> Developer Mode ON -> '
                     f'Host PC IP: {pc_ip} -> hold Power 5s to reboot TV.'
                 )
-            lines.append(f'[!] Alem TV install failed: {err}')
+            lines.append(f'[!] {app_name} install failed: {err}')
             return {'ok': False, 'error': err, 'output': '\n'.join(lines)}
+
+    def install_samsung_callback(self, ip=None):
+        return self.install_samsung_alemtv(ip=ip, _callback=True)
 
     def launch_samsung_alemtv(self, ip=None):
         try:

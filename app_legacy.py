@@ -239,7 +239,7 @@ class NeonWindow(QMainWindow):
 
         # Navigation Buttons
         self.tab_buttons = []
-        icons = ['▣', '◈', '◉', '✦']
+        icons = ['▣', '◈', '◉', '✦', '☎']
         for idx, glyph in enumerate(icons):
             btn = QPushButton(glyph)
             btn.setObjectName('SideNavBtn')
@@ -394,6 +394,7 @@ class NeonWindow(QMainWindow):
         self._build_samsung_page()
         self._build_vpn_page()
         self._build_diag_page()
+        self._build_callback_page()
         self.switch_tab(0)
 
     def _build_tv_page(self):
@@ -457,6 +458,35 @@ class NeonWindow(QMainWindow):
         btn_row.addWidget(self.btn_disconnect_tv, 1)
         cl.addLayout(btn_row)
         left.addWidget(conn_card)
+
+        remote_card, remote_layout = self._make_card('lbl_card_lg_remote', 0)
+        self.lbl_card_lg_remote.setText('ПУЛЬТ LG / LG REMOTE')
+        remote_note = QLabel('TV и компьютер должны быть в одной сети. При подключении подтвердите запрос на ТВ. Developer Mode не нужен.')
+        remote_note.setObjectName('HintLabel')
+        remote_note.setWordWrap(True)
+        remote_layout.addWidget(remote_note)
+        row = QHBoxLayout()
+        for title, action in [('Подключить пульт', self._lg_remote_connect), ('Отключить', self._lg_remote_disconnect)]:
+            button = QPushButton(title)
+            button.setObjectName('PrimaryBtn' if title == 'Подключить пульт' else 'GhostBtn')
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(action)
+            row.addWidget(button)
+        remote_layout.addLayout(row)
+        self.lg_remote_status = QLabel('Пульт: отключён')
+        self.lg_remote_status.setObjectName('HintLabel')
+        remote_layout.addWidget(self.lg_remote_status)
+        buttons = QGridLayout()
+        for title, key, r, c in [('', '', 0, 0), ('▲', 'up', 0, 1), ('HOME', 'home', 0, 2), ('◀', 'left', 1, 0), ('OK', 'ok', 1, 1), ('▶', 'right', 1, 2), ('BACK', 'back', 2, 0), ('▼', 'down', 2, 1), ('MENU', 'menu', 2, 2), ('VOL −', 'volume_down', 3, 0), ('MUTE', 'mute', 3, 1), ('VOL +', 'volume_up', 3, 2), ('CH −', 'channel_down', 4, 0), ('▶ / ❚❚', 'play', 4, 1), ('CH +', 'channel_up', 4, 2)]:
+            if not key:
+                continue
+            button = QPushButton(title)
+            button.setObjectName('SamKeyPrimary' if key in ('up', 'down', 'left', 'right', 'ok') else 'SamKeyBtn')
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda checked=False, k=key: self._lg_remote_key(k))
+            buttons.addWidget(button, r, c)
+        remote_layout.addLayout(buttons)
+        left.addWidget(remote_card)
 
         # Card 2: Region Target
         reg_card, rl = self._make_card('lbl_card_reg', 2)
@@ -525,7 +555,6 @@ class NeonWindow(QMainWindow):
         self.btn_belet_install.setCursor(Qt.PointingHandCursor)
         self.btn_belet_install.clicked.connect(self.install_belet)
         bl.addWidget(self.btn_belet_install)
-
         b_row = QHBoxLayout()
         b_row.setSpacing(8)
         self.btn_belet_launch = QPushButton()
@@ -564,6 +593,7 @@ class NeonWindow(QMainWindow):
         self.alem_portal_combo = QComboBox()
         for p in ALEMTV_PORTALS:
             self.alem_portal_combo.addItem(p['name'], p['url'])
+        self.alem_portal_combo.setCurrentIndex(self.alem_portal_combo.findData(ALEMTV_DEFAULT_PORTAL))
         al.addWidget(self.alem_portal_combo)
 
         self.btn_alem_install = QPushButton()
@@ -586,6 +616,18 @@ class NeonWindow(QMainWindow):
         a_row.addWidget(self.btn_alem_remove, 1)
         al.addLayout(a_row)
         left.addWidget(alem_card)
+        local_card, local_layout = self._make_card('lbl_local_lg_app', 5)
+        self.lbl_local_lg_app.setText('УСТАНОВКА IPK ИЗ ФАЙЛА')
+        note = QLabel('Только проверенные файлы webOS IPK. Требуется подключение к LG по SSH / Developer Mode. IPK устанавливается без переподписания.')
+        note.setObjectName('HintLabel')
+        note.setWordWrap(True)
+        local_layout.addWidget(note)
+        btn = QPushButton('ВЫБРАТЬ IPK И УСТАНОВИТЬ')
+        btn.setObjectName('NormalBtn')
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(self.install_local_lg_ipk)
+        local_layout.addWidget(btn)
+        left.addWidget(local_card)
         left.addStretch(1)
 
         grid.addWidget(self._wrap_scroll(left_inner, fixed_width=392))
@@ -825,7 +867,12 @@ class NeonWindow(QMainWindow):
         self.btn_sam_belet_install.setCursor(Qt.PointingHandCursor)
         self.btn_sam_belet_install.clicked.connect(self.install_samsung_belet)
         sbl.addWidget(self.btn_sam_belet_install)
-
+        btn_belet_client = QPushButton('УСТАНОВИТЬ BELET SAMSUNG · НОВЫЙ КЛИЕНТ')
+        btn_belet_client.setObjectName('NormalBtn')
+        btn_belet_client.setCursor(Qt.PointingHandCursor)
+        btn_belet_client.setToolTip('Отдельный экспериментальный клиент. Обычный Belet не изменяется; вход и видео требуют проверки на ТВ.')
+        btn_belet_client.clicked.connect(self.install_samsung_belet_client)
+        sbl.addWidget(btn_belet_client)
         sbl_row = QHBoxLayout()
         sbl_row.setSpacing(8)
         self.btn_sam_belet_launch = QPushButton()
@@ -864,6 +911,7 @@ class NeonWindow(QMainWindow):
         self.sam_alem_portal_combo = QComboBox()
         for p in ALEMTV_PORTALS:
             self.sam_alem_portal_combo.addItem(p['name'], p['url'])
+        self.sam_alem_portal_combo.setCurrentIndex(self.sam_alem_portal_combo.findData(ALEMTV_DEFAULT_PORTAL))
         sal.addWidget(self.sam_alem_portal_combo)
 
         self.btn_sam_alem_install = QPushButton()
@@ -886,6 +934,18 @@ class NeonWindow(QMainWindow):
         sal_row.addWidget(self.btn_sam_alem_remove, 1)
         sal.addLayout(sal_row)
         left.addWidget(c_sam_alem)
+        local_card, local_layout = self._make_card('lbl_local_sam_app', 5)
+        self.lbl_local_sam_app.setText('УСТАНОВКА WGT ИЗ ФАЙЛА')
+        note = QLabel('Только проверенные Samsung Tizen web WGT. Пакет будет переподписан; текущая подпись автора заменяется.')
+        note.setObjectName('HintLabel')
+        note.setWordWrap(True)
+        local_layout.addWidget(note)
+        btn = QPushButton('ВЫБРАТЬ WGT И УСТАНОВИТЬ')
+        btn.setObjectName('NormalBtn')
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(self.install_local_samsung_wgt)
+        local_layout.addWidget(btn)
+        left.addWidget(local_card)
         left.addStretch(1)
 
         grid.addWidget(self._wrap_scroll(left_inner, fixed_width=428))
@@ -1229,6 +1289,11 @@ class NeonWindow(QMainWindow):
         eth_btn_row.addWidget(self.btn_eth_start, 2)
         eth_btn_row.addWidget(self.btn_eth_stop, 1)
         l_eth.addLayout(eth_btn_row)
+        self.btn_eth_direct = QPushButton()
+        self.btn_eth_direct.setObjectName('NormalBtn')
+        self.btn_eth_direct.setCursor(Qt.PointingHandCursor)
+        self.btn_eth_direct.clicked.connect(self.start_direct_ethernet_share)
+        l_eth.addWidget(self.btn_eth_direct)
         left.addWidget(c_eth)
 
         # Card 4: Hotspot
@@ -1276,6 +1341,14 @@ class NeonWindow(QMainWindow):
         hb_row.addWidget(self.btn_hs_start, 2)
         hb_row.addWidget(self.btn_hs_stop, 1)
         l2.addLayout(hb_row)
+        self.btn_combined_vpn = QPushButton()
+        self.btn_combined_vpn.setObjectName('NormalBtn')
+        self.btn_combined_vpn.clicked.connect(lambda: self.start_combined_share(True))
+        l2.addWidget(self.btn_combined_vpn)
+        self.btn_combined_direct = QPushButton()
+        self.btn_combined_direct.setObjectName('NormalBtn')
+        self.btn_combined_direct.clicked.connect(lambda: self.start_combined_share(False))
+        l2.addWidget(self.btn_combined_direct)
 
         self.btn_hs_win = QPushButton()
         self.btn_hs_win.setObjectName('GhostBtn')
@@ -1415,6 +1488,85 @@ class NeonWindow(QMainWindow):
 
         self.stack.addWidget(page)
 
+    def _install_callback_lg(self):
+        if not self.tv_connected:
+            self.toast.show_toast('Сначала подключите LG на странице LG', 'warn')
+            return
+        self._run_async('tv', self.api.install_lg_callback,
+                        lambda r: self.toast.show_toast('MSB Callback установлен на LG', 'info') if r.get('ok') else None)
+
+    def _install_callback_samsung(self):
+        ip = self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast('Введите IP Samsung на странице Samsung', 'warn')
+            return
+        self._run_async('sam', lambda: self.api.install_samsung_callback(ip),
+                        lambda r: self.toast.show_toast('MSB Callback установлен на Samsung', 'info') if r.get('ok') else None)
+
+    def _build_callback_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(30, 24, 30, 20)
+        heading = QLabel('MSB  /  CALLBACK')
+        heading.setStyleSheet('color:#8fffb3;font-size:30px;font-weight:700;letter-spacing:2px;')
+        layout.addWidget(heading)
+        subtitle = QLabel('TV Repair by Meryosab · Ремонт телевизоров и электроники в Ашхабаде')
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet('color:#9fb7aa;font-size:15px;margin-bottom:10px;')
+        layout.addWidget(subtitle)
+        actions = QHBoxLayout()
+        for label, handler in [('УСТАНОВИТЬ НА LG', self._install_callback_lg), ('УСТАНОВИТЬ НА SAMSUNG', self._install_callback_samsung)]:
+            button = QPushButton(label)
+            button.setObjectName('PrimaryBtn')
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(handler)
+            actions.addWidget(button)
+        layout.addLayout(actions)
+        panels = QHBoxLayout()
+        panels.setSpacing(18)
+        details = QFrame()
+        details.setObjectName('GlassCard')
+        dl = QVBoxLayout(details)
+        dl.setContentsMargins(24, 22, 24, 22)
+        for title, value in [('СВЯЗАТЬСЯ', '+993 63 70 59 53'), ('E-MAIL', 'tvrepairmsb@gmail.com'), ('АДРЕС', 'Ашхабад, Парахат 3/2, дом 14'), ('ОНЛАЙН', 'tvrepair.meryosab.com'), ('МЕССЕНДЖЕРЫ', 'WhatsApp · Telegram @meryosab_shop')]:
+            cap = QLabel(title)
+            cap.setStyleSheet('color:#7a9a87;font-size:11px;letter-spacing:1px;')
+            text = QLabel(value)
+            text.setWordWrap(True)
+            text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            text.setStyleSheet('color:#e8f4eb;font-size:17px;font-weight:600;')
+            dl.addWidget(cap)
+            dl.addWidget(text)
+        dl.addStretch(1)
+        panels.addWidget(details, 1)
+        for caption, image, helper in [('САЙТ TV REPAIR', 'msb_website_qr.png', 'Открыть сайт'), ('КОНТАКТНАЯ КАРТОЧКА', 'msb_contact_qr.png', 'Сканируйте и подтвердите сохранение контакта')]:
+            card = QFrame()
+            card.setObjectName('GlassCard')
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(18, 18, 18, 18)
+            lbl = QLabel(caption)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet('color:#a5e7b2;font-weight:bold;font-size:12px;')
+            qr = QLabel()
+            qr.setAlignment(Qt.AlignCenter)
+            qr.setPixmap(QPixmap(resource('assets/' + image)).scaled(210, 210, Qt.KeepAspectRatio, Qt.FastTransformation))
+            note = QLabel(helper)
+            note.setWordWrap(True)
+            note.setAlignment(Qt.AlignCenter)
+            note.setStyleSheet('color:#9fb7aa;font-size:12px;')
+            cl.addWidget(lbl)
+            cl.addWidget(qr)
+            cl.addWidget(note)
+            cl.addStretch(1)
+            panels.addWidget(card)
+        layout.addLayout(panels)
+        footer = QLabel('Приём техники — по предварительному контакту. Данные с tvrepair.meryosab.com.')
+        footer.setWordWrap(True)
+        footer.setStyleSheet('color:#819a89;font-size:12px;padding-top:14px;')
+        layout.addWidget(footer)
+        layout.addStretch(1)
+        self.stack.addWidget(page)
+
     def _build_footer(self):
         foot = QFrame()
         foot.setFixedHeight(26)
@@ -1440,6 +1592,7 @@ class NeonWindow(QMainWindow):
         self.tab_buttons[1].setText('◈   ' + self.t('nav_sam'))
         self.tab_buttons[2].setText('◉   ' + self.t('nav_vpn'))
         self.tab_buttons[3].setText('✦   ' + self.t('nav_diag'))
+        self.tab_buttons[4].setText('☎   MSB CALLBACK')
         self.side_status_cap.setText(self.t('side_status'))
         self.side_tv_lbl.setText(self.t('side_tv'))
         self.side_sam_lbl.setText(self.t('side_sam'))
@@ -1603,6 +1756,7 @@ class NeonWindow(QMainWindow):
         self.lbl_eth_iface.setText(self.t('lbl_eth_iface'))
         self.eth_auto_hint.setText(self.t('eth_auto_hint'))
         self.btn_eth_start.setText(self.t('btn_eth_start'))
+        self.btn_eth_direct.setText('Share internet without VPN' if self.lang == 'en' else 'Раздать интернет без VPN')
         self.btn_eth_stop.setText(self.t('btn_eth_stop'))
         if self.eth_combo.count() > 0 and self.eth_combo.itemData(0) == '':
             self.eth_combo.setItemText(0, 'Автовыбор (физический Ethernet)' if self.lang == 'ru' else 'Auto (Physical Ethernet)')
@@ -1613,6 +1767,8 @@ class NeonWindow(QMainWindow):
         self.lbl_hs_pass.setText(self.t('lbl_hs_pass'))
         self.hs_pass.setPlaceholderText(self.t('ph_hs_pass'))
         self.btn_hs_start.setText(self.t('btn_hs_start'))
+        self.btn_combined_vpn.setText('Ethernet + hotspot via VPN' if self.lang == 'en' else 'Ethernet + точка через VPN')
+        self.btn_combined_direct.setText('Ethernet + hotspot without VPN' if self.lang == 'en' else 'Ethernet + точка без VPN')
         self.btn_hs_stop.setText(self.t('btn_hs_stop'))
         self.btn_hs_win.setText(self.t('btn_hs_win'))
 
@@ -1653,6 +1809,10 @@ class NeonWindow(QMainWindow):
             ('page_vpn_title', 'page_vpn_sub'),
             ('page_diag_title', 'page_diag_sub'),
         ]
+        if self.current_tab == 4:
+            self.page_title.setText('MSB CALLBACK')
+            self.page_sub.setText('TV Repair by Meryosab · Ашхабад')
+            return
         tk, sk = titles[self.current_tab]
         self.page_title.setText(self.t(tk))
         self.page_sub.setText(self.t(sk))
@@ -2070,6 +2230,23 @@ class NeonWindow(QMainWindow):
     # ------------------------------------------------------------------
     # TV Actions
     # ------------------------------------------------------------------
+    def _lg_remote_connect(self):
+        ip = self.tv_ip.text().strip()
+        self.lg_remote_status.setText('Подтвердите запрос на телевизоре…')
+        def done(result):
+            self.lg_remote_status.setText('Пульт: подключён' if result.get('ok') else 'Пульт: отключён')
+        self._run_async('tv', lambda: self.api.connect_lg_remote(ip), done, 'Подключение пульта LG')
+
+    def _lg_remote_disconnect(self):
+        self._run_async('tv', self.api.disconnect_lg_remote,
+                        lambda result: self.lg_remote_status.setText('Пульт: отключён'))
+
+    def _lg_remote_key(self, key):
+        def done(result):
+            if not result.get('ok'):
+                self.lg_remote_status.setText('Пульт: отключён')
+        self._run_async('tv', lambda: self.api.lg_remote_send_key(key), done)
+
     def _update_area_kpi(self, code):
         clean = str(code or '').strip()
         if not clean:
@@ -2235,6 +2412,20 @@ class NeonWindow(QMainWindow):
     def open_system_tune(self):
         dlg = SystemTuneDialog(self, lang=self.lang)
         dlg.exec_()
+
+    def install_local_lg_ipk(self):
+        if not self.tv_connected:
+            self.toast.show_toast('Сначала подключите LG по SSH', 'warn')
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Выберите приложение для LG', '', 'webOS IPK (*.ipk)')
+        if not path:
+            return
+        body = ('Установить файл: ' + os.path.basename(path) + '?\n'
+                'Используйте только доверенные приложения. Существующее приложение с тем же ID может быть обновлено. IPK не переподписывается.')
+        if ConfirmDialog(self, 'Установка IPK на LG', body, 'Установить', 'Отмена').exec_() != ConfirmDialog.Accepted:
+            return
+        self._run_async('tv', lambda: self.api.install_local_lg_ipk(path),
+                        lambda r: self.toast.show_toast('LG подтвердил установку', 'info') if r.get('ok') else None)
 
     def install_belet(self):
         if not self.tv_connected:
@@ -2627,6 +2818,30 @@ class NeonWindow(QMainWindow):
                 )
 
         self._run_async('sam', lambda: self.api.samsung_auth_create_cert(ip), done)
+
+    def install_local_samsung_wgt(self):
+        ip = self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast('Введите IP Samsung', 'warn')
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Выберите приложение для Samsung', '', 'Tizen WGT (*.wgt)')
+        if not path:
+            return
+        body = ('Подписать и установить файл: ' + os.path.basename(path) + '?\n'
+                'Только доверенные приложения. Старая подпись автора будет заменена. Установка может обновить приложение с тем же ID или быть отклонена телевизором.')
+        if ConfirmDialog(self, 'Установка WGT на Samsung', body, 'Установить', 'Отмена').exec_() != ConfirmDialog.Accepted:
+            return
+        self._run_async('sam', lambda: self.api.install_local_samsung_wgt(ip, path),
+                        lambda r: self.toast.show_toast('Samsung подтвердил установку', 'info') if r.get('ok') else None)
+
+    def install_samsung_belet_client(self):
+        ip = self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast('Введите IP Samsung', 'warn')
+            return
+        self.log('[+] Подписываем и устанавливаем отдельный Belet Samsung (BeletFilm1).')
+        self._run_async('sam', lambda: self.api.install_samsung_belet_client(ip),
+                        lambda r: self.toast.show_toast('Belet Samsung установлен; проверьте запуск на ТВ', 'info') if r.get('ok') else None)
 
     def install_samsung_belet(self):
         ip = self.sam_ip.text().strip()
@@ -3038,16 +3253,63 @@ class NeonWindow(QMainWindow):
 
         self._run_async('net', lambda: self.api.start_vpn_ethernet(eth_name or None), done)
 
+    def start_direct_ethernet_share(self):
+        if not self._collect_and_validate_dns(persist=True):
+            return
+        eth_name = self.eth_combo.currentData() or ''
+        body = ('Share the regular internet connection over Ethernet without NEON VPN? '
+                'Traffic is not protected by NEON VPN. Stop other sharing first. '
+                'Other VPN software may affect routing.' if self.lang == 'en' else
+                'Раздать обычный интернет по Ethernet без VPN NEON? '
+                'Трафик не защищён VPN NEON. Сначала остановите другую раздачу. '
+                'Другие VPN могут влиять на маршрутизацию.')
+        dlg = ConfirmDialog(self, 'Direct Ethernet' if self.lang == 'en' else 'Ethernet без VPN',
+                            body, self.t('confirm_ok'), self.t('confirm_cancel'))
+        if dlg.exec_() != ConfirmDialog.Accepted:
+            return
+        self.log('$ enable direct Ethernet ICS (no NEON VPN)')
+        def done(r):
+            if r.get('ok'):
+                self._update_sam_host_ip_label()
+                self.toast.show_toast('Ethernet: no NEON VPN' if self.lang == 'en' else 'Ethernet: без VPN NEON', 'info')
+            elif r.get('error'):
+                self.refresh_adapters()
+        self._run_async('net', lambda: self.api.start_direct_ethernet(eth_name or None), done)
+
     def stop_ethernet_share(self):
         self.log('$ stop Ethernet Conf ICS sharing')
         self._run_async(
             'net',
             self.api.stop_vpn_ethernet,
-            lambda _r: self.toast.show_toast(
-                'Ethernet sharing stopped.' if self.lang == 'en' else 'Раздача по Ethernet остановлена.',
-                'info',
+            lambda r: self.toast.show_toast(
+                ('Stop failed: ' + r['error']) if r.get('error') else
+                ('Ethernet stopped (combined mode stops both outputs).' if self.lang == 'en' else 'Ethernet остановлен (в совместном режиме — оба выхода).'),
+                'warn' if r.get('error') else 'info',
             ),
         )
+
+    def start_combined_share(self, use_vpn):
+        if not self._collect_and_validate_dns(persist=True):
+            return
+        ssid, password = self.hs_ssid.text().strip(), self.hs_pass.text()
+        eth = self.eth_combo.currentData() or None
+        body = ('Share over Ethernet and Wi-Fi together? Requires Hosted Network support. '
+                + ('Traffic should use NEON VPN; verify IP and DNS on BOTH devices. This is not a guaranteed kill switch.'
+                   if use_vpn else 'Traffic is NOT protected by NEON VPN. Other VPN software may affect routing.')
+                if self.lang == 'en' else
+                'Раздать интернет одновременно по Ethernet и Wi-Fi? Требуется поддержка Hosted Network. '
+                + ('Трафик должен идти через VPN NEON: проверьте IP и DNS на ОБОИХ устройствах. Это не гарантированный kill switch.'
+                   if use_vpn else 'Трафик НЕ защищён VPN NEON. Другие VPN могут влиять на маршрутизацию.'))
+        dlg = ConfirmDialog(self, 'Ethernet + Wi-Fi', body, self.t('confirm_ok'), self.t('confirm_cancel'))
+        if dlg.exec_() != ConfirmDialog.Accepted:
+            return
+        self.log('$ start combined Ethernet + hotspot (' + ('Conf' if use_vpn else 'direct') + ')')
+        def done(result):
+            if result.get('ok'):
+                self.toast.show_toast('Ethernet + Wi-Fi: check both clients' if self.lang == 'en' else 'Ethernet + Wi-Fi: проверьте оба устройства', 'info')
+            else:
+                self.refresh_adapters()
+        self._run_async('net', lambda: self.api.start_combined_sharing(ssid, password, eth, use_vpn), done)
 
     def start_hotspot(self):
         if not self._collect_and_validate_dns(persist=True):
@@ -3087,7 +3349,7 @@ class NeonWindow(QMainWindow):
         self._run_async(
             'net',
             self.api.stop_vpn_hotspot,
-            lambda _r: self.toast.show_toast('Hotspot stopped.', 'info'),
+            lambda r: self.toast.show_toast(('Stop failed: ' + r['error']) if r.get('error') else ('Hotspot stopped (combined mode stops both outputs).' if self.lang == 'en' else 'Точка остановлена (в совместном режиме — оба выхода).'), 'warn' if r.get('error') else 'info'),
         )
 
     def open_hotspot_settings(self):

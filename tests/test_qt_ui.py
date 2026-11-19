@@ -26,17 +26,19 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     win.show()
     qt_app.processEvents()
 
-    assert win.stack.count() == 4
+    assert win.stack.count() == 5
     assert win.current_tab == 0
     assert not win.windowIcon().isNull()
 
-    # Tab switching across all 4 tabs (LG, Samsung, Conf, Diagnostics)
+    # Tab switching across LG, Samsung, Conf, Diagnostics and contacts
     win.switch_tab(1)
     assert win.current_tab == 1
     win.switch_tab(2)
     assert win.current_tab == 2
     win.switch_tab(3)
     assert win.current_tab == 3
+    win.switch_tab(4)
+    assert win.page_title.text() == 'MSB CALLBACK'
     win.switch_tab(0)
 
     # Language switch RU <-> EN (ensure no unintended & mnemonic markers)
@@ -327,3 +329,23 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     win._force_exit = True
     win.close()
     qt_app.processEvents()
+
+
+def test_new_buttons_have_neon_styles(qt_app, tmp_path, monkeypatch):
+    monkeypatch.setenv('APPDATA', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path))
+    win = NeonWindow(api=Api())
+    buttons = win.findChildren(QtWidgets.QPushButton)
+    def by_text(text):
+        matches = [b for b in buttons if b.text() == text]
+        assert matches, text
+        return matches
+    for text, style in [
+        ('Подключить пульт', 'PrimaryBtn'), ('Отключить', 'GhostBtn'),
+        ('▲', 'SamKeyPrimary'), ('HOME', 'SamKeyBtn'),
+        ('УСТАНОВИТЬ BELET SAMSUNG · НОВЫЙ КЛИЕНТ', 'NormalBtn'),
+        ('УСТАНОВИТЬ НА LG', 'PrimaryBtn'), ('УСТАНОВИТЬ НА SAMSUNG', 'PrimaryBtn'),
+    ]:
+        assert any(button.objectName() == style for button in by_text(text))
+        assert 'QPushButton#' + style in win.styleSheet()
+    win.close()

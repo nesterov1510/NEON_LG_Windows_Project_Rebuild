@@ -48,6 +48,10 @@ NEON runs `openvpn.exe` as a hidden background process and displays its live log
 3. Enter the hotspot SSID and password, then press **Start VPN Hotspot**. NEON automatically selects Hosted Network (Win 8.1) or Mobile Hotspot (Win 10/11), detects the connected VPN and hotspot virtual adapters, and configures ICS routing.
 4. If adapter detection fails, use **Refresh Adapters**, choose the VPN/public and hotspot/private adapters manually, and click **Route VPN → Hotspot**. Always test a client's public IP/DNS to confirm VPN egress.
 
+For ordinary internet over Ethernet without NEON VPN, disconnect Conf and choose **Share internet without VPN** (WebView: **Share without Conf**). The computer needs one connected physical Wi-Fi/Ethernet internet uplink and a separate Ethernet port for the client; set the client to DHCP. NEON refuses to replace an existing ICS session in this mode. Other VPN software can affect routing; verify the client's public IP and DNS. This mode is not VPN protected.
+
+For simultaneous Ethernet and Wi-Fi, use **Ethernet + hotspot via VPN** or **Ethernet + hotspot without VPN**. This experimental mode requires a Wi-Fi driver reporting Hosted Network support; it does not use Windows Mobile Hotspot. It attempts to configure Windows ICS with both private adapters and verifies the reported configuration. Some Windows versions, drivers, VPN adapters, or bridge configurations may reject this setup. Stop existing sharing first. Stopping either output stops both. Test internet, public IP and DNS separately on both clients; changing DNS may require stopping and restarting combined sharing. This mode has not been verified on physical Windows hardware.
+
 NEON stops the hosted network/mobile hotspot and its own ICS route on normal exit, disconnect, or unexpected tunnel exit. **This is not a guaranteed OS-level kill switch:** a system crash, forced kill, or driver/provider change can still bypass routing. Test with a non-sensitive device first.
 
 ## TV regions
@@ -55,3 +59,15 @@ NEON stops the hosted network/mobile hotspot and its own ICS route on normal exi
 The UI lists United States `22282`, CIS/SNG `3642` (requested; **not verified by upstream**), EU/KR group `19461`, and other codes. Upstream lists US `22282` as fully verified; compatibility varies by TV model/firmware. Region writes modify NVRAM and can affect features/apps. Always run **Read Current** first and proceed at your own risk.
 
 `change_region.sh` and `UPSTREAM-LICENSE` come from upstream. NEON is independent and unaffiliated with LG or OpenVPN.
+
+### Пульт LG webOS
+На странице LG введите IP телевизора и нажмите «Подключить» в карточке пульта. Компьютер и ТВ должны быть в одной локальной сети; при первом подключении разрешите запрос на телевизоре. Пульт работает отдельно от SSH и не требует Developer Mode. Ключ сопряжения сохраняется в пользовательской папке NEON: не передавайте файл `lg_remote_keys.json` другим людям. Соединение использует локальный webOS WebSocket без шифрования, поэтому применяйте его только в доверенной сети. Для включения выключенного телевизора пульт не предназначен. Поддержка отдельных кнопок зависит от модели и открытого приложения.
+
+### MSB Callback на телевизорах
+Раздел MSB Callback в NEON устанавливает отдельное приложение на LG (через Developer Mode и SSH) или Samsung (через Developer Mode, SDB и подпись). После установки контакты и два QR-кода хранятся внутри приложения и доступны без интернета. Для открытия сайта после сканирования телефон должен иметь интернет; контактная карточка доступна офлайн. Для установки нужны локальное сетевое соединение и, при необходимости получения сертификата Samsung, доступ к интернету.
+
+### Установка приложения из файла
+На странице LG нажмите **«Выбрать IPK и установить»** после подключения к Developer Mode по SSH. Выбранный IPK загружается на ТВ и устанавливается без изменения подписи; NEON не подписывает LG IPK. На странице Samsung укажите IP ТВ и нажмите **«Выбрать WGT и установить»**. NEON проверяет WGT с Tizen web-манифестом, использует сохранённый сертификат Samsung для этого ТВ или предлагает вход в Samsung Account, затем переподписывает и отправляет пакет через SDB. Оригинальный файл на компьютере не изменяется. Только используйте доверенные файлы: подпись NEON не делает чужой код безопасным. На телевизоре должен быть включён Developer Mode, для Samsung — указан IP компьютера и выполнена перезагрузка. Установка стороннего приложения может обновить приложение с тем же ID, а замена подписи автора может привести к отказу ТВ; NEON не удаляет установленные приложения автоматически. Совместимость, привилегии и запуск зависят от пакета, сертификата и модели ТВ. Физическая проверка требуется. Поддерживаются файлы до 128 МБ, WGT — только веб-приложения Tizen, не TPK и не другие форматы.
+
+### Экспериментальный Belet Samsung
+Отдельный клиент по материалам предоставленного Android-проекта находится в `belet_samsung_native/`. Для установки в NEON выберите «Установить Belet Samsung · Новый клиент»: пакет включён в сборку и подписывается для ТВ. Для ограничений и безопасности см. `belet_samsung_native/README.md`. Обычное приложение Belet не заменяется. Вход, каталог, управление и воспроизведение на телевизоре не подтверждены.
