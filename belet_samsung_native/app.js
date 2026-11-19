@@ -6,7 +6,7 @@
   var FILM = 'https://film.beletapis.com';
   var STORAGE = 'neon_belet_samsung_v1';
   var $ = function (id) { return document.getElementById(id); };
-  var session = null, tempToken = null, busy = false, refreshWait = [], lastMovieButton = null;
+  var session = null, tempToken = null, busy = false, refreshWait = [], lastMovieButton = null, qrGeneration = 0, qrTimer = null;
   try {
     if (window.tizen && window.tizen.tvinputdevice) {
       ['MediaPlay', 'MediaPause', 'MediaPlayPause', 'MediaStop', 'MediaRewind', 'MediaFastForward'].forEach(function (key) {
@@ -87,6 +87,48 @@
       $('send').disabled = !select.options.length; if (!preserveMessage) message('');
     });
   }
+  // A fresh code is issued by Belet. It is ephemeral and never persisted or logged.
+  function stopQr() {
+    qrGeneration++;
+    if (qrTimer !== null) { clearTimeout(qrTimer); qrTimer = null; }
+    $('qrImage').removeAttribute('src');
+  }
+  function startQr() {
+    stopQr();
+    var generation = qrGeneration, started = Date.now();
+    $('phoneSection').classList.add('hidden'); $('qrSection').classList.remove('hidden');
+    $('qrStatus').textContent = 'Получаем QR-код…'; message('');
+    request('GET', AUTH + '/api/v1/auth/get-qrcode', null, null, function (status, obj) {
+      if (generation !== qrGeneration) return;
+      if (!(status >= 200 && status < 300 && obj && typeof obj.code === 'string' && /^https:\/\/film\.belet\.me\/register\/[A-Za-z0-9-]+$/.test(obj.code) && typeof obj.qr_png === 'string' && obj.qr_png.length < 300000 && /^iVBORw0KGgo[A-Za-z0-9+/=]+$/.test(obj.qr_png))) {
+        $('qrStatus').textContent = 'Не удалось получить QR-код Belet. Попробуйте обновить.'; return;
+      }
+      var code = obj.code;
+      $('qrImage').src = 'data:image/png;base64,' + obj.qr_png;
+      $('qrStatus').textContent = 'Ожидаем сканирование на телефоне…';
+      function poll() {
+        if (generation !== qrGeneration) return;
+        if (Date.now() - started > 180000) { stopQr(); $('qrStatus').textContent = 'Время ожидания истекло. Обновите QR-код.'; return; }
+        request('POST', AUTH + '/api/v1/auth/check-qrcode-web', {code: code, fingerprint: device}, null, function (checkStatus, result) {
+          if (generation !== qrGeneration) return;
+          if (checkStatus >= 200 && checkStatus < 300 && result && typeof result.token === 'string' && result.token && typeof result.refresh_token === 'string' && result.refresh_token) {
+            stopQr(); session = {token: result.token, refresh_token: result.refresh_token, fingerprint: device};
+            if (!saveSession(session)) message('Вход сохранён только до закрытия приложения.');
+            $('qrSection').classList.add('hidden'); $('phoneSection').classList.remove('hidden'); loadHome(); return;
+          }
+          // The website reports HTTP 400 while waiting; avoid a tight retry loop.
+          if (checkStatus === 400 || (checkStatus >= 200 && checkStatus < 300)) {
+            qrTimer = setTimeout(poll, 3000); return;
+          }
+          $('qrStatus').textContent = checkStatus ? 'Не удалось проверить код (HTTP ' + checkStatus + '). Обновите QR-код или войдите по SMS.' : 'Нет ответа Belet. Обновите QR-код или войдите по SMS.';
+        });
+      }
+      qrTimer = setTimeout(poll, 3000);
+    });
+  }
+  $('openQr').onclick = function () { if (!device) { message('Не удалось создать идентификатор устройства.'); return; } startQr(); $('refreshQr').focus(); };
+  $('refreshQr').onclick = startQr;
+  $('closeQr').onclick = function () { stopQr(); $('qrSection').classList.add('hidden'); $('phoneSection').classList.remove('hidden'); $('phone').focus(); };
   $('send').onclick = function () {
     if (busy) return;
     var phone = $('phone').value.replace(/[^0-9]/g, '');
@@ -106,7 +148,7 @@
     request('POST', AUTH + '/api/v1/auth/check-code-mobile', {code: code, fingerprint: device, token: tempToken}, null, function (status, obj) {
       busy = false; $('code').value = '';
       if (!(status >= 200 && status < 300 && obj && typeof obj.token === 'string' && obj.token && typeof obj.refresh_token === 'string')) { fail(status); return; }
-      session = {token: obj.token, refresh_token: obj.refresh_token, fingerprint: device}; tempToken = null;
+      stopQr(); session = {token: obj.token, refresh_token: obj.refresh_token, fingerprint: device}; tempToken = null;
       if (!saveSession(session)) message('Вход сохранён только до закрытия приложения.');
       $('phone').value = ''; $('codeSection').classList.add('hidden'); loadHome();
     });

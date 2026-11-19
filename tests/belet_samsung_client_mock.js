@@ -1,6 +1,6 @@
 const fs = require('fs'), vm = require('vm'), assert = require('assert');
 const files = process.argv[2];
-let store = {}, calls = [], authMode = 'normal', listeners = {}, doc;
+let store = {}, calls = [], authMode = 'normal', listeners = {}, doc, timers = [], timerId = 0;
 function Element(tag) {
   this.style = {}; this.tagName = (tag || 'div').toUpperCase(); this.children = []; this.value = ''; this.textContent = ''; this.disabled = false;
   this.offsetWidth = 20; this.offsetHeight = 20;
@@ -14,7 +14,7 @@ function Element(tag) {
   Object.defineProperty(this,'options',{get:()=>this.children});
 }
 let ids = {};
-for(const id of ['login','home','player','logout','status','sessionNote','phone','otp','send','codeSection','code','verify','rows','video','playerTitle','back']) ids[id] = new Element(id==='otp'?'select':'div');
+for(const id of ['login','home','player','logout','status','sessionNote','phone','otp','send','codeSection','code','verify','rows','video','playerTitle','back','openQr','qrSection','phoneSection','qrImage','qrStatus','refreshQr','closeQr']) ids[id] = new Element(id==='otp'?'select':'div');
 doc={getElementById:id=>ids[id],createElement:tag=>new Element(tag),addEventListener:(type,fn)=>{listeners[type]=fn},activeElement:null};
 let responses=[];
 class XHR {
@@ -29,7 +29,7 @@ class XHR {
 }
 function queue(url,status,json){responses.push({url,status,json})}
 const ctx={document:doc, XMLHttpRequest:XHR, localStorage:{getItem:k=>store[k]||null,setItem:(k,v)=>{store[k]=v},removeItem:k=>{delete store[k]}},
-  window:{crypto:{getRandomValues(a){a.fill(7);return a}},confirm:()=>true}, Uint8Array, setTimeout:fn=>fn(), console, Number, Array, JSON, String, Math, encodeURIComponent};
+  window:{crypto:{getRandomValues(a){a.fill(7);return a}},confirm:()=>true}, Uint8Array, setTimeout:(fn,delay)=>{ if(delay===30){fn();return 0;} const id=++timerId; timers.push({id,fn}); return id; }, clearTimeout:id=>{timers=timers.filter(t=>t.id!==id);}, console, Number, Array, JSON, String, Math, encodeURIComponent};
 queue('/available-otp',200,{otp:[{name:'SMS',type:2}]});
 vm.runInNewContext(fs.readFileSync(files,'utf8'),ctx);
 assert.strictEqual(ids.otp.value,'2');
@@ -63,3 +63,17 @@ queue('/api/v1/home_page',200,{result:[{title:'Cinema',movies:[{id:42,type_id:1,
 queue('/api/v3/files/42?type=1',401,{});queue('/api/v2/auth/refresh-mobile',401,{});queue('/available-otp',200,{otp:[{name:'SMS',type:2}]});
 ids.rows.children[1].children[0].onclick();
 assert(!store.neon_belet_samsung_v1);assert(!ids.login.classList.contains('hidden'));assert.strictEqual(responses.length,0);
+
+// QR is fetched from Belet; pending and cancelled attempts never persist credentials.
+queue('/auth/get-qrcode',200,{code:'https://film.belet.me/register/mock-id-123',qr_png:'iVBORw0KGgoAAA='}); ids.openQr.onclick();
+assert(ids.qrImage.src.startsWith('data:image/png;base64,'));
+queue('/auth/check-qrcode-web',400,{msg:'waiting'}); timers.shift().fn();
+assert.deepStrictEqual(calls[calls.length-1].body,{code:'https://film.belet.me/register/mock-id-123',fingerprint:'07070707070707070707070707070707'});
+assert(!store.neon_belet_samsung_v1); assert.strictEqual(timers.length,1);
+queue('/auth/check-qrcode-web',200,{token:'qr-access',refresh_token:'qr-refresh'});
+queue('/api/v1/home_page',200,{result:[]}); timers.shift().fn();
+assert.strictEqual(JSON.parse(store.neon_belet_samsung_v1).token,'qr-access'); assert(!ids.home.classList.contains('hidden')); assert.strictEqual(timers.length,0);
+queue('/api/v1/auth/log-out',200,{});queue('/available-otp',200,{otp:[{name:'SMS',type:2}]});ids.logout.onclick();
+queue('/auth/get-qrcode',200,{code:'https://film.belet.me/register/mock-other',qr_png:'iVBORw0KGgoAAA='});ids.openQr.onclick();
+assert.strictEqual(timers.length,1);ids.closeQr.onclick();assert.strictEqual(timers.length,0);assert(!store.neon_belet_samsung_v1);
+queue('/auth/get-qrcode',200,{code:'https://malicious.example/register/id',qr_png:'iVBORw0KGgoAAA='});ids.openQr.onclick();assert.strictEqual(timers.length,0);assert(ids.qrStatus.textContent.indexOf('Не удалось')>=0);
