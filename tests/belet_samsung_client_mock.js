@@ -14,7 +14,7 @@ function Element(tag) {
   Object.defineProperty(this,'options',{get:()=>this.children});
 }
 let ids = {};
-for(const id of ['login','home','player','logout','status','sessionNote','phone','otp','send','codeSection','code','verify','rows','video','playerTitle','back','openQr','qrSection','phoneSection','qrImage','qrStatus','refreshQr','closeQr']) ids[id] = new Element(id==='otp'?'select':'div');
+for(const id of ['login','home','player','logout','status','sessionNote','phone','otp','send','codeSection','code','verify','rows','video','playerTitle','back','playVideo','openQr','qrSection','phoneSection','qrImage','qrStatus','refreshQr','closeQr']) ids[id] = new Element(id==='otp'?'select':'div');
 doc={getElementById:id=>ids[id],createElement:tag=>new Element(tag),addEventListener:(type,fn)=>{listeners[type]=fn},activeElement:null};
 let responses=[];
 class XHR {
@@ -43,7 +43,7 @@ assert.strictEqual(ids.rows.children.length,2); assert.strictEqual(ids.rows.chil
 queue('/api/v3/files/42?type=1',200,{sources:[{filename:'https://cdn.example.com/movie.m3u8'}]}); ids.rows.children[1].children[0].onclick();
 assert.strictEqual(ids.video.src,'https://cdn.example.com/movie.m3u8');assert(!ids.player.classList.contains('hidden'));
 function key(k){let prevented=false; listeners.keydown({keyCode:k,preventDefault(){prevented=true}}); return prevented;}
-assert(key(19)); assert(ids.video.paused); assert(key(415)); assert(!ids.video.paused); assert(key(37)); assert.strictEqual(ids.video.currentTime,10); assert(key(10009)); assert(!ids.home.classList.contains('hidden')); assert.strictEqual(doc.activeElement,ids.rows.children[1].children[0]);
+assert(key(19)); assert(ids.video.paused); ids.playVideo.onclick(); assert(!ids.video.paused); ids.playVideo.onclick(); assert(ids.video.paused); assert(key(415)); assert(!ids.video.paused); assert(key(37)); assert.strictEqual(ids.video.currentTime,10); assert(key(10009)); assert(!ids.home.classList.contains('hidden')); assert.strictEqual(doc.activeElement,ids.rows.children[1].children[0]);
 // A 401 refreshes once, persists the replacement token, then retries the same request.
 queue('/api/v3/files/42?type=1',401,{});queue('/api/v2/auth/refresh-mobile',200,{token:'access2',refresh_token:'refresh2'});
 queue('/api/v3/files/42?type=1',200,{sources:[{filename:'https://cdn.example.com/second.m3u8'}]});

@@ -204,10 +204,17 @@
       if (!source) { message('Сервис не предоставил поддерживаемый HTTPS-источник видео.'); return; }
       $('playerTitle').textContent = movie.title || movie.name || 'Belet';
       var video = $('video'); video.src = source; show('player'); message('');
-      var promise = video.play(); if (promise && promise.catch) promise.catch(function () { message('Не удалось начать воспроизведение.'); });
+      var promise = video.play(); if (promise && promise.catch) promise.catch(function () { message('Автозапуск не удался. Нажмите OK на кнопке «Воспроизвести».'); });
     });
   }
-  $('video').onerror = function () { message('Телевизор не смог воспроизвести этот формат или поток.'); };
+  function togglePlayback() {
+    var video = $('video');
+    if (!video.paused) { video.pause(); return; }
+    try { var promise = video.play(); if (promise && promise.catch) promise.catch(function () { message('Не удалось воспроизвести поток. Возможна несовместимость формата или ограничение сервиса.'); }); }
+    catch (e) { message('Не удалось запустить плеер телевизора.'); }
+  }
+  $('playVideo').onclick = togglePlayback;
+  $('video').onerror = function () { var err = $('video').error, code = err && err.code; message('Телевизор не смог воспроизвести поток' + (code ? ' (код плеера ' + code + ')' : '') + '. Причина может быть в формате, сети или ограничениях сервиса.'); };
   $('back').onclick = function () { var video = $('video'); video.pause(); video.removeAttribute('src'); video.load(); show('home', lastMovieButton); message(''); };
   $('logout').onclick = function () {
     if (!session || !window.confirm('Выйти из Belet на этом устройстве?')) return;
@@ -221,6 +228,7 @@
       if (!$('player').classList.contains('hidden')) { e.preventDefault(); $('back').click(); }
       return;
     }
+    if (!$('player').classList.contains('hidden') && key === 13 && current && current.tagName === 'BUTTON') return;
     if (!$('player').classList.contains('hidden') && (key === 415 || key === 19 || key === 179 || key === 413 || key === 412 || key === 417 || key === 13 || key === 37 || key === 39)) {
       var video = $('video'), promise;
       e.preventDefault();
