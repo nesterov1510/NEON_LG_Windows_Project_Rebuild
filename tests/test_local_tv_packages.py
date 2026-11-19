@@ -27,7 +27,7 @@ def test_valid_wgt_and_ipk():
 def test_reject_unsafe_and_invalid_wgt():
     with zipfile.ZipFile(io.BytesIO(build_belet_wgt())) as z:
         xml = z.read('config.xml')
-    for data in [wgt_with_manifest(xml, ['../bad']), wgt_with_manifest(xml, ['a\\b']),
+    for data in [wgt_with_manifest(xml, ['../bad']), wgt_with_manifest(xml, ['a/b']).replace(b'a/b', b'a\\b'),
                  wgt_with_manifest(xml.replace(b'BeletTV001.Belet', b'wrong;rm')),
                  wgt_with_manifest(b'<!DOCTYPE widget [<!ENTITY x "a">]><widget/>'),
                  wgt_with_manifest(b'<!DOCTYPE widget [<!ENTITY x "a">]><widget/>'.decode().encode('utf-16')),
