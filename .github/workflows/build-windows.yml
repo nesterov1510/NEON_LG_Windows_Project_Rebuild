@@ -20,7 +20,7 @@ jobs:
         shell: pwsh
         run: |
           foreach ($attempt in 1, 2) {
-            cmd /c "python -m pytest -v --tb=short tests/test_core.py tests/test_alemtv.py > pytest_report.txt 2>&1"
+            cmd /c "python -m pytest -v --tb=short tests/test_core.py tests/test_alemtv.py tests/test_lg_remote.py tests/test_belet_experimental.py > pytest_report.txt 2>&1"
             $code = $LASTEXITCODE
             if (Test-Path pytest_report.txt) {
               Get-Content pytest_report.txt | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
@@ -30,16 +30,6 @@ jobs:
             if ($attempt -eq 2) { exit $code }
           }
 
-      - name: Upload pytest report (diagnostics)
-        if: failure()
-        shell: pwsh
-        run: |
-          git config user.name "ci-diagnostics"
-          git config user.email "ci-diagnostics@users.noreply.github.com"
-          git checkout -B ci-win-tests-log
-          git add pytest_report.txt
-          git commit -m "Windows app pytest report ($(Get-Date -Format yyyyMMddTHHmmssZ))"
-          git push --force origin ci-win-tests-log:ci-win-tests-log
       - run: python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "ui.html;." --add-data "assets;assets" --uac-admin app.py
       - name: Package portable application
         shell: pwsh

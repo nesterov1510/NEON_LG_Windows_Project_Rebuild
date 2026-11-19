@@ -251,7 +251,8 @@ def test_alemtv_custom_portal_persistence():
 
     # Test custom portal in HTML
     html = build_alemtv_html(default_portal="http://astu.tmalem.tv")
-    assert 'id="splashServerButtons"' in html
+    assert 'id="splashServerButtons"' not in html
+    assert 'id="loginMac"' in html
     assert 'http://astu.tmalem.tv' in html
 
 def test_alemtv_silky_open_channel():
@@ -552,6 +553,14 @@ if (window.aresDecrypt(enc, key) !== plain) throw new Error('aresDecrypt roundtr
 var cyr = window.aresEncrypt('Привет', key);
 if (cyr !== '3sPPfhhXQCKpLVq6AyuboA==') throw new Error('cyrillic vector mismatch: ' + cyr);
 if (window.aresDecrypt(cyr, key) !== 'Привет') throw new Error('cyrillic roundtrip failed');
+// Compare the legacy-TV byte arithmetic path to native BigInt RSA.
+var originalBigInt = BigInt;
+Math.random = function() { return 0.5; };
+var nativeHeader = window.buildAresHeader(key, 1234567890);
+BigInt = undefined;
+var legacyHeader = window.buildAresHeader(key, 1234567890);
+BigInt = originalBigInt;
+if (!legacyHeader || legacyHeader !== nativeHeader) throw new Error('RSA fallback differs from BigInt');
 if (!window.isRequiresSignIn({ code: -32002, message: 'not found' })) throw new Error('-32002 must require sign-in');
 if (!window.isRequiresSignIn({ code: -32003, message: 'denied' })) throw new Error('-32003 must require sign-in');
 if (window.isRequiresSignIn({ code: -1, message: 'limit' })) throw new Error('-1 must not require sign-in');
@@ -647,11 +656,11 @@ xhrHandler = function(req) {
   return { status: 200, responseText: '{"jsonrpc":"2.0","id":1,"result":{}}' };
 };
 document.getElementById('loginUsername').value = '12345678';
-document.getElementById('loginPassword').value = 'secret';
+document.getElementById('loginPassword').value = ' secret ';
 window.submitSubscriberLogin();
 if (!decryptedRegister) throw new Error('register_terminal not called');
 if (decryptedRegister.params.username !== '12345678') throw new Error('username mismatch');
-if (decryptedRegister.params.password !== 'secret') throw new Error('password mismatch');
+if (decryptedRegister.params.password !== ' secret ') throw new Error('password must be preserved');
 if (!('macaddr' in decryptedRegister.params) || decryptedRegister.params.macaddr !== null) throw new Error('macaddr must be null: ' + JSON.stringify(decryptedRegister.params));
 if (decryptedRegister.params.create_macaddr !== true) throw new Error('create_macaddr must be true');
 if (store['alem_sid'] !== 'SID2') throw new Error('session not saved: ' + JSON.stringify(store));
@@ -905,10 +914,11 @@ const localStorage = {
 };
 const MAC = '00:1A:79:00:00:01';
 const ARES_KEY = new Uint8Array(16).fill(128); // Math.random() -> 0.5
+let registerParams = null;
 
 function server(method, params) {
   if (method === 'get_domain_config') return { name: 'AlemTV' };
-  if (method === 'register_terminal') return { session_id: 'SID-NEW', user_id: 1, macaddr: MAC };
+  if (method === 'register_terminal') { registerParams = params; return { session_id: 'SID-NEW', user_id: 1, macaddr: MAC }; }
   if (method === 'login') {
     if (params.macaddr === MAC) return { session_id: 'SID-RELOGIN', user_id: 1 };
     return { error: { code: -32002, message: 'not found' } };
@@ -1002,7 +1012,12 @@ env.flush();
 if (!isShown('loginModal')) throw new Error('launch 1: login modal must be shown without MAC');
 getEl('loginUsername').value = '123456';
 getEl('loginPassword').value = 'secret';
+getEl('loginMac').value = 'not-a-mac';
 env.ctx.submitSubscriberLogin();
+if (registerParams) throw new Error('invalid MAC was sent');
+getEl('loginMac').value = MAC.toLowerCase();
+env.ctx.submitSubscriberLogin();
+if (!registerParams || registerParams.macaddr !== MAC || registerParams.create_macaddr !== false) throw new Error('manual MAC not sent');
 env.flush();
 if (store.get('alem_mac') !== MAC) throw new Error('launch 1: MAC not stored: ' + store.get('alem_mac'));
 if (!store.get('alem_sid')) throw new Error('launch 1: session not stored');
@@ -1060,6 +1075,13 @@ env4.flush();
 if (!isHidden('loginModal') || !isShown('mainScreen')) {
   throw new Error('launch 3: relaunch must auto-login after MAC fallback');
 }
+// A not-found error must not silently discard the existing terminal binding.
+store.set('alem_mac', '00:1A:79:99:99:99');
+const env5 = makeContext();
+env5.ctx.bootAlemTV();
+env5.flush();
+if (store.get('alem_mac') !== '00:1A:79:99:99:99') throw new Error('MAC lost after not-found');
+if (!isShown('loginModal')) throw new Error('not-found must request credentials');
 process.exit(0);
 '''
     runner = runner.replace('__JS__', json.dumps(js))

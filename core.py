@@ -24,6 +24,9 @@ import urllib.request
 
 import paramiko
 
+from lg_remote import LGRemote, ALLOWED_KEYS as LG_REMOTE_KEYS
+import belet_experimental
+
 from samsung_tv import (
     SAMSUNG_LOCAL_SETS,
     SamsungLegacyClient,
@@ -88,6 +91,7 @@ class Api:
         self.hotspot_mode = None
         self.ethernet_active = False
         self.ethernet_adapter = None
+        self._combined_sharing = None
         self.vpn_adapter_name = None
         self.vpn_adapter_guid = None
         self.vpn_ifindex = None
@@ -97,6 +101,8 @@ class Api:
         self._vpn_stop_requested = False
         self._auth_temp_file = None
         self._mgmt_port = None
+        self.lg_remote = None
+        self._lg_remote_lock = threading.RLock()
         self.samsung_client = None
         self.samsung_ip = None
         self.samsung_port = None
@@ -464,8 +470,8 @@ class Api:
             self.client = None
         return {'ok': True, 'disconnected': True, 'output': '[+] Disconnected from TV SSH session.'}
 
-    def _exec(self, command, lines):
-        _stdin, stdout, stderr = self.client.exec_command(command, timeout=30)
+    def _exec(self, command, lines, timeout=30):
+        _stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
         out = stdout.read().decode(errors='replace').strip()
         err = stderr.read().decode(errors='replace').strip()
         if out:
@@ -554,8 +560,8 @@ class Api:
             out += b'\n'
         return out
 
-    def build_belet_ipk(self, target_url='https://belet.tm/'):
-        app_id = 'tm.belet.webos'
+    def build_belet_ipk(self, target_url='https://belet.tm/', experimental=False):
+        app_id = 'tm.belet.neontest' if experimental else 'tm.belet.webos'
         version = '1.0.2'
         mtime = int(time.time())
 
@@ -565,7 +571,7 @@ class Api:
             'vendor': 'Belet',
             'type': 'web',
             'main': 'index.html',
-            'title': 'Belet',
+            'title': 'Belet Test' if experimental else 'Belet',
             'icon': 'icon.png',
             'largeIcon': 'largeIcon.png',
             'splashBackground': 'splash.png',
@@ -644,6 +650,9 @@ class Api:
             '</body>\n'
             '</html>\n'
         ).encode('utf-8')
+
+        if experimental:
+            index_html = belet_experimental.html().encode('utf-8')
 
         with open(resource('assets/belet_icon.png'), 'rb') as f:
             icon_bytes = f.read()
@@ -724,7 +733,7 @@ class Api:
     def _tv_temp_dir(self):
         return '/media/developer/temp' if '/media/developer/temp/' in str(self.remote_script) else '/tmp'
 
-    def install_belet_app(self):
+    def install_belet_app(self, experimental=False):
         if not self.client:
             return {'ok': False, 'disconnected': True, 'error': 'Not connected to a TV.', 'output': '[!] Not connected.'}
         transport = self.client.get_transport() if hasattr(self.client, 'get_transport') else None
@@ -732,18 +741,18 @@ class Api:
             self.disconnect_tv()
             return {'ok': False, 'disconnected': True, 'error': 'TV SSH session closed. Reconnect first.', 'output': '[!] SSH session closed.'}
 
-        lines = ['[+] Packaging Belet webOS fullscreen app (tm.belet.webos)…']
+        lines = ['[+] Packaging Belet Test (experimental)…' if experimental else '[+] Packaging Belet webOS fullscreen app (tm.belet.webos)…']
         try:
-            ipk_bytes = self.build_belet_ipk()
+            ipk_bytes = self.build_belet_ipk(experimental=True) if experimental else self.build_belet_ipk()
             remote_dir = self._tv_temp_dir()
             remote_ipk = f'{remote_dir}/tm.belet.webos.ipk'
             remote_fifo = f'{remote_dir}/belet_luna_fifo'
 
             fd, local_ipk = tempfile.mkstemp(prefix='belet_', suffix='.ipk')
             try:
-                os.write(fd, ipk_bytes)
-                os.close(fd)
-                fd = None
+                with os.fdopen(fd, 'wb') as tmp_file:
+                    fd = None
+                    tmp_file.write(ipk_bytes)
                 sftp = self.client.open_sftp()
                 try:
                     sftp.put(local_ipk, remote_ipk)
@@ -780,14 +789,14 @@ class Api:
                 'rm -f "$FIFO" "$IPK"; '
                 'exit $STATUS'
             )
-            exit_code = self._exec(install_cmd, lines)
+            exit_code = self._exec(install_cmd, lines, timeout=45)
             if exit_code != 0:
                 return {
                     'ok': False,
                     'error': f'webOS app install failed (status {exit_code}). Check console output.',
                     'output': '\n'.join(lines),
                 }
-            lines.append('[+] Belet installed cleanly! Find it on the TV Home launcher or click Launch.')
+            lines.append('[+] Belet Test installed. Open Belet Test on the TV Home launcher.' if experimental else '[+] Belet installed cleanly! Find it on the TV Home launcher or click Launch.')
             self._logger.info('Installed Belet IPK on TV')
             return {'ok': True, 'output': '\n'.join(lines)}
         except (paramiko.SSHException, EOFError, OSError, socket.error) as exc:
@@ -810,6 +819,13 @@ class Api:
             out = '\n'.join(lines) if lines else '[+] Launch command sent.'
             if rc != 0:
                 return {'ok': False, 'error': f'Launch failed (status {rc}).', 'output': out}
+            try:
+                response = json.loads('\n'.join(lines))
+            except (ValueError, TypeError):
+                response = None
+            if isinstance(response, dict) and response.get('returnValue') is False:
+                reason = response.get('errorText') or response.get('errorMessage') or 'webOS rejected the launch request.'
+                return {'ok': False, 'error': str(reason), 'output': out}
             return {'ok': True, 'output': out}
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': '[!] ' + str(exc)}
@@ -1983,7 +1999,9 @@ class Api:
 
         # Refresh active ICS route if sharing is live so Windows SharedAccess (192.168.137.1:53) picks up new upstream DNS immediately.
         ics_refreshed = False
-        if reapply_ics and pub_name and self.app_shared_pair and self.app_shared_pair[1]:
+        if reapply_ics and self._combined_sharing:
+            lines.append('[i] Restart combined sharing to refresh the ICS DNS proxy.')
+        elif reapply_ics and pub_name and self.app_shared_pair and self.app_shared_pair[1]:
             pair_pub, pair_priv = self.app_shared_pair
             if self.hotspot_active and self.hotspot_mode == 'winrt':
                 lines.append('[i] Win10/11 Mobile Hotspot is live: Windows DNS cache flushed. If TV keeps cached DNS, restart the hotspot (Stop -> Start).')
@@ -2148,6 +2166,8 @@ class Api:
             return {'error': str(exc)}
 
     def stop_sharing(self):
+        if self._combined_sharing:
+            return self.stop_combined_sharing()
         if platform.system() != 'Windows':
             return {'error': 'Windows only.'}
         script = (
@@ -2450,7 +2470,202 @@ class Api:
             'output': '\n'.join(lines),
         }
 
+    def _configure_combined_ics(self, public, ethernet, hotspot):
+        # Never alter an existing ICS configuration; rollback only adapters we enabled.
+        payload = base64.b64encode(json.dumps([public, ethernet, hotspot]).encode('utf-8')).decode('ascii')
+        script = (
+            f"$n=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}'))|ConvertFrom-Json; "
+            "$m=New-Object -ComObject HNetCfg.HNetShare; $cs=@{}; "
+            "foreach($c in $m.EnumEveryConnection){"
+            "$p=$m.NetConnectionProps.Invoke($c); $q=$m.INetSharingConfigurationForINetConnection.Invoke($c); "
+            "if($q.SharingEnabled){throw 'Another ICS configuration is active; it was not changed.'}; "
+            "if($p.Name -in $n){$cs[$p.Name]=$c}}; "
+            "foreach($name in $n){if(-not $cs.ContainsKey($name)){throw ('Adapter not found: '+$name)}}; "
+            "$enabled=@(); try{ "
+            "foreach($i in @(0,1,2)){ $q=$m.INetSharingConfigurationForINetConnection.Invoke($cs[$n[$i]]); "
+            "$q.EnableSharing([int]($i -ne 0)); $enabled+=,$q }; "
+            "foreach($i in @(0,1,2)){ $q=$m.INetSharingConfigurationForINetConnection.Invoke($cs[$n[$i]]); "
+            "if(-not $q.SharingEnabled -or $q.SharingConnectionType -ne [int]($i -ne 0)){throw ('ICS did not retain adapter: '+$n[$i])} }; "
+            "'Combined ICS enabled.' "
+            "}catch{ $failure=$_; $rollbackErrors=@(); "
+            "foreach($q in $enabled){try{$q.DisableSharing()}catch{$rollbackErrors+=($_.Exception.Message)}}; "
+            "if($rollbackErrors.Count){throw ('ICS setup failed and rollback failed: '+$failure+'; '+($rollbackErrors -join '; '))}; throw $failure }"
+        )
+        return self._powershell(script, timeout=45)
+
+    def start_combined_sharing(self, ssid, password, ethernet_name=None, use_vpn=True):
+        """Attempt ICS on Ethernet and Hosted Network; never switch VPN traffic to the uplink."""
+        if platform.system() != 'Windows':
+            return {'error': 'Combined sharing is Windows-only.'}
+        if not isinstance(use_vpn, bool):
+            return {'error': 'Choose VPN or direct sharing explicitly.'}
+        if self.hotspot_active or self.ethernet_active or self.app_shared_pair or self._combined_sharing:
+            return {'error': 'Stop existing NEON sharing before starting combined sharing.'}
+        if use_vpn and self.vpn_state != 'CONNECTED':
+            return {'error': 'Connect Conf / OpenVPN before starting VPN sharing.'}
+        if not use_vpn and self.vpn_state != 'DISCONNECTED':
+            return {'error': 'Disconnect Conf / OpenVPN before starting direct sharing.'}
+        ssid = str(ssid or '').strip()
+        password = str(password or '')
+        if not re.fullmatch(r'[A-Za-z0-9 _.-]{1,32}', ssid):
+            return {'error': 'SSID must be 1–32 ASCII letters, numbers, spaces, dots, underscores or hyphens.'}
+        if not re.fullmatch(r'[A-Za-z0-9!@#$%^&*()_+\-=.]{8,63}', password):
+            return {'error': 'Hotspot password must be 8–63 supported ASCII characters.'}
+        if self._driver_supports_hosted_network() is not True:
+            return {'error': 'Simultaneous sharing requires Hosted Network support. This Wi-Fi driver does not report support; Windows Mobile Hotspot is not supported for this mode.'}
+        found = self.network_connections()
+        adapters = found.get('adapters', [])
+        if found.get('error') and not adapters:
+            return {'error': found['error']}
+        if any(a.get('shared') for a in adapters):
+            return {'error': 'Windows ICS is already active. Stop the existing configuration first; it was not changed.'}
+        if use_vpn:
+            pub = self._select_vpn_public_adapter(adapters)
+            if (not pub or not self._is_matching_vpn_adapter(pub)
+                    or not (pub.get('status') == 2 or pub.get('has_vpn_route'))):
+                return {'error': 'The NEON VPN adapter could not be verified; no sharing was started.'}
+        else:
+            choices = [a for a in adapters if a.get('status') == 2 and a.get('has_default_gw')
+                       and (a.get('category') or self._classify_adapter(a)) in ('wifi', 'ethernet')]
+            if len(choices) != 1:
+                return {'error': 'Expected exactly one connected physical internet uplink with a default gateway.'}
+            pub = choices[0]
+        public = pub.get('name')
+        wired = [a for a in adapters if a.get('name') != public and not a.get('has_default_gw')
+                 and (a.get('category') or self._classify_adapter(a)) == 'ethernet']
+        requested = str(ethernet_name or '').strip()
+        if requested:
+            wired = [a for a in wired if a.get('name') == requested]
+        else:
+            wired.sort(key=lambda a: (a.get('status') != 2, a.get('hardware') is not True))
+        if not wired:
+            return {'error': 'A separate physical Ethernet target is required.'}
+        ethernet = wired[0]['name']
+        started = False
+        configured = False
+        try:
+            rc, out, err = self._run_netsh('wlan', 'set', 'hostednetwork', 'mode=allow',
+                                           'ssid=' + ssid, 'key=' + password, 'keyUsage=persistent', timeout=15)
+            if rc:
+                raise RuntimeError(err or out or 'Hosted Network configuration failed.')
+            rc, out, err = self._run_netsh('wlan', 'start', 'hostednetwork', timeout=15)
+            if rc:
+                raise RuntimeError(err or out or 'Hosted Network failed to start.')
+            started = True
+            hotspot = None
+            for _ in range(8):
+                _, hotspot, _ = self._detect_hotspot_and_vpn_adapters()
+                if hotspot:
+                    break
+                time.sleep(1)
+            if not hotspot or hotspot in (public, ethernet):
+                raise RuntimeError('Could not identify a separate hotspot adapter.')
+            self._configure_combined_ics(public, ethernet, hotspot)
+            configured = True
+            self._combined_sharing = {'public': public, 'ethernet': ethernet, 'hotspot': hotspot, 'vpn': use_vpn}
+            self.app_shared_pair = (public, hotspot)
+            self.hotspot_active, self.hotspot_mode = True, 'hostednetwork'
+            self.ethernet_active, self.ethernet_adapter = True, ethernet
+            # If the tunnel exited while the hotspot/ICS were being configured, tear down immediately.
+            if use_vpn and self.vpn_state != 'CONNECTED':
+                stopped = self.stop_combined_sharing()
+                return {'error': 'VPN disconnected during setup. Combined sharing was stopped.' +
+                        (' Cleanup failed: ' + stopped['error'] if stopped.get('error') else '')}
+            self.save_settings({'ethernet_adapter': ethernet, 'hotspot_ssid': ssid})
+            return {'ok': True, 'public_adapter': public, 'ethernet_adapter': ethernet,
+                    'hotspot_adapter': hotspot, 'vpn': use_vpn,
+                    'output': 'ICS configured for Ethernet and hotspot. Verify public IP and DNS on BOTH clients; this is not an OS-level kill switch.'}
+        except Exception as exc:
+            if configured:
+                self.stop_combined_sharing()
+            elif started:
+                try:
+                    rc, out, err = self._run_netsh('wlan', 'stop', 'hostednetwork', timeout=15)
+                    if rc:
+                        return {'error': str(exc) + '; hotspot cleanup failed: ' + (err or out)}
+                except Exception as cleanup:
+                    return {'error': str(exc) + '; hotspot cleanup failed: ' + str(cleanup)}
+            return {'error': str(exc)}
+
+    def stop_combined_sharing(self):
+        session = self._combined_sharing
+        if not session:
+            return {'ok': True, 'output': 'Combined sharing is not active.'}
+        names = [session['public'], session['ethernet'], session['hotspot']]
+        payload = base64.b64encode(json.dumps(names).encode('utf-8')).decode('ascii')
+        script = (
+            f"$n=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}'))|ConvertFrom-Json; "
+            "$m=New-Object -ComObject HNetCfg.HNetShare; $errors=@(); "
+            "foreach($c in $m.EnumEveryConnection){$p=$m.NetConnectionProps.Invoke($c); "
+            "if($p.Name -in $n){$q=$m.INetSharingConfigurationForINetConnection.Invoke($c); "
+            "if($q.SharingEnabled){try{$q.DisableSharing()}catch{$errors+=($_.Exception.Message)}}}}; "
+            "if($errors.Count){throw ($errors -join '; ')}; 'Combined ICS disabled.'"
+        )
+        errors = []
+        try:
+            self._powershell(script, timeout=30)
+        except Exception as exc:
+            errors.append('ICS: ' + str(exc))
+        try:
+            rc, out, err = self._run_netsh('wlan', 'stop', 'hostednetwork', timeout=15)
+            if rc:
+                errors.append('Hotspot: ' + (err or out or 'stop failed'))
+        except Exception as exc:
+            errors.append('Hotspot: ' + str(exc))
+        if errors:
+            return {'error': 'Cleanup incomplete; inspect Windows ICS and hotspot settings: ' + '; '.join(errors)}
+        self._combined_sharing = None
+        self.app_shared_pair = None
+        self.hotspot_active = False
+        self.hotspot_mode = None
+        self.ethernet_active = False
+        self.ethernet_adapter = None
+        return {'ok': True, 'output': 'Combined Ethernet and hotspot sharing stopped.'}
+
+    def start_direct_ethernet(self, ethernet_name=None):
+        """Share a physical uplink over Ethernet, explicitly without NEON VPN."""
+        if platform.system() != 'Windows':
+            return {'error': 'Ethernet ICS sharing is Windows-only.'}
+        if self.vpn_state != 'DISCONNECTED':
+            return {'error': 'Disconnect Conf / OpenVPN before starting direct Ethernet sharing.'}
+        if self.hotspot_active or self.ethernet_active or self.app_shared_pair:
+            return {'error': 'Stop the existing NEON sharing session before starting direct Ethernet sharing.'}
+        found = self.network_connections()
+        adapters = found.get('adapters', [])
+        if found.get('error') and not adapters:
+            return {'error': found['error']}
+        uplinks = [a for a in adapters if a.get('has_default_gw') and a.get('status') == 2
+                   and (a.get('category') or self._classify_adapter(a)) in ('wifi', 'ethernet')]
+        if len(uplinks) != 1:
+            return {'error': 'Expected one connected Wi-Fi or Ethernet internet uplink with a default gateway. Check adapters and disconnect extra uplinks.'}
+        public = uplinks[0]['name']
+        wired = [a for a in adapters if a.get('name') != public and not a.get('has_default_gw')
+                 and (a.get('category') or self._classify_adapter(a)) == 'ethernet']
+        requested = str(ethernet_name or '').strip()
+        if requested:
+            wired = [a for a in wired if a.get('name') == requested]
+        else:
+            wired.sort(key=lambda a: (a.get('status') != 2, a.get('hardware') is not True))
+        if not wired:
+            return {'error': 'No separate physical Ethernet target found. Do not select the internet uplink.'}
+        private = wired[0]['name']
+        if any(a.get('shared') for a in adapters):
+            return {'error': 'Windows ICS is already active. Stop the existing sharing configuration first; it was not changed.'}
+        sharing = self.set_sharing(public, private)
+        if sharing.get('error'):
+            if self._uplink_dns_backups:
+                self._restore_uplink_dns_backups()
+            return {'error': 'Direct Ethernet sharing failed: ' + sharing['error']}
+        self.ethernet_active = True
+        self.ethernet_adapter = private
+        self.save_settings({'ethernet_adapter': private})
+        return {'ok': True, 'ethernet_adapter': private, 'public_adapter': public,
+                'output': 'Direct internet sharing: ' + public + ' -> ' + private +
+                          '. No NEON VPN is used. Set the client to DHCP and verify its public IP and DNS. Other VPN software may affect routing.'}
+
     def stop_vpn_ethernet(self):
+        if self._combined_sharing:
+            return self.stop_combined_sharing()
         messages = []
         errors = []
         target = self.ethernet_adapter
@@ -2615,6 +2830,8 @@ class Api:
             return {'error': str(exc)}
 
     def stop_vpn_hotspot(self):
+        if self._combined_sharing:
+            return self.stop_combined_sharing()
         messages = []
         errors = []
         if self.app_shared_pair:
@@ -2736,7 +2953,64 @@ class Api:
         self._cleanup_auth_file()
         self.cancel_samsung_auth()
         self.disconnect_tv()
+        self.disconnect_lg_remote()
         self.disconnect_samsung()
+
+    # LG webOS remote: independent of the SSH Developer Mode session.
+    def _lg_remote_key_path(self):
+        return os.path.join(self._data_dir(), 'lg_remote_keys.json')
+
+    def connect_lg_remote(self, ip):
+        host = self._normalize_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Enter a valid LG TV IP address or hostname.'}
+        with self._lg_remote_lock:
+            self.disconnect_lg_remote()
+            path = self._lg_remote_key_path()
+            try:
+                with open(path, 'r', encoding='utf-8') as file:
+                    keys = json.load(file)
+                if not isinstance(keys, dict):
+                    keys = {}
+            except (OSError, ValueError):
+                keys = {}
+            remote = LGRemote(host)
+            try:
+                key = remote.connect(keys.get(host))
+                self.lg_remote = remote
+                keys[host] = key
+                try:
+                    os.makedirs(self._data_dir(), exist_ok=True)
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, 'w', encoding='utf-8') as file:
+                        json.dump(keys, file)
+                except OSError as exc:
+                    return {'ok': True, 'output': 'LG remote connected, but pairing could not be saved: ' + str(exc)}
+                return {'ok': True, 'output': 'LG remote connected. Accept the connection request on the TV if prompted.'}
+            except Exception as exc:
+                remote.close()
+                return {'ok': False, 'error': 'LG remote connection failed: ' + str(exc)}
+
+    def disconnect_lg_remote(self):
+        with self._lg_remote_lock:
+            remote, self.lg_remote = self.lg_remote, None
+            if remote:
+                remote.close()
+        return {'ok': True, 'output': 'LG remote disconnected.'}
+
+    def lg_remote_send_key(self, key):
+        clean = str(key or '').strip().lower()
+        if clean not in LG_REMOTE_KEYS:
+            return {'ok': False, 'error': 'Unsupported LG remote button.'}
+        with self._lg_remote_lock:
+            if not self.lg_remote:
+                return {'ok': False, 'error': 'Connect the LG remote first.'}
+            try:
+                self.lg_remote.send_key(clean)
+                return {'ok': True}
+            except Exception as exc:
+                self.disconnect_lg_remote()
+                return {'ok': False, 'error': 'LG remote disconnected. Reconnect and try again: ' + str(exc)}
 
     # ── Samsung Smart TV (Tizen WS/WSS 8001/8002 + Legacy Orsay 55000) ──────
 
@@ -3314,9 +3588,9 @@ class Api:
                         )
                         lines.append(f'[+] Samsung certificate saved: {bundle["source"]}')
 
-                # Return to the pre-proxy Belet package: older Samsung firmware opens its
-                # TV browser to the Belet site directly instead of navigating to localhost.
-                enable_service = False
+                # Prefer the fullscreen in-app proxy. If the TV rejects the service
+                # manifest, retry with the service-free in-app WebView package.
+                enable_service = True
                 remote_wgt = f'{sdk_toolpath}/{BELET_PKG_ID}.wgt'
 
                 def _build_sign_push(use_service, active_bundle):
