@@ -46,3 +46,29 @@ def build_wgt(icon_bytes=None):
         z.writestr('boot.js', js.encode('utf-8'))
         z.writestr('icon.png', icon_bytes)
     return out.getvalue()
+
+# Hosted entry point: a separate experiment, without injected HTML/JS or a proxy.
+BROWSER_PACKAGE = 'BeletBr001'
+BROWSER_APP = BROWSER_PACKAGE + '.Browser'
+
+
+def build_browser_wgt(icon_bytes=None):
+    if icon_bytes is None:
+        root = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, 'assets', 'belet_large_icon.png'), 'rb') as f:
+            icon_bytes = f.read()
+    config = '''<?xml version="1.0" encoding="UTF-8"?>
+<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" id="https://belet.tm/neon-browser-test" version="1.0.0" viewmodes="maximized">
+<tizen:application id="BeletBr001.Browser" package="BeletBr001" required_version="3.0"/>
+<content src="https://belet.tm/"/><icon src="icon.png"/><name>Belet Browser Test</name>
+<feature name="http://tizen.org/feature/screen.size.all"/><access origin="*" subdomains="true"/>
+<tizen:allow-navigation>*</tizen:allow-navigation><tizen:allow-mixed-content>true</tizen:allow-mixed-content>
+<tizen:content-security-policy>default-src * data: blob:; script-src * 'unsafe-inline' 'unsafe-eval' blob:; style-src * 'unsafe-inline'; connect-src *; img-src * data: blob:; media-src * blob:; frame-src * blob:;</tizen:content-security-policy>
+<tizen:privilege name="http://tizen.org/privilege/internet"/><tizen:privilege name="http://developer.samsung.com/privilege/network.public"/>
+<tizen:profile name="tv-samsung"/><tizen:setting screen-orientation="landscape" context-menu="disable" background-support="enable" hwkey-event="enable"/>
+</widget>'''
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr('config.xml', config.encode('utf-8'))
+        z.writestr('icon.png', icon_bytes)
+    return out.getvalue()

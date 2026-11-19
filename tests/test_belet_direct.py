@@ -99,3 +99,49 @@ def test_direct_debug_validates_and_hides_unexpected_output(monkeypatch):
     monkeypatch.setattr(Sdb, 'run_shell', lambda *a, **k: 'error secret credentials')
     result = api.debug_samsung_belet_direct('192.168.1.5')
     assert not result['ok'] and 'secret' not in str(result)
+
+
+def test_hosted_browser_package_is_separate_and_has_no_proxy_or_injected_html():
+    with zipfile.ZipFile(io.BytesIO(belet_direct.build_browser_wgt())) as z:
+        assert set(z.namelist()) == {'config.xml', 'icon.png'}
+        cfg = ET.fromstring(z.read('config.xml'))
+    ns = '{http://tizen.org/ns/widgets}'
+    assert cfg.find(ns + 'application').attrib['id'] == belet_direct.BROWSER_APP
+    assert cfg.find('{http://www.w3.org/ns/widgets}content').attrib['src'] == 'https://belet.tm/'
+    assert cfg.find(ns + 'allow-navigation').text == '*'
+    assert len({belet_direct.BROWSER_PACKAGE, belet_direct.PACKAGE, 'Belet00001'}) == 3
+
+
+def test_browser_install_uses_isolated_hosted_package(monkeypatch):
+    calls = []
+    class Sdb:
+        def __init__(self, *args, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def capability(self): return {'platform_version': '7.0'}
+        def get_duid(self, **kwargs): return 'test'
+        def resolve_sdk_toolpath(self, caps): return '/tmp'
+        def push_bytes(self, data, path):
+            assert path.endswith('/' + belet_direct.BROWSER_PACKAGE + '.wgt')
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                assert set(z.namelist()) == {'config.xml', 'icon.png'}
+        def install_wgt(self, pkg, path, timeout):
+            calls.append(pkg)
+            return 'installed'
+        def list_apps(self): return belet_direct.BROWSER_PACKAGE
+        def launch_app(self, app):
+            assert app == belet_direct.BROWSER_APP
+            return 'launched'
+    class Cert:
+        def find_saved_samsung_certs(self, duid):
+            return {'source': 'saved', 'author_key': None, 'author_certs': [], 'dist_key': None, 'dist_certs': []}
+    api = Api()
+    monkeypatch.setattr('core.SdbClient', Sdb)
+    monkeypatch.setattr('core._tizen_local_ip', lambda ip: '192.168.1.2')
+    monkeypatch.setattr(api, '_samsung_cert_manager', lambda: Cert())
+    monkeypatch.setattr('core.sign_wgt_bytes', lambda data, *args: data)
+    monkeypatch.setattr('core.verify_wgt_signatures', lambda data: None)
+    monkeypatch.setattr('core.diagnose_install_output', lambda out, pkg: {'status': 'ok'})
+    result = api.install_samsung_belet_browser('192.168.1.3')
+    assert result['ok'] and result['app_id'] == belet_direct.BROWSER_APP
+    assert calls == [belet_direct.BROWSER_PACKAGE]

@@ -3542,14 +3542,14 @@ class Api:
                 'output': '\n'.join(lines),
             }
 
-    def install_samsung_belet(self, ip=None, target_url=BELET_URL, cert_mode='auto', _direct=False):
+    def install_samsung_belet(self, ip=None, target_url=BELET_URL, cert_mode='auto', _direct=False, _browser=False):
         try:
             clean_ip = self._resolve_samsung_ip(ip)
         except ValueError as exc:
             return {'ok': False, 'error': str(exc)}
 
-        pkg_id = belet_direct.PACKAGE if _direct else BELET_PKG_ID
-        app_id = belet_direct.APP if _direct else BELET_APP_ID
+        pkg_id = belet_direct.BROWSER_PACKAGE if _browser else (belet_direct.PACKAGE if _direct else BELET_PKG_ID)
+        app_id = belet_direct.BROWSER_APP if _browser else (belet_direct.APP if _direct else BELET_APP_ID)
         pc_ip = _tizen_local_ip(clean_ip)
         cert_mgr = self._samsung_cert_manager()
         self._samsung_auth_stop.clear()
@@ -3599,11 +3599,11 @@ class Api:
 
                 # Prefer the fullscreen in-app proxy. If the TV rejects the service
                 # manifest, retry with the service-free in-app WebView package.
-                enable_service = not _direct
+                enable_service = not (_direct or _browser)
                 remote_wgt = f'{sdk_toolpath}/{pkg_id}.wgt'
 
                 def _build_sign_push(use_service, active_bundle):
-                    u_wgt = belet_direct.build_wgt(self._belet_wgt_icon()) if _direct else build_belet_wgt(
+                    u_wgt = belet_direct.build_browser_wgt(self._belet_wgt_icon()) if _browser else belet_direct.build_wgt(self._belet_wgt_icon()) if _direct else build_belet_wgt(
                         target_url=target_url,
                         pkg_id=pkg_id,
                         app_name='Belet',
@@ -3751,6 +3751,9 @@ class Api:
                 )
             lines.append(f'[!] Belet install failed: {err}')
             return {'ok': False, 'error': err, 'output': '\n'.join(lines)}
+
+    def install_samsung_belet_browser(self, ip=None):
+        return self.install_samsung_belet(ip=ip, _browser=True)
 
     def install_samsung_belet_direct(self, ip=None):
         return self.install_samsung_belet(ip=ip, _direct=True)

@@ -345,6 +345,7 @@ def test_new_buttons_have_neon_styles(qt_app, tmp_path, monkeypatch):
         ('▲', 'SamKeyPrimary'), ('HOME', 'SamKeyBtn'),
         ('УСТАНОВИТЬ BELET TEST (ЭКСПЕРИМЕНТ)', 'NormalBtn'),
         ('BELET DIRECT TEST · БЕЗ ПРОКСИ', 'NormalBtn'),
+        ('BELET BROWSER TEST · ПРЯМОЙ САЙТ', 'NormalBtn'),
         ('ДИАГНОСТИКА DIRECT TEST', 'NormalBtn'),
         ('УСТАНОВИТЬ НА LG', 'PrimaryBtn'), ('УСТАНОВИТЬ НА SAMSUNG', 'PrimaryBtn'),
     ]:
