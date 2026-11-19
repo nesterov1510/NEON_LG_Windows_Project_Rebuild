@@ -8,12 +8,16 @@ from core import Api
 
 def test_direct_wgt_uses_official_site_without_proxy_or_iframe():
     with zipfile.ZipFile(io.BytesIO(belet_direct.build_wgt())) as z:
-        assert set(z.namelist()) == {'config.xml', 'index.html', 'icon.png'}
+        assert set(z.namelist()) == {'config.xml', 'index.html', 'icon.png', 'style.css', 'boot.js'}
         cfg = ET.fromstring(z.read('config.xml'))
         html = z.read('index.html').decode('utf-8')
+        boot = z.read('boot.js').decode('utf-8')
     assert cfg.find('{http://tizen.org/ns/widgets}application').attrib['id'] == belet_direct.APP
     assert cfg.find('{http://tizen.org/ns/widgets}allow-navigation').text == '*'
-    assert "window.location.replace('https://belet.tm/')" in html
+    assert "window.location.replace('https://belet.tm/')" in boot
+    assert '<script src="boot.js"></script>' in html
+    assert cfg.attrib['version'] == '1.0.1'
+    assert cfg.find('{http://tizen.org/ns/widgets}content-security-policy') is not None
     assert 'iframe' not in html and 'localhost' not in html and '127.0.0.1' not in html
 
 
@@ -50,3 +54,29 @@ def test_samsung_direct_installer_targets_distinct_package(monkeypatch):
     assert result['ok']
     assert result['pkg_id'] == belet_direct.PACKAGE
     assert result['app_id'] == belet_direct.APP
+
+
+def test_direct_boot_runs_and_retry_uses_same_url(tmp_path):
+    import json
+    import shutil
+    import subprocess
+    import pytest
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js not installed')
+    with zipfile.ZipFile(io.BytesIO(belet_direct.build_wgt())) as z:
+        boot = z.read('boot.js').decode('utf-8')
+    runner = r'''
+const vm=require('vm'),assert=require('assert');
+const urls=[], timers=[];
+const button={focus(){this.focused=true}}, status={textContent:''};
+const sandbox={window:{location:{replace(url){urls.push(url)}}}, document:{getElementById(id){return id==='retry'?button:status}},setTimeout(fn,delay){timers.push({fn,delay})}};
+vm.runInNewContext(SCRIPT,sandbox);
+assert(button.focused);assert.strictEqual(typeof button.onclick,'function');
+timers.find(t=>t.delay===100).fn();button.onclick();
+assert.deepStrictEqual(urls,['https://belet.tm/','https://belet.tm/']);
+'''.replace('SCRIPT', json.dumps(boot))
+    script = tmp_path / 'run.js'
+    script.write_text(runner, encoding='utf-8')
+    p = subprocess.run([node, str(script)], capture_output=True, text=True, encoding='utf-8', timeout=10)
+    assert p.returncode == 0, p.stderr
