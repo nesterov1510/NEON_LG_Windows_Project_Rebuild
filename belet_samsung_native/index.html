@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Belet Samsung</title><link rel="stylesheet" href="style.css"></head>
+<body><header><strong>▣ BËLET</strong><span>Samsung · экспериментальная версия</span><button id="logout" class="hidden">Выйти</button></header>
+<main><div id="sessionNote" role="status"></div><div id="status" role="status" aria-live="polite">Загрузка…</div>
+<section id="login" class="hidden"><h1>Вход в Belet</h1><p>Укажите номер телефона, связанный с аккаунтом. Код вводите только на телевизоре. Сессия хранится в данных приложения на ТВ.</p>
+<label>Телефон с кодом страны<input id="phone" type="tel" inputmode="numeric" placeholder="993XXXXXXXX" autocomplete="tel"></label>
+<label>Способ получения кода<select id="otp"></select><small>После выбора нажмите ▶ для перехода к кнопке.</small></label><button id="send">Получить код</button>
+<div id="codeSection" class="hidden"><label>Код подтверждения<input id="code" type="tel" inputmode="numeric" autocomplete="one-time-code"></label><button id="verify">Войти</button></div></section>
+<section id="home" class="hidden"><h1>Каталог</h1><p>Стрелки — выбор, OK — открыть, Назад — вернуться.</p><div id="rows"></div></section>
+<section id="player" class="hidden"><h1 id="playerTitle"></h1><video id="video" controls playsinline></video><p>Поддержка формата и воспроизведение зависят от телевизора и сервиса Belet.</p><button id="back">Назад к каталогу</button></section>
+</main><script src="app.js"></script></body></html>
