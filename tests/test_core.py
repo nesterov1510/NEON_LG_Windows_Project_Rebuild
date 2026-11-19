@@ -2074,7 +2074,7 @@ def test_belet_wgt_service_manifest_es5_and_fallback(tmp_path):
         proxy_js = zf.read('service/proxy.js').decode('utf-8')
 
     root = ET.fromstring(cfg)
-    assert root.attrib.get('version') == '1.2.9'
+    assert root.attrib.get('version') == '1.3.0'
     assert 'required_version="3.0"' in cfg
     assert 'http://tizen.org/feature/web.service' in cfg
     assert '<tizen:service id="BeletTV001.BeletProxy" auto-restart="true">' in cfg
@@ -2112,7 +2112,7 @@ def test_belet_wgt_service_manifest_es5_and_fallback(tmp_path):
         assert {'config.xml', 'index.html', 'icon.png'}.issubset(nosvc_names)
         nosvc_cfg = zf.read('config.xml').decode('utf-8')
         nosvc_html = zf.read('index.html').decode('utf-8')
-        assert 'version="1.2.9"' in nosvc_cfg
+        assert 'version="1.3.0"' in nosvc_cfg
         assert 'required_version="2.3"' in nosvc_cfg
         assert '<tizen:service' not in nosvc_cfg
         assert 'https://belet.tm/ru' in nosvc_html
@@ -2176,6 +2176,7 @@ const zlib = require('zlib');
 const vm = require('vm');
 
 const rawProxySrc = """ + json.dumps(proxy_src) + """;
+const jarFile = """ + json.dumps(str(tmp_path / 'cookie-test.json')) + """;
 const expectedNav = """ + json.dumps(nav_js) + """;
 
 let sawApiHeaders = null;
@@ -2292,7 +2293,8 @@ upstream.listen(0, '127.0.0.1', async () => {
     const upPort = upstream.address().port;
     const patched = rawProxySrc
       .replace(/var TARGET_URL="https:\\/\\/belet\\.tm\\/";/, 'var TARGET_URL="http://127.0.0.1:' + upPort + '/";')
-      .replace(/var PORT=\\d+;/, 'var PORT=0;');
+      .replace(/var PORT=\\d+;/, 'var PORT=0;')
+      .replace('loadJar();', 'JAR_FILE=' + JSON.stringify(jarFile) + ';loadJar();');
 
     const mod = { exports: {} };
     const sandbox = {
@@ -2367,6 +2369,8 @@ upstream.listen(0, '127.0.0.1', async () => {
     // Server-side Cookie Jar preserves __Host-*, __Secure-*, HttpOnly, and client /__neon_cookie writes across requests, plus path-preserving Referer
     const qrLogin = await httpReq(proxyPort, 'GET', '/qr-login');
     assert.strictEqual(qrLogin.status, 200);
+    const persisted = JSON.parse(require('fs').readFileSync(jarFile, 'utf8'));
+    assert(persisted.some(c => c.name === '__Host-belet_sess'));
     const ckSync = await httpReq(proxyPort, 'POST', '/__neon_cookie', { 'Content-Type': 'application/json' }, JSON.stringify({ cookie: '__Host-client=cl999; Path=/; Secure' }));
     assert.strictEqual(ckSync.status, 204);
     const me1 = await httpReq(proxyPort, 'GET', '/me', { 'Referer': 'http://127.0.0.1:' + proxyPort + '/ru/login' });
@@ -2408,6 +2412,7 @@ upstream.listen(0, '127.0.0.1', async () => {
 
     // Logout Max-Age=0 deletes cookie from Jar, while WS Set-Cookie persists
     await httpReq(proxyPort, 'GET', '/qr-logout');
+    assert(!JSON.parse(require('fs').readFileSync(jarFile, 'utf8')).some(c => c.name === '__Host-belet_sess'));
     const me2 = await httpReq(proxyPort, 'GET', '/me');
     const me2Data = JSON.parse(me2.body);
     assert(!me2Data.cookie.includes('__Host-belet_sess=tok123'));

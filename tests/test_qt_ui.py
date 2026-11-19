@@ -26,17 +26,19 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     win.show()
     qt_app.processEvents()
 
-    assert win.stack.count() == 4
+    assert win.stack.count() == 5
     assert win.current_tab == 0
     assert not win.windowIcon().isNull()
 
-    # Tab switching across all 4 tabs (LG, Samsung, Conf, Diagnostics)
+    # Tab switching across LG, Samsung, Conf, Diagnostics and contacts
     win.switch_tab(1)
     assert win.current_tab == 1
     win.switch_tab(2)
     assert win.current_tab == 2
     win.switch_tab(3)
     assert win.current_tab == 3
+    win.switch_tab(4)
+    assert win.page_title.text() == 'MSB CALLBACK'
     win.switch_tab(0)
 
     # Language switch RU <-> EN (ensure no unintended & mnemonic markers)

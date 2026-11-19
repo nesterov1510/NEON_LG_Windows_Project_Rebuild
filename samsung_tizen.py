@@ -2589,12 +2589,15 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "  }catch(e){}\n"
         "}\n"
         "function scheduleSaveJar(){\n"
-        "  if(!JAR_FILE||!fs||typeof fs.writeFile!=='function')return;\n"
-        "  if(jarSaveTimer)clearTimeout(jarSaveTimer);\n"
-        "  jarSaveTimer=setTimeout(function(){\n"
-        "    jarSaveTimer=null;\n"
-        "    try{fs.writeFile(JAR_FILE,JSON.stringify(cookieJar),'utf8',function(){});}catch(e){}\n"
-        "  },180);\n"
+        "  if(!JAR_FILE||!fs)return;\n"
+        "  try{\n"
+        "    if(typeof fs.writeFileSync==='function'){\n"
+        "      fs.writeFileSync(JAR_FILE,JSON.stringify(cookieJar),{encoding:'utf8',mode:384});\n"
+        "      if(typeof fs.chmodSync==='function')fs.chmodSync(JAR_FILE,384);\n"
+        "    }else if(typeof fs.writeFile==='function'){\n"
+        "      fs.writeFile(JAR_FILE,JSON.stringify(cookieJar),{encoding:'utf8',mode:384},function(){});\n"
+        "    }\n"
+        "  }catch(e){}\n"
         "}\n"
         "loadJar();\n"
         "function defaultCookiePath(reqPath){\n"
@@ -3695,7 +3698,7 @@ def build_belet_wgt(
     config_xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" '
-        'id="https://belet.tm/tizen" version="1.2.9" viewmodes="maximized">\n'
+        'id="https://belet.tm/tizen" version="1.3.0" viewmodes="maximized">\n'
         f'    <tizen:application id="{safe_app_id}" package="{pkg_id}" required_version="{req_ver}"/>\n'
         '    <content src="index.html"/>\n'
         '    <feature name="http://tizen.org/feature/screen.size.all"/>\n'

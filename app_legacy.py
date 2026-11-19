@@ -239,7 +239,7 @@ class NeonWindow(QMainWindow):
 
         # Navigation Buttons
         self.tab_buttons = []
-        icons = ['▣', '◈', '◉', '✦']
+        icons = ['▣', '◈', '◉', '✦', '☎']
         for idx, glyph in enumerate(icons):
             btn = QPushButton(glyph)
             btn.setObjectName('SideNavBtn')
@@ -394,6 +394,7 @@ class NeonWindow(QMainWindow):
         self._build_samsung_page()
         self._build_vpn_page()
         self._build_diag_page()
+        self._build_callback_page()
         self.switch_tab(0)
 
     def _build_tv_page(self):
@@ -1456,6 +1457,62 @@ class NeonWindow(QMainWindow):
 
         self.stack.addWidget(page)
 
+    def _build_callback_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(30, 24, 30, 20)
+        heading = QLabel('MSB  /  CALLBACK')
+        heading.setStyleSheet('color:#8fffb3;font-size:30px;font-weight:700;letter-spacing:2px;')
+        layout.addWidget(heading)
+        subtitle = QLabel('TV Repair by Meryosab · Ремонт телевизоров и электроники в Ашхабаде')
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet('color:#9fb7aa;font-size:15px;margin-bottom:10px;')
+        layout.addWidget(subtitle)
+        panels = QHBoxLayout()
+        panels.setSpacing(18)
+        details = QFrame()
+        details.setObjectName('GlassCard')
+        dl = QVBoxLayout(details)
+        dl.setContentsMargins(24, 22, 24, 22)
+        for title, value in [('СВЯЗАТЬСЯ', '+993 63 70 59 53'), ('E-MAIL', 'tvrepairmsb@gmail.com'), ('АДРЕС', 'Ашхабад, Парахат 3/2, дом 14'), ('ОНЛАЙН', 'tvrepair.meryosab.com'), ('МЕССЕНДЖЕРЫ', 'WhatsApp · Telegram @meryosab_shop')]:
+            cap = QLabel(title)
+            cap.setStyleSheet('color:#7a9a87;font-size:11px;letter-spacing:1px;')
+            text = QLabel(value)
+            text.setWordWrap(True)
+            text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            text.setStyleSheet('color:#e8f4eb;font-size:17px;font-weight:600;')
+            dl.addWidget(cap)
+            dl.addWidget(text)
+        dl.addStretch(1)
+        panels.addWidget(details, 1)
+        for caption, image, helper in [('САЙТ TV REPAIR', 'msb_website_qr.png', 'Открыть сайт'), ('КОНТАКТНАЯ КАРТОЧКА', 'msb_contact_qr.png', 'Сканируйте и подтвердите сохранение контакта')]:
+            card = QFrame()
+            card.setObjectName('GlassCard')
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(18, 18, 18, 18)
+            lbl = QLabel(caption)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet('color:#a5e7b2;font-weight:bold;font-size:12px;')
+            qr = QLabel()
+            qr.setAlignment(Qt.AlignCenter)
+            qr.setPixmap(QPixmap(resource('assets/' + image)).scaled(210, 210, Qt.KeepAspectRatio, Qt.FastTransformation))
+            note = QLabel(helper)
+            note.setWordWrap(True)
+            note.setAlignment(Qt.AlignCenter)
+            note.setStyleSheet('color:#9fb7aa;font-size:12px;')
+            cl.addWidget(lbl)
+            cl.addWidget(qr)
+            cl.addWidget(note)
+            cl.addStretch(1)
+            panels.addWidget(card)
+        layout.addLayout(panels)
+        footer = QLabel('Приём техники — по предварительному контакту. Данные с tvrepair.meryosab.com.')
+        footer.setWordWrap(True)
+        footer.setStyleSheet('color:#819a89;font-size:12px;padding-top:14px;')
+        layout.addWidget(footer)
+        layout.addStretch(1)
+        self.stack.addWidget(page)
+
     def _build_footer(self):
         foot = QFrame()
         foot.setFixedHeight(26)
@@ -1481,6 +1538,7 @@ class NeonWindow(QMainWindow):
         self.tab_buttons[1].setText('◈   ' + self.t('nav_sam'))
         self.tab_buttons[2].setText('◉   ' + self.t('nav_vpn'))
         self.tab_buttons[3].setText('✦   ' + self.t('nav_diag'))
+        self.tab_buttons[4].setText('☎   MSB CALLBACK')
         self.side_status_cap.setText(self.t('side_status'))
         self.side_tv_lbl.setText(self.t('side_tv'))
         self.side_sam_lbl.setText(self.t('side_sam'))
@@ -1697,6 +1755,10 @@ class NeonWindow(QMainWindow):
             ('page_vpn_title', 'page_vpn_sub'),
             ('page_diag_title', 'page_diag_sub'),
         ]
+        if self.current_tab == 4:
+            self.page_title.setText('MSB CALLBACK')
+            self.page_sub.setText('TV Repair by Meryosab · Ашхабад')
+            return
         tk, sk = titles[self.current_tab]
         self.page_title.setText(self.t(tk))
         self.page_sub.setText(self.t(sk))
