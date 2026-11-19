@@ -568,6 +568,7 @@ def _build_belet_nav_js(target_url=BELET_URL):
         '  var rest=m[2]||"/";\n'
         '  if(rest.charAt(0)==="?"||rest.charAt(0)==="#")rest="/"+rest;\n'
         '  if(h===TARGET_HOST)return location.origin+rest;\n'
+        '  if(TARGET_HOST==="belet.tm"&&h==="homepage.belet.me"&&s.toLowerCase().indexOf("https://")===0)return location.origin+"/__neon_host/"+h+rest;\n'
         '  if(isTargetHost(h))return location.origin+"/__neon_host/"+h+rest;\n'
         '  return raw;\n'
         '}\n'
@@ -2727,7 +2728,7 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "}\n"
         "function isAllowedUpstreamHost(h){\n"
         "  var low=String(h||'').toLowerCase().replace(/:\\d+$/,'');\n"
-        "  return low===BASE_HOSTNAME||(low.length>BASE_HOSTNAME.length+1&&low.slice(-BASE_HOSTNAME.length-1)==='.'+BASE_HOSTNAME);\n"
+        "  return low===BASE_HOSTNAME||(low.length>BASE_HOSTNAME.length+1&&low.slice(-BASE_HOSTNAME.length-1)==='.'+BASE_HOSTNAME)||(BASE_HOSTNAME==='belet.tm'&&BASE_PROTOCOL==='https:'&&low==='homepage.belet.me');\n"
         "}\n"
         "function ownAddresses(){\n"
         "  var out=['127.0.0.1'],ifs;\n"
@@ -2938,12 +2939,12 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "    targetRes.writeHead(entry.status||200,outH);\n"
         "    targetRes.end(entry.body);\n"
         "  }\n"
-        "  var canStaticCache=(reqMethod==='GET'&&!inH.range&&!inH['if-range']&&!inH.authorization&&isStaticPath(upPathname,''));\n"
+        "  var canStaticCache=(upHost!=='homepage.belet.me'&&reqMethod==='GET'&&!inH.range&&!inH['if-range']&&!inH.authorization&&isStaticPath(upPathname,''));\n"
         "  var sKey=canStaticCache?(upHost+'|'+upPath):'';\n"
-        "  var canHtmlCache=(reqMethod==='GET'&&!inH.range&&!inH['if-range']&&!inH.authorization&&isHtmlCacheable(upPathname));\n"
+        "  var canHtmlCache=(upHost!=='homepage.belet.me'&&reqMethod==='GET'&&!inH.range&&!inH['if-range']&&!inH.authorization&&isHtmlCacheable(upPathname));\n"
         "  var hKey=canHtmlCache?('html|'+jarEpoch+'|'+upHost+'|'+upPath):'';\n"
         "  var rscHdr=String(inH['rsc']||'')+'|'+String(inH['next-router-state-tree']||'');\n"
-        "  var dKey=(reqMethod==='GET'&&!inH.range&&!inH['if-range']&&!inH.authorization)?(jarEpoch+'|'+upHost+'|'+upPath+'|'+rscHdr):'';\n"
+        "  var dKey=(upHost!=='homepage.belet.me'&&reqMethod==='GET'&&!inH.range&&!inH['if-range']&&!inH.authorization)?(jarEpoch+'|'+upHost+'|'+upPath+'|'+rscHdr):'';\n"
         "  if(canStaticCache){\n"
         "    var sHit=lruGet(staticMap,staticOrder,sKey,STATIC_TTL_MS);\n"
         "    if(!sHit){\n"
@@ -2974,7 +2975,7 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "    if(lk==='host'||lk==='connection'||lk==='keep-alive'||lk==='proxy-connection'||lk==='origin'||lk==='referer'||lk==='cookie'||lk==='accept-encoding'||lk==='x-forwarded-host'||lk==='x-forwarded-proto'||lk==='x-forwarded-for'||lk==='sec-fetch-dest'||lk==='sec-fetch-mode'||lk==='sec-fetch-site'||lk==='sec-fetch-user'||lk==='upgrade-insecure-requests'||lk==='if-none-match'||lk==='if-modified-since')continue;\n"
         "    outHeaders[k]=inH[k];\n"
         "  }\n"
-        "  var mergedCk=buildUpstreamCookieHeader(upHost,upPathname,inH.cookie||'');\n"
+        "  var mergedCk=buildUpstreamCookieHeader(upHost,upPathname,upHost==='homepage.belet.me'?'':(inH.cookie||''));\n"
         "  if(mergedCk)outHeaders['cookie']=mergedCk;\n"
         "  var hostHdr=upHost;\n"
         "  if((BASE_PROTOCOL==='https:'&&upPort!==443)||(BASE_PROTOCOL==='http:'&&upPort!==80))hostHdr+=':'+upPort;\n"
@@ -2991,7 +2992,7 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "    headers:outHeaders\n"
         "  };\n"
         "  if(BASE_PROTOCOL==='https:'){\n"
-        "    reqOpts.rejectUnauthorized=false;\n"
+        "    reqOpts.rejectUnauthorized=(upHost==='homepage.belet.me');\n"
         "    reqOpts.servername=upHost;\n"
         "    if(httpsAgent)reqOpts.agent=httpsAgent;\n"
         "  }else if(httpAgent){\n"
@@ -3048,6 +3049,7 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "        hasSetCookie=true;\n"
         "        var sc=upH[hk];\n"
         "        jarStore(sc,upHost,upPathname);\n"
+        "        if(upHost==='homepage.belet.me'){continue;}\n"
         "        if(Object.prototype.toString.call(sc)==='[object Array]'){\n"
         "          var mapped=[];\n"
         "          for(var sci=0;sci<sc.length;sci++)mapped.push(rewriteSetCookie(sc[sci]));\n"
@@ -3698,7 +3700,7 @@ def build_belet_wgt(
     config_xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" '
-        'id="https://belet.tm/tizen" version="1.3.1" viewmodes="maximized">\n'
+        'id="https://belet.tm/tizen" version="1.3.2" viewmodes="maximized">\n'
         f'    <tizen:application id="{safe_app_id}" package="{pkg_id}" required_version="{req_ver}"/>\n'
         '    <content src="index.html"/>\n'
         '    <feature name="http://tizen.org/feature/screen.size.all"/>\n'
