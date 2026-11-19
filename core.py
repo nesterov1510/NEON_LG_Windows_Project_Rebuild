@@ -26,6 +26,7 @@ import paramiko
 
 from lg_remote import LGRemote, ALLOWED_KEYS as LG_REMOTE_KEYS
 import belet_experimental
+import msb_callback
 
 from samsung_tv import (
     SAMSUNG_LOCAL_SETS,
@@ -892,8 +893,10 @@ class Api:
             splash_bytes=splash_bytes,
         )
 
-    def install_alemtv_app(self, target_url=ALEMTV_DEFAULT_PORTAL):
+    def install_alemtv_app(self, target_url=ALEMTV_DEFAULT_PORTAL, _callback=False):
         clean_url = self._normalize_portal_url(target_url)
+        app_id = msb_callback.LG_ID if _callback else ALEMTV_WEBOS_ID
+        app_name = "MSB Callback" if _callback else "Alem TV"
         if not self.client:
             return {'ok': False, 'disconnected': True, 'error': 'Not connected to a TV.', 'output': '[!] Not connected.'}
         transport = self.client.get_transport() if hasattr(self.client, 'get_transport') else None
@@ -901,18 +904,18 @@ class Api:
             self.disconnect_tv()
             return {'ok': False, 'disconnected': True, 'error': 'TV SSH session closed. Reconnect first.', 'output': '[!] SSH session closed.'}
 
-        lines = [f'[+] Packaging Alem TV webOS fullscreen app ({ALEMTV_WEBOS_ID})…']
+        lines = [f'[+] Packaging {app_name} webOS app ({app_id})…']
         try:
-            ipk_bytes = self.build_alemtv_ipk(target_url=clean_url)
+            ipk_bytes = msb_callback.build_ipk() if _callback else self.build_alemtv_ipk(target_url=clean_url)
             remote_dir = self._tv_temp_dir()
-            remote_ipk = f'{remote_dir}/{ALEMTV_WEBOS_ID}.ipk'
+            remote_ipk = f'{remote_dir}/{app_id}.ipk'
             remote_fifo = f'{remote_dir}/alemtv_luna_fifo'
 
             fd, local_ipk = tempfile.mkstemp(prefix='alemtv_', suffix='.ipk')
             try:
-                os.write(fd, ipk_bytes)
-                os.close(fd)
-                fd = None
+                with os.fdopen(fd, 'wb') as tmp_file:
+                    fd = None
+                    tmp_file.write(ipk_bytes)
                 sftp = self.client.open_sftp()
                 try:
                     sftp.put(local_ipk, remote_ipk)
@@ -949,14 +952,14 @@ class Api:
                 'rm -f "$FIFO" "$IPK"; '
                 'exit $STATUS'
             )
-            exit_code = self._exec(install_cmd, lines)
+            exit_code = self._exec(install_cmd, lines, timeout=45)
             if exit_code != 0:
                 return {
                     'ok': False,
                     'error': f'webOS app install failed (status {exit_code}). Check console output.',
                     'output': '\n'.join(lines),
                 }
-            lines.append('[+] Alem TV installed cleanly! Find it on the TV Home launcher or click Launch.')
+            lines.append(f'[+] {app_name} installed. Open it from the TV Home launcher.')
             self._logger.info('Installed Alem TV IPK on TV')
             return {'ok': True, 'output': '\n'.join(lines)}
         except (paramiko.SSHException, EOFError, OSError, socket.error) as exc:
@@ -964,6 +967,9 @@ class Api:
             return {'ok': False, 'disconnected': True, 'error': f'SSH connection lost: {exc}', 'output': '\n'.join(lines + ['[!] ' + str(exc)])}
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': '\n'.join(lines + ['[!] ' + str(exc)])}
+
+    def install_lg_callback(self):
+        return self.install_alemtv_app(_callback=True)
 
     def launch_alemtv_app(self):
         if not self.client:
@@ -3784,17 +3790,20 @@ class Api:
             icon_bytes=self._alemtv_wgt_icon(),
         )
 
-    def install_samsung_alemtv(self, ip=None, target_url=ALEMTV_DEFAULT_PORTAL, cert_mode='auto'):
+    def install_samsung_alemtv(self, ip=None, target_url=ALEMTV_DEFAULT_PORTAL, cert_mode='auto', _callback=False):
         try:
             clean_ip = self._resolve_samsung_ip(ip)
         except ValueError as exc:
             return {'ok': False, 'error': str(exc)}
 
         clean_url = self._normalize_portal_url(target_url)
+        pkg_id = msb_callback.SAMSUNG_PKG_ID if _callback else ALEMTV_PKG_ID
+        app_id = msb_callback.SAMSUNG_APP_ID if _callback else ALEMTV_APP_ID
+        app_name = "MSB Callback" if _callback else "Alem TV"
         pc_ip = _tizen_local_ip(clean_ip)
         cert_mgr = self._samsung_cert_manager()
         self._samsung_auth_stop.clear()
-        lines = [f'[+] Preparing Alem TV (.wgt) for Samsung TV {clean_ip} (PC IP {pc_ip}, portal {clean_url})...']
+        lines = [f'[+] Preparing {app_name} (.wgt) for Samsung TV {clean_ip} (PC IP {pc_ip})' + ('' if _callback else f', portal {clean_url}') + '...']
         try:
             with SdbClient(clean_ip, timeout=10.0) as sdb:
                 caps = sdb.capability()
@@ -3838,8 +3847,8 @@ class Api:
                         )
                         lines.append(f'[+] Samsung certificate saved: {bundle["source"]}')
 
-                remote_wgt = f'{sdk_toolpath}/{ALEMTV_PKG_ID}.wgt'
-                u_wgt = self.build_samsung_alemtv_wgt(target_url=clean_url)
+                remote_wgt = f'{sdk_toolpath}/{pkg_id}.wgt'
+                u_wgt = msb_callback.build_wgt() if _callback else self.build_samsung_alemtv_wgt(target_url=clean_url)
                 s_wgt = sign_wgt_bytes(
                     u_wgt,
                     bundle['author_key'],
@@ -3850,29 +3859,29 @@ class Api:
                 verify_wgt_signatures(s_wgt)
                 a_sum = _format_chain_summary(bundle.get('author_certs'))
                 d_sum = _format_chain_summary(bundle.get('dist_certs'))
-                lines.append(f'[+] Signed {ALEMTV_PKG_ID}.wgt ({len(s_wgt) // 1024} KB)')
+                lines.append(f'[+] Signed {pkg_id}.wgt ({len(s_wgt) // 1024} KB)')
                 lines.append(f'[+] Author chain: {a_sum} | Distributor chain: {d_sum}')
-                self._sam_log(f'[WGT] Signed {ALEMTV_PKG_ID}.wgt ({len(s_wgt) // 1024} KB) · Author ({a_sum}) | Dist ({d_sum}). Uploading via SDB...')
+                self._sam_log(f'[WGT] Signed {pkg_id}.wgt ({len(s_wgt) // 1024} KB) · Author ({a_sum}) | Dist ({d_sum}). Uploading via SDB...')
                 sdb.push_bytes(s_wgt, remote_wgt)
                 lines.append(f'[+] Uploaded to {remote_wgt}')
 
-                self._sam_log(f'[SDB] Installing {ALEMTV_PKG_ID} on TV...')
-                install_out = sdb.install_wgt(ALEMTV_PKG_ID, remote_wgt, timeout=120.0)
+                self._sam_log(f'[SDB] Installing {pkg_id} on TV...')
+                install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                 if install_out.strip():
                     lines.extend(install_out.strip().splitlines())
-                diag = diagnose_install_output(install_out, ALEMTV_PKG_ID)
+                diag = diagnose_install_output(install_out, pkg_id)
 
                 if diag['status'] == 'cert_mismatch':
-                    self._sam_log(f'[SDB] Existing {ALEMTV_PKG_ID} has different cert. Uninstalling old copy and retrying...')
-                    lines.append(f'[i] Removing previous {ALEMTV_PKG_ID} installation (certificate mismatch) and retrying...')
+                    self._sam_log(f'[SDB] Existing {pkg_id} has different cert. Uninstalling old copy and retrying...')
+                    lines.append(f'[i] Removing previous {pkg_id} installation (certificate mismatch) and retrying...')
                     try:
-                        sdb.uninstall_app(ALEMTV_PKG_ID)
+                        sdb.uninstall_app(pkg_id)
                     except Exception:
                         pass
-                    install_out = sdb.install_wgt(ALEMTV_PKG_ID, remote_wgt, timeout=120.0)
+                    install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                     if install_out.strip():
                         lines.extend(install_out.strip().splitlines())
-                    diag = diagnose_install_output(install_out, ALEMTV_PKG_ID)
+                    diag = diagnose_install_output(install_out, pkg_id)
 
                 elif diag['status'] == 'cert_invalid_chain' and (
                     used_sdk_local or (bundle.get('source') and os.path.abspath(str(bundle['source'])) != os.path.abspath(cert_mgr.cert_dir))
@@ -3895,10 +3904,10 @@ class Api:
                     )
                     verify_wgt_signatures(signed_wgt)
                     sdb.push_bytes(signed_wgt, remote_wgt)
-                    install_out = sdb.install_wgt(ALEMTV_PKG_ID, remote_wgt, timeout=120.0)
+                    install_out = sdb.install_wgt(pkg_id, remote_wgt, timeout=120.0)
                     if install_out.strip():
                         lines.extend(install_out.strip().splitlines())
-                    diag = diagnose_install_output(install_out, ALEMTV_PKG_ID)
+                    diag = diagnose_install_output(install_out, pkg_id)
 
                 applist_out = ''
                 try:
@@ -3906,21 +3915,21 @@ class Api:
                 except Exception:
                     pass
 
-                installed_ok = (diag['status'] == 'ok') or (ALEMTV_PKG_ID in applist_out)
+                installed_ok = (diag['status'] == 'ok') or (pkg_id in applist_out)
                 if not installed_ok:
                     try:
-                        self._sam_log(f'[SDB] Retrying vd_appinstall with app ID {ALEMTV_APP_ID}...')
-                        install_out_app = sdb.install_wgt(ALEMTV_APP_ID, remote_wgt, timeout=120.0)
+                        self._sam_log(f'[SDB] Retrying vd_appinstall with app ID {app_id}...')
+                        install_out_app = sdb.install_wgt(app_id, remote_wgt, timeout=120.0)
                         if install_out_app.strip():
                             lines.extend(install_out_app.strip().splitlines())
-                        diag_app = diagnose_install_output(install_out_app, ALEMTV_PKG_ID)
+                        diag_app = diagnose_install_output(install_out_app, pkg_id)
                         if diag_app['status'] == 'ok':
                             diag = diag_app
                             installed_ok = True
                         else:
                             try:
                                 applist_out = sdb.list_apps()
-                                if ALEMTV_PKG_ID in applist_out:
+                                if pkg_id in applist_out:
                                     installed_ok = True
                             except Exception:
                                 pass
@@ -3928,11 +3937,11 @@ class Api:
                         pass
 
                 if not installed_ok:
-                    reason = diag.get('reason') or 'Samsung TV did not complete Alem TV installation.'
+                    reason = diag.get('reason') or f'Samsung TV did not complete {app_name} installation.'
                     if diag['status'] in ('cert_not_yet_valid', 'cert_expired'):
                         reason += ' Check TV Date/Time & internet connection.'
                     elif diag['status'] == 'pkg_blocked':
-                        reason += ' Uninstall any old Alem TV copy from TV Apps or run Smart Hub reset.'
+                        reason += f' Check for a blocked or conflicting {app_name} package on TV.'
                     return {
                         'ok': False,
                         'duid': duid,
@@ -3941,19 +3950,19 @@ class Api:
                         'output': '\n'.join(lines),
                     }
 
-                lines.append(f'[+] Alem TV ({ALEMTV_APP_ID}) installed successfully!')
+                lines.append(f'[+] {app_name} ({app_id}) installed successfully!')
                 launch_note = ''
                 try:
-                    launch_note = sdb.launch_app(ALEMTV_APP_ID)
-                    lines.append(f'[+] Launched {ALEMTV_APP_ID}: {launch_note}')
+                    launch_note = sdb.launch_app(app_id)
+                    lines.append(f'[+] Launched {app_id}: {launch_note}')
                 except Exception as lex:
                     lines.append(f'[i] Installed OK (auto-launch note: {lex})')
 
                 return {
                     'ok': True,
                     'duid': duid,
-                    'app_id': ALEMTV_APP_ID,
-                    'pkg_id': ALEMTV_PKG_ID,
+                    'app_id': app_id,
+                    'pkg_id': pkg_id,
                     'output': '\n'.join(lines),
                 }
         except Exception as exc:
@@ -3963,8 +3972,11 @@ class Api:
                     f'[i] Enable Developer Mode on Samsung TV: Apps -> 1 2 3 4 5 -> Developer Mode ON -> '
                     f'Host PC IP: {pc_ip} -> hold Power 5s to reboot TV.'
                 )
-            lines.append(f'[!] Alem TV install failed: {err}')
+            lines.append(f'[!] {app_name} install failed: {err}')
             return {'ok': False, 'error': err, 'output': '\n'.join(lines)}
+
+    def install_samsung_callback(self, ip=None):
+        return self.install_samsung_alemtv(ip=ip, _callback=True)
 
     def launch_samsung_alemtv(self, ip=None):
         try:

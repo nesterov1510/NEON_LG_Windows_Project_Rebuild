@@ -1457,6 +1457,21 @@ class NeonWindow(QMainWindow):
 
         self.stack.addWidget(page)
 
+    def _install_callback_lg(self):
+        if not self.tv_connected:
+            self.toast.show_toast('Сначала подключите LG на странице LG', 'warn')
+            return
+        self._run_async('tv', self.api.install_lg_callback,
+                        lambda r: self.toast.show_toast('MSB Callback установлен на LG', 'info') if r.get('ok') else None)
+
+    def _install_callback_samsung(self):
+        ip = self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast('Введите IP Samsung на странице Samsung', 'warn')
+            return
+        self._run_async('sam', lambda: self.api.install_samsung_callback(ip),
+                        lambda r: self.toast.show_toast('MSB Callback установлен на Samsung', 'info') if r.get('ok') else None)
+
     def _build_callback_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1468,6 +1483,13 @@ class NeonWindow(QMainWindow):
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet('color:#9fb7aa;font-size:15px;margin-bottom:10px;')
         layout.addWidget(subtitle)
+        actions = QHBoxLayout()
+        for label, handler in [('УСТАНОВИТЬ НА LG', self._install_callback_lg), ('УСТАНОВИТЬ НА SAMSUNG', self._install_callback_samsung)]:
+            button = QPushButton(label)
+            button.setObjectName('PrimaryBtn')
+            button.clicked.connect(handler)
+            actions.addWidget(button)
+        layout.addLayout(actions)
         panels = QHBoxLayout()
         panels.setSpacing(18)
         details = QFrame()
