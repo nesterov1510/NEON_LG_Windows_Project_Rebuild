@@ -21,11 +21,13 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 import paramiko
 
 from lg_remote import LGRemote, ALLOWED_KEYS as LG_REMOTE_KEYS
 import msb_callback
+from local_tv_packages import read_package, validate_ipk, validate_wgt
 
 from samsung_tv import (
     SAMSUNG_LOCAL_SETS,
@@ -1116,6 +1118,112 @@ class Api:
         self.profile_map = valid_map
         self._save_profile_map(self.profile_map)
         return {'profiles': sorted(self.profile_map.keys(), key=str.casefold)}
+
+    def browse_tv_package(self, platform_name):
+        filters = {'lg': 'webOS application (*.ipk)', 'samsung': 'Tizen application (*.wgt)'}
+        if platform_name not in filters:
+            return {'error': 'Unsupported TV platform.'}
+        if not self.window:
+            return {'error': 'File picker is not ready.'}
+        try:
+            selected = self.window.create_file_dialog(self.open_dialog_type, allow_multiple=False,
+                                                      file_types=[filters[platform_name]])
+            if not selected:
+                return {'cancelled': True}
+            return {'path': selected[0] if isinstance(selected, (list, tuple)) else selected}
+        except Exception as exc:
+            return {'error': str(exc)}
+
+    def install_local_lg_ipk(self, path):
+        if not self.client:
+            return {'ok': False, 'error': 'Connect to LG Developer Mode over SSH first.'}
+        try:
+            data = read_package(path, '.ipk')
+            validate_ipk(data)
+        except (ValueError, OSError) as exc:
+            return {'ok': False, 'error': str(exc)}
+        transport = self.client.get_transport() if hasattr(self.client, 'get_transport') else None
+        if transport is not None and not transport.is_active():
+            return {'ok': False, 'error': 'LG SSH session closed. Reconnect first.'}
+        token = uuid.uuid4().hex
+        remote_ipk = self._tv_temp_dir() + '/neon_custom_' + token + '.ipk'
+        fifo = self._tv_temp_dir() + '/neon_custom_' + token + '.fifo'
+        lines = ['[+] Installing selected IPK without modifying or signing it.']
+        try:
+            sftp = self.client.open_sftp()
+            try:
+                with sftp.open(remote_ipk, 'wb') as remote:
+                    remote.write(data)
+            finally:
+                sftp.close()
+            payload = json.dumps({'id': 'com.ares.defaultName', 'ipkUrl': remote_ipk, 'subscribe': True})
+            cmd = (
+                'LUNA=$(command -v luna-send-pub || command -v luna-send); '
+                '[ -n "$LUNA" ] || { echo "luna-send not found"; exit 1; }; '
+                f'FIFO={shlex.quote(fifo)}; IPK={shlex.quote(remote_ipk)}; '
+                'rm -f "$FIFO"; mkfifo "$FIFO" || exit 1; '
+                f'"$LUNA" -w 35000 -i \'luna://com.webos.appInstallService/dev/install\' {shlex.quote(payload)} >"$FIFO" 2>&1 & '
+                'LPID=$!; STATUS=1; '
+                'while IFS= read -r line; do echo "$line"; case "$line" in '
+                '*\'"state":"installed"\'*|*\'"state": "installed"\'*) STATUS=0; break;; '
+                '*\'"returnValue":false\'*|*\'"returnValue": false\'*|*\'"errorText"\'*|*\'install failed\'*|*\'FAILED\'*) STATUS=1; break;; '
+                'esac; done < "$FIFO"; kill "$LPID" 2>/dev/null || true; '
+                'rm -f "$FIFO" "$IPK"; exit $STATUS'
+            )
+            code = self._exec(cmd, lines, timeout=45)
+            if code != 0:
+                return {'ok': False, 'error': 'LG rejected IPK installation; see log.', 'output': '\n'.join(lines)}
+            lines.append('[+] LG reported installation complete. Open the app on the TV.')
+            return {'ok': True, 'output': '\n'.join(lines)}
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': '\n'.join(lines)}
+        finally:
+            try:
+                cleanup = self.client.open_sftp()
+                try:
+                    cleanup.remove(remote_ipk)
+                finally:
+                    cleanup.close()
+            except Exception:
+                pass
+
+    def install_local_samsung_wgt(self, ip, path):
+        try:
+            clean_ip = self._resolve_samsung_ip(ip)
+            data = read_package(path, '.wgt')
+            pkg_id, app_id = validate_wgt(data)
+        except (ValueError, OSError) as exc:
+            return {'ok': False, 'error': str(exc)}
+        lines = ['[+] Installing selected WGT: ' + pkg_id + '. Existing signatures will be replaced.']
+        self._samsung_auth_stop.clear()
+        try:
+            with SdbClient(clean_ip, timeout=10.0) as sdb:
+                caps = sdb.capability()
+                duid = sdb.get_duid(caps=caps)
+                sdk_path = sdb.resolve_sdk_toolpath(caps)
+                if not re.fullmatch(r'/[A-Za-z0-9_./-]+', sdk_path) or '..' in sdk_path.split('/'):
+                    raise ValueError('Invalid SDK upload path returned by TV.')
+                cert_mgr = self._samsung_cert_manager()
+                bundle = cert_mgr.find_saved_samsung_certs(duid)
+                if bundle is None:
+                    self._sam_log('[CERT] Samsung Account sign-in may be required...')
+                    bundle = cert_mgr.sign_in_and_provision(duid, open_browser=True, timeout=240.0,
+                                stop_event=self._samsung_auth_stop,
+                                url_cb=lambda u: self._sam_log('[CERT] Sign-in URL: ' + u))
+                signed = sign_wgt_bytes(data, bundle['author_key'], bundle['author_certs'], bundle['dist_key'], bundle['dist_certs'])
+                verify_wgt_signatures(signed)
+                remote = sdk_path + '/' + pkg_id + '.wgt'
+                sdb.push_bytes(signed, remote)
+                result = sdb.install_wgt(pkg_id, remote, timeout=120.0)
+                if result.strip():
+                    lines.extend(result.strip().splitlines())
+                diag = diagnose_install_output(result, pkg_id)
+                if diag.get('status') != 'ok':
+                    return {'ok': False, 'error': diag.get('reason') or 'TV did not confirm WGT installation; see log.', 'output': '\n'.join(lines)}
+                lines.append('[+] Samsung reported installation complete. Open the app on the TV.')
+                return {'ok': True, 'pkg_id': pkg_id, 'app_id': app_id, 'output': '\n'.join(lines)}
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': '\n'.join(lines)}
 
     def browse_profile(self):
         if not self.window:

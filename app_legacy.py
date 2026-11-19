@@ -616,6 +616,18 @@ class NeonWindow(QMainWindow):
         a_row.addWidget(self.btn_alem_remove, 1)
         al.addLayout(a_row)
         left.addWidget(alem_card)
+        local_card, local_layout = self._make_card('lbl_local_lg_app', 5)
+        self.lbl_local_lg_app.setText('УСТАНОВКА IPK ИЗ ФАЙЛА')
+        note = QLabel('Только проверенные файлы webOS IPK. Требуется подключение к LG по SSH / Developer Mode. IPK устанавливается без переподписания.')
+        note.setObjectName('HintLabel')
+        note.setWordWrap(True)
+        local_layout.addWidget(note)
+        btn = QPushButton('ВЫБРАТЬ IPK И УСТАНОВИТЬ')
+        btn.setObjectName('NormalBtn')
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(self.install_local_lg_ipk)
+        local_layout.addWidget(btn)
+        left.addWidget(local_card)
         left.addStretch(1)
 
         grid.addWidget(self._wrap_scroll(left_inner, fixed_width=392))
@@ -916,6 +928,18 @@ class NeonWindow(QMainWindow):
         sal_row.addWidget(self.btn_sam_alem_remove, 1)
         sal.addLayout(sal_row)
         left.addWidget(c_sam_alem)
+        local_card, local_layout = self._make_card('lbl_local_sam_app', 5)
+        self.lbl_local_sam_app.setText('УСТАНОВКА WGT ИЗ ФАЙЛА')
+        note = QLabel('Только проверенные Samsung Tizen web WGT. Пакет будет переподписан; текущая подпись автора заменяется.')
+        note.setObjectName('HintLabel')
+        note.setWordWrap(True)
+        local_layout.addWidget(note)
+        btn = QPushButton('ВЫБРАТЬ WGT И УСТАНОВИТЬ')
+        btn.setObjectName('NormalBtn')
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(self.install_local_samsung_wgt)
+        local_layout.addWidget(btn)
+        left.addWidget(local_card)
         left.addStretch(1)
 
         grid.addWidget(self._wrap_scroll(left_inner, fixed_width=428))
@@ -2383,6 +2407,20 @@ class NeonWindow(QMainWindow):
         dlg = SystemTuneDialog(self, lang=self.lang)
         dlg.exec_()
 
+    def install_local_lg_ipk(self):
+        if not self.tv_connected:
+            self.toast.show_toast('Сначала подключите LG по SSH', 'warn')
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Выберите приложение для LG', '', 'webOS IPK (*.ipk)')
+        if not path:
+            return
+        body = ('Установить файл: ' + os.path.basename(path) + '?\n'
+                'Используйте только доверенные приложения. Существующее приложение с тем же ID может быть обновлено. IPK не переподписывается.')
+        if ConfirmDialog(self, 'Установка IPK на LG', body, 'Установить', 'Отмена').exec_() != ConfirmDialog.Accepted:
+            return
+        self._run_async('tv', lambda: self.api.install_local_lg_ipk(path),
+                        lambda r: self.toast.show_toast('LG подтвердил установку', 'info') if r.get('ok') else None)
+
     def install_belet(self):
         if not self.tv_connected:
             self.toast.show_toast(
@@ -2774,6 +2812,21 @@ class NeonWindow(QMainWindow):
                 )
 
         self._run_async('sam', lambda: self.api.samsung_auth_create_cert(ip), done)
+
+    def install_local_samsung_wgt(self):
+        ip = self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast('Введите IP Samsung', 'warn')
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Выберите приложение для Samsung', '', 'Tizen WGT (*.wgt)')
+        if not path:
+            return
+        body = ('Подписать и установить файл: ' + os.path.basename(path) + '?\n'
+                'Только доверенные приложения. Старая подпись автора будет заменена. Установка может обновить приложение с тем же ID или быть отклонена телевизором.')
+        if ConfirmDialog(self, 'Установка WGT на Samsung', body, 'Установить', 'Отмена').exec_() != ConfirmDialog.Accepted:
+            return
+        self._run_async('sam', lambda: self.api.install_local_samsung_wgt(ip, path),
+                        lambda r: self.toast.show_toast('Samsung подтвердил установку', 'info') if r.get('ok') else None)
 
     def install_samsung_belet(self):
         ip = self.sam_ip.text().strip()
