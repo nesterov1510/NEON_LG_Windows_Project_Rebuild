@@ -1,11 +1,281 @@
 <!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Belet Samsung</title><link rel="stylesheet" href="style.css"></head>
-<body><header><img class="brand" src="belet-logo.png" alt="Belet"><span>Samsung · экспериментальная версия</span><button id="logout" class="hidden">Выйти</button></header>
-<main><div id="sessionNote" role="status"></div><div id="status" role="status" aria-live="polite">Загрузка…</div>
-<section id="login" class="hidden"><div class="login-card"><img class="login-brand" src="belet-logo.png" alt="Belet"><h1>Вход в Belet</h1><p>Укажите номер телефона, связанный с аккаунтом. Код вводите только на телевизоре. Сессия хранится в данных приложения на ТВ.</p>
-<div class="login-tabs"><button id="openQr">Войти через QR-код</button></div><div id="qrSection" class="hidden"><img id="qrImage" alt="Временный QR-код для входа"><p>Откройте Belet на телефоне: Профиль → Устройства → Подключить устройство. Отсканируйте код.</p><p id="qrStatus" role="status"></p><button id="refreshQr">Обновить QR-код</button><button id="closeQr">Вход по телефону</button></div><div id="phoneSection"><label>Телефон с кодом страны<input id="phone" type="tel" inputmode="numeric" placeholder="993XXXXXXXX" autocomplete="tel"></label>
-<label>Способ получения кода<select id="otp"></select><small>После выбора нажмите ▶ для перехода к кнопке.</small></label><button id="send">Получить код</button>
-<div id="codeSection" class="hidden"><label>Код подтверждения<input id="code" type="tel" inputmode="numeric" autocomplete="one-time-code"></label><button id="verify">Войти</button></div></div></div></section>
-<section id="home" class="hidden"><div class="home-title"><h1>Главная</h1><p>Стрелки — выбор · OK — открыть</p></div><div id="rows"></div></section>
-<section id="player" class="hidden"><h1 id="playerTitle"></h1><video id="video" controls playsinline></video><p>Поддержка формата и воспроизведение зависят от телевизора и сервиса Belet.</p><button id="playVideo">▶ Воспроизвести / Пауза</button> <button id="back">Назад к каталогу</button></section>
-</main><script src="app.js"></script></body></html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Belet</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <header id="topbar" class="hidden">
+    <img class="topbar-logo" src="belet-logo.png" alt="Bëlet">
+    <nav id="nav">
+      <button class="nav-item focusable" data-nav="home">Главная</button>
+      <button class="nav-item focusable" data-nav="browse">Каталог</button>
+      <button class="nav-item focusable" data-nav="search">Поиск</button>
+      <button class="nav-item focusable" data-nav="profile">Профиль</button>
+    </nav>
+    <div id="clock" class="clock" aria-hidden="true"></div>
+  </header>
+
+  <main id="main">
+
+    <!-- Boot -->
+    <section id="boot" class="screen">
+      <div class="boot-inner">
+        <img class="boot-logo" src="belet-logo.png" alt="Bëlet">
+        <div class="boot-spinner" aria-hidden="true"></div>
+        <p id="bootStatus" class="boot-status" role="status">Подключение к Belet…</p>
+      </div>
+    </section>
+
+    <!-- Login -->
+    <section id="login" class="screen hidden">
+      <div class="login-bg" aria-hidden="true"></div>
+      <div class="login-layout">
+        <div class="login-brand">
+          <img src="belet-logo.png" alt="Bëlet">
+          <p>Фильмы, сериалы и спорт Belet на вашем телевизоре</p>
+        </div>
+        <div class="login-card">
+          <div class="login-head">
+            <h1 id="loginTitle">Вход в Belet</h1>
+            <p id="loginHint">Введите номер телефона, привязанный к аккаунту Belet.</p>
+          </div>
+
+          <div id="loginPhone" class="login-step">
+            <button id="phoneDisplay" class="field focusable" type="button">
+              <span class="field-label">Номер телефона</span>
+              <span id="phoneValue" class="field-value placeholder">Нажмите OK, чтобы ввести номер</span>
+            </button>
+            <div class="row-inline">
+              <button id="methodPrev" class="pill focusable" type="button" aria-label="Предыдущий способ">‹</button>
+              <button id="methodDisplay" class="pill wide focusable" type="button"><span id="methodValue">Способ получения кода</span></button>
+              <button id="methodNext" class="pill focusable" type="button" aria-label="Следующий способ">›</button>
+            </div>
+            <button id="sendCode" class="primary focusable" type="button" disabled>Получить код</button>
+            <button id="toQr" class="ghost focusable" type="button">Войти по QR-коду</button>
+          </div>
+
+          <div id="loginCode" class="login-step hidden">
+            <button id="codeDisplay" class="field focusable" type="button">
+              <span class="field-label">Код из сообщения</span>
+              <span id="codeValue" class="field-value placeholder">Нажмите OK, чтобы ввести код</span>
+            </button>
+            <button id="verifyCode" class="primary focusable" type="button">Войти</button>
+            <div class="row-inline">
+              <button id="resendCode" class="ghost focusable" type="button">Отправить снова</button>
+              <button id="backToPhone" class="ghost focusable" type="button">Изменить номер</button>
+            </div>
+          </div>
+
+          <div id="loginQr" class="login-step hidden">
+            <div class="qr-frame"><img id="qrImage" alt="QR-код для входа в Belet"></div>
+            <p id="qrStatus" class="qr-status" role="status">Получаем QR-код…</p>
+            <p class="qr-help">Откройте Belet на телефоне → Профиль → Устройства → Подключить устройство и отсканируйте код.</p>
+            <div class="row-inline">
+              <button id="qrRefresh" class="ghost focusable" type="button">Обновить код</button>
+              <button id="toPhone" class="ghost focusable" type="button">Вход по телефону</button>
+            </div>
+          </div>
+
+          <div id="loginAbout" class="login-foot">
+            <button id="loginHelp" class="link focusable" type="button">Проверка сети и справка</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Home -->
+    <section id="home" class="screen hidden">
+      <div id="hero" class="hero hidden">
+        <div class="hero-shade" aria-hidden="true"></div>
+        <img id="heroImage" class="hero-image" alt="">
+        <div class="hero-copy">
+          <h1 id="heroTitle"></h1>
+          <p id="heroMeta" class="hero-meta"></p>
+          <p id="heroText" class="hero-text"></p>
+          <div class="hero-actions">
+            <button id="heroPlay" class="primary focusable" type="button">Смотреть</button>
+            <button id="heroInfo" class="ghost focusable" type="button">Подробнее</button>
+          </div>
+        </div>
+      </div>
+      <div id="rows" class="rows"></div>
+      <div id="homeEmpty" class="empty hidden">
+        <h2>Каталог пуст</h2>
+        <p>Сервис ответил, но не вернул ни одного раздела. Проверьте подписку и повторите.</p>
+        <button id="homeReload" class="ghost focusable" type="button">Обновить</button>
+      </div>
+    </section>
+
+    <!-- Browse -->
+    <section id="browse" class="screen hidden">
+      <div class="screen-head">
+        <h1 id="browseTitle">Каталог</h1>
+        <div id="browseChips" class="chips"></div>
+      </div>
+      <div id="browseGrid" class="grid"></div>
+      <div id="browseMore" class="grid-foot hidden">
+        <button id="browseMoreBtn" class="ghost focusable" type="button">Показать ещё</button>
+      </div>
+      <div id="browseEmpty" class="empty hidden"><h2>Здесь пока ничего нет</h2><p>Попробуйте другую категорию.</p></div>
+    </section>
+
+    <!-- Search -->
+    <section id="search" class="screen hidden">
+      <div class="screen-head">
+        <h1>Поиск</h1>
+        <button id="searchField" class="field compact focusable" type="button">
+          <span class="field-label">Что ищем</span>
+          <span id="searchValue" class="field-value placeholder">Название фильма или сериала</span>
+        </button>
+      </div>
+      <div id="searchGrid" class="grid"></div>
+      <div id="searchEmpty" class="empty hidden"><h2>Введите запрос</h2><p>Нажмите OK на поле поиска и наберите название.</p></div>
+    </section>
+
+    <!-- Detail -->
+    <section id="detail" class="screen hidden">
+      <div id="detailBackdrop" class="detail-backdrop" aria-hidden="true"></div>
+      <div class="detail-scroll">
+        <div class="detail-top">
+          <img id="detailPoster" class="detail-poster" alt="">
+          <div class="detail-info">
+            <h1 id="detailTitle"></h1>
+            <p id="detailMeta" class="detail-meta"></p>
+            <p id="detailGenres" class="detail-genres"></p>
+            <p id="detailText" class="detail-text"></p>
+            <div class="detail-actions">
+              <button id="detailPlay" class="primary focusable" type="button">Смотреть</button>
+              <button id="detailFav" class="ghost focusable" type="button">В избранное</button>
+              <button id="detailTrailer" class="ghost focusable hidden" type="button">Трейлер</button>
+            </div>
+          </div>
+        </div>
+        <div id="episodesSection" class="episodes hidden">
+          <div class="episodes-head">
+            <h2>Серии</h2>
+            <div id="seasonChips" class="chips"></div>
+          </div>
+          <div id="episodeList" class="episodes-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Player -->
+    <section id="player" class="screen hidden">
+      <video id="video" playsinline preload="metadata"></video>
+      <object id="avPlayer" type="application/avplayer" class="hidden"></object>
+      <div id="playerOsd" class="player-osd">
+        <div class="osd-top">
+          <div class="osd-title-wrap">
+            <h1 id="playerTitle"></h1>
+            <p id="playerSubtitle"></p>
+          </div>
+          <div id="playerBadge" class="osd-badge"></div>
+        </div>
+        <div class="osd-bottom">
+          <div id="progress" class="progress">
+            <div id="progressBuffer" class="progress-buffer"></div>
+            <div id="progressFill" class="progress-fill"></div>
+            <div id="progressKnob" class="progress-knob"></div>
+          </div>
+          <div class="osd-row">
+            <span id="timeNow" class="time">00:00</span>
+            <span class="osd-hint">OK — пауза · ←/→ — 10 сек · RETURN — назад</span>
+            <span id="timeTotal" class="time">00:00</span>
+          </div>
+        </div>
+      </div>
+      <div id="playerStatus" class="player-status hidden"></div>
+      <div id="playerSpinner" class="player-spinner hidden"></div>
+    </section>
+
+    <!-- Profile -->
+    <section id="profile" class="screen hidden">
+      <div class="screen-head"><h1>Профиль</h1></div>
+      <div class="profile-layout">
+        <div class="profile-card">
+          <div class="profile-avatar" aria-hidden="true">Б</div>
+          <div>
+            <h2 id="profilePhone">Аккаунт Belet</h2>
+            <p id="profilePlan" class="profile-plan">Загрузка данных…</p>
+          </div>
+        </div>
+        <div class="profile-list">
+          <button id="profileRefresh" class="list-item focusable" type="button">Обновить данные профиля</button>
+          <button id="profileFavorites" class="list-item focusable" type="button">Избранное</button>
+          <button id="profileHelp" class="list-item focusable" type="button">Проверка сети и справка</button>
+          <button id="profileLogout" class="list-item danger focusable" type="button">Выйти из аккаунта</button>
+        </div>
+        <p class="profile-note">Сессия хранится в памяти приложения на телевизоре. Чтобы защитить аккаунт, выходите из него на чужих телевизорах.</p>
+      </div>
+    </section>
+
+    <!-- About / diagnostics -->
+    <section id="about" class="screen hidden">
+      <div class="screen-head"><h1>Проверка сети и справка</h1></div>
+      <div class="about-layout">
+        <div id="aboutStatus" class="about-card"></div>
+        <div class="about-text">
+          <p>Клиент обращается к тем же серверам, что и приложение Belet: авторизация, каталог, видеосервис и поиск. Если один из них недоступен, экран покажет причину.</p>
+          <p>Воспроизведение использует нативный AVPlay телевизора, при его отказе — HTML5-плеер. Поддержка конкретного кодека зависит от модели телевизора и активной подписки.</p>
+          <p>Ошибка HTTP 0 при доступном Wi-Fi означает, что браузер ТВ заблокировал запрос (CORS) или сервер недоступен из вашей сети. Повторите проверку после перезагрузки телевизора.</p>
+          <p>Это неофициальный клиент, установленный через NEON. Аккаунт и токены не передаются третьим лицам.</p>
+        </div>
+        <div class="about-actions">
+          <button id="aboutRetest" class="primary focusable" type="button">Проверить снова</button>
+          <button id="aboutBack" class="ghost focusable" type="button">Назад</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Numeric input -->
+  <div id="numpad" class="overlay hidden">
+    <div class="pad-card">
+      <h2 id="numpadTitle">Ввод номера</h2>
+      <div id="numpadValue" class="pad-value"></div>
+      <div id="numpadKeys" class="pad-keys"></div>
+      <div class="pad-actions">
+        <button id="numpadDelete" class="ghost focusable" type="button">Удалить</button>
+        <button id="numpadClear" class="ghost focusable" type="button">Очистить</button>
+        <button id="numpadDone" class="primary focusable" type="button">Готово</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Text input -->
+  <div id="keyboard" class="overlay hidden">
+    <div class="pad-card wide-card">
+      <h2 id="keyboardTitle">Поиск</h2>
+      <div id="keyboardValue" class="pad-value"></div>
+      <div id="keyboardKeys" class="kb-keys"></div>
+      <div class="pad-actions">
+        <button id="kbDelete" class="ghost focusable" type="button">Удалить</button>
+        <button id="kbClear" class="ghost focusable" type="button">Очистить</button>
+        <button id="kbDone" class="primary focusable" type="button">Найти</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dialog -->
+  <div id="dialog" class="overlay hidden">
+    <div class="dialog-card">
+      <h2 id="dialogTitle"></h2>
+      <p id="dialogText"></p>
+      <div id="dialogActions" class="dialog-actions"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+</div>
+
+<script src="api.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

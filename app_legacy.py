@@ -870,7 +870,7 @@ class NeonWindow(QMainWindow):
         btn_belet_client = QPushButton('УСТАНОВИТЬ BELET SAMSUNG · НОВЫЙ КЛИЕНТ')
         btn_belet_client.setObjectName('NormalBtn')
         btn_belet_client.setCursor(Qt.PointingHandCursor)
-        btn_belet_client.setToolTip('Отдельный экспериментальный клиент. Обычный Belet не изменяется; вход и видео требуют проверки на ТВ.')
+        btn_belet_client.setToolTip('Клиент Belet для Tizen: вход, каталог, поиск, сезоны, плеер и прогресс. Обычный Belet не изменяется.')
         btn_belet_client.clicked.connect(self.install_samsung_belet_client)
         sbl.addWidget(btn_belet_client)
         sbl_row = QHBoxLayout()
