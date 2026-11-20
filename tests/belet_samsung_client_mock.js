@@ -683,6 +683,7 @@ let avplayFail = false;
 sandbox.webapis = {
   avplay: {
     open(url) { avplayCalls.push(['open', url]); this.url = url; },
+    setStreamingProperty(name, value) { avplayCalls.push(['property', name, value]); },
     setDisplayRect() {},
     setListener(listener) { this.listener = listener; },
     prepareAsync(next) {
@@ -758,7 +759,7 @@ FakeHls.instances = [];
 FakeHls.isSupported = () => true;
 FakeHls.Events = { MEDIA_ATTACHED: 'mediaAttached', MANIFEST_PARSED: 'manifestParsed', ERROR: 'error' };
 sandbox.Hls = FakeHls;
-avplayFail = false;
+avplayFail = true;
 avplayCalls.length = 0;
 route('/api/v3/files/701?type=4', 200, { sources: [
   { filename: 'https://cdn.example/a.m3u8', quality: '720p' },
@@ -770,11 +771,13 @@ assert(hlsPlayer, 'hls.js instance created');
 assert.strictEqual(hlsPlayer.url, 'https://cdn.example/video/high?token=signed', 'HLS MIME type selects hls.js for extensionless signed URLs');
 assert.strictEqual(hlsPlayer.config.enableWorker, false, 'no blob workers, CSP stays strict');
 assert.strictEqual(ids.video.paused, false, 'hls.js playback started on the video element');
-assert.strictEqual(avplayCalls.length, 0, 'AVPlay is not used when MSE works');
+assert.strictEqual(avplayCalls[0][0], 'open', 'Samsung AVPlay is tried before the MSE fallback');
+assert(avplayCalls.some(call => call[0] === 'property' && call[1] === 'USER_AGENT' && call[2] === 'belet_films_android'),
+  'AVPlay uses the Android player user-agent');
 /* a fatal HLS error degrades to the next engine without losing the position */
 hlsPlayer.handlers.error({}, { fatal: true, details: 'manifestLoadError' });
 assert.strictEqual(hlsPlayer.destroyed, true, 'broken hls.js instance is destroyed');
-assert.strictEqual(avplayCalls[0][0], 'open', 'AVPlay retries the same source');
+assert.strictEqual(ids.video.src, 'https://cdn.example/video/high?token=signed', 'native video is the final fallback');
 fireKey(10009);
 
 /* 9e-2. Media requests carry the API auth headers and a 401 replays them after a refresh */

@@ -1402,8 +1402,8 @@
 
   /* ── player ───────────────────────────────────────────────────────── */
 
-  /* Three playback engines, tried per source: hls.js over Media Source Extensions (works on
-     Tizen 4+), the native AVPlay plugin, and finally the plain <video> element. */
+  /* Try Samsung's native adaptive-streaming engine first, then hls.js over MSE, and finally
+     the plain <video> element for sources the TV can play natively. */
   function avplayApi() {
     try {
       if (window.webapis && window.webapis.avplay) return window.webapis.avplay;
@@ -1500,8 +1500,8 @@
     var list = [];
     var hlsWorks = false;
     try { hlsWorks = !!(window.Hls && window.Hls.isSupported()); } catch (e) {}
-    if (isHlsSource(source) && hlsWorks) list.push('hls');
     if (avplayAvailable()) list.push('avplay');
+    if (isHlsSource(source) && hlsWorks) list.push('hls');
     list.push('native');
     return list;
   }
@@ -1743,6 +1743,7 @@
     try {
       api.open(source.url);
       player.avOpened = true;
+      try { if (api.setStreamingProperty) api.setStreamingProperty('USER_AGENT', 'belet_films_android'); } catch (e) {}
       api.setDisplayRect(0, 0, window.innerWidth || 1920, window.innerHeight || 1080);
       api.setListener({
         onbufferingstart: function () { setHidden($('playerSpinner'), false); },
@@ -1760,7 +1761,10 @@
           reportProgress();
           exitPlayer();
         },
-        onerror: function () { fail('avplay error'); }
+        onerror: function (error) {
+          var code = error && (error.code || error.name || error.message);
+          fail('avplay error' + (code ? ' ' + code : ''));
+        }
       });
       api.prepareAsync(function () {
         if (!player.active || player.engine !== 'avplay') return;
