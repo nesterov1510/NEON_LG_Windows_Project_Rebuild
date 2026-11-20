@@ -27,6 +27,7 @@ import paramiko
 
 from lg_remote import LGRemote, ALLOWED_KEYS as LG_REMOTE_KEYS
 import msb_callback
+import belet_lg_client
 from local_tv_packages import read_package, validate_ipk, validate_wgt
 
 from samsung_tv import (
@@ -732,7 +733,8 @@ class Api:
     def _tv_temp_dir(self):
         return '/media/developer/temp' if '/media/developer/temp/' in str(self.remote_script) else '/tmp'
 
-    def install_belet_app(self):
+    def _install_webos_package(self, ipk_builder, app_id, remote_name, label):
+        """Upload an IPK to `_tv_temp_dir()` and install it through appInstallService."""
         if not self.client:
             return {'ok': False, 'disconnected': True, 'error': 'Not connected to a TV.', 'output': '[!] Not connected.'}
         transport = self.client.get_transport() if hasattr(self.client, 'get_transport') else None
@@ -740,11 +742,11 @@ class Api:
             self.disconnect_tv()
             return {'ok': False, 'disconnected': True, 'error': 'TV SSH session closed. Reconnect first.', 'output': '[!] SSH session closed.'}
 
-        lines = ['[+] Packaging Belet webOS fullscreen app (tm.belet.webos)…']
+        lines = [f'[+] Packaging {label}…']
         try:
-            ipk_bytes = self.build_belet_ipk()
+            ipk_bytes = ipk_builder()
             remote_dir = self._tv_temp_dir()
-            remote_ipk = f'{remote_dir}/tm.belet.webos.ipk'
+            remote_ipk = f'{remote_dir}/{remote_name}'
             remote_fifo = f'{remote_dir}/belet_luna_fifo'
 
             fd, local_ipk = tempfile.mkstemp(prefix='belet_', suffix='.ipk')
@@ -795,8 +797,8 @@ class Api:
                     'error': f'webOS app install failed (status {exit_code}). Check console output.',
                     'output': '\n'.join(lines),
                 }
-            lines.append('[+] Belet installed cleanly! Find it on the TV Home launcher or click Launch.')
-            self._logger.info('Installed Belet IPK on TV')
+            lines.append(f'[+] {app_id} installed cleanly! Find it on the TV Home launcher or click Launch.')
+            self._logger.info('Installed %s on TV', app_id)
             return {'ok': True, 'output': '\n'.join(lines)}
         except (paramiko.SSHException, EOFError, OSError, socket.error) as exc:
             self.disconnect_tv()
@@ -804,7 +806,34 @@ class Api:
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': '\n'.join(lines + ['[!] ' + str(exc)])}
 
-    def launch_belet_app(self):
+    def install_belet_app(self):
+        return self._install_webos_package(
+            self.build_belet_ipk,
+            'tm.belet.webos',
+            'tm.belet.webos.ipk',
+            'Belet webOS fullscreen app (tm.belet.webos)',
+        )
+
+    def belet_lg_client_ipk(self):
+        """IPK bytes of the LG webOS build of the new Belet client (same app as the Samsung WGT)."""
+        bundled = resource(os.path.join('lg-belet', belet_lg_client.PACKAGE_NAME))
+        with open(bundled, 'rb') as handle:
+            return handle.read()
+
+    def install_belet_lg_client(self):
+        """Install the new Belet client (tm.belet.neonclient) on an LG webOS TV."""
+        try:
+            builder = self.belet_lg_client_ipk
+        except Exception as exc:  # pragma: no cover - defensive
+            return {'ok': False, 'error': str(exc), 'output': '[!] ' + str(exc)}
+        return self._install_webos_package(
+            builder,
+            belet_lg_client.APP_ID,
+            f'{belet_lg_client.APP_ID}.ipk',
+            f'Belet LG client ({belet_lg_client.APP_ID})',
+        )
+
+    def _launch_webos_app(self, app_id):
         if not self.client:
             return {'ok': False, 'disconnected': True, 'error': 'Not connected to a TV.', 'output': '[!] Not connected.'}
         lines = []
@@ -812,7 +841,7 @@ class Api:
             cmd = (
                 'LUNA=$(command -v luna-send-pub || command -v luna-send); '
                 '[ -n "$LUNA" ] || { echo "[!] luna-send-pub not found on TV"; exit 1; }; '
-                '"$LUNA" -n 1 -f \'luna://com.webos.applicationManager/launch\' \'{"id":"tm.belet.webos"}\''
+                f'"$LUNA" -n 1 -f \'luna://com.webos.applicationManager/launch\' \'{{"id":"{app_id}"}}\''
             )
             rc = self._exec(cmd, lines)
             out = '\n'.join(lines) if lines else '[+] Launch command sent.'
@@ -829,17 +858,23 @@ class Api:
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': '[!] ' + str(exc)}
 
-    def remove_belet_app(self):
+    def launch_belet_app(self):
+        return self._launch_webos_app('tm.belet.webos')
+
+    def launch_belet_lg_client(self):
+        return self._launch_webos_app(belet_lg_client.APP_ID)
+
+    def _remove_webos_app(self, app_id, label):
         if not self.client:
             return {'ok': False, 'disconnected': True, 'error': 'Not connected to a TV.', 'output': '[!] Not connected.'}
-        lines = ['[+] Removing Belet app (tm.belet.webos)…']
+        lines = [f'[+] Removing {label}…']
         try:
             remote_fifo = f'{self._tv_temp_dir()}/belet_rm_fifo'
             cmd = (
                 'LUNA=$(command -v luna-send-pub || command -v luna-send); '
                 '[ -n "$LUNA" ] || { echo "[!] luna-send-pub not found on TV"; exit 1; }; '
                 f'FIFO={shlex.quote(remote_fifo)}; rm -f "$FIFO"; mkfifo "$FIFO" || exit 1; '
-                '"$LUNA" -w 15000 -i \'luna://com.webos.appInstallService/dev/remove\' \'{"id":"tm.belet.webos","subscribe":true}\' >"$FIFO" 2>&1 & '
+                f'"$LUNA" -w 15000 -i \'luna://com.webos.appInstallService/dev/remove\' \'{{"id":"{app_id}","subscribe":true}}\' >"$FIFO" 2>&1 & '
                 'LPID=$!; STATUS=1; '
                 'while IFS= read -r line; do '
                 '  echo "$line"; '
@@ -857,6 +892,12 @@ class Api:
             return {'ok': True, 'output': '\n'.join(lines)}
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': '\n'.join(lines + ['[!] ' + str(exc)])}
+
+    def remove_belet_app(self):
+        return self._remove_webos_app('tm.belet.webos', 'Belet app (tm.belet.webos)')
+
+    def remove_belet_lg_client(self):
+        return self._remove_webos_app(belet_lg_client.APP_ID, f'Belet LG client ({belet_lg_client.APP_ID})')
 
     def _normalize_portal_url(self, url):
         u = (url or ALEMTV_DEFAULT_PORTAL).strip()

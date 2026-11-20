@@ -44,7 +44,7 @@ jobs:
 
       - name: Build NeonLGControl81.exe (PyInstaller)
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl81 --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "assets;assets" --add-data "samsung-belet/BeletSamsungClient-unsigned.wgt;samsung-belet" --exclude-module PyQt5.QtWebEngineWidgets --exclude-module PyQt5.QtWebEngineCore --exclude-module PyQt5.QtQml --exclude-module PyQt5.QtQuick --exclude-module PyQt5.QtMultimedia --exclude-module PyQt5.QtBluetooth --exclude-module PyQt5.QtDesigner --exclude-module tkinter --uac-admin app_legacy.py
+          python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl81 --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "assets;assets" --add-data "samsung-belet/BeletSamsungClient-unsigned.wgt;samsung-belet" --add-data "lg-belet;lg-belet" --exclude-module PyQt5.QtWebEngineWidgets --exclude-module PyQt5.QtWebEngineCore --exclude-module PyQt5.QtQml --exclude-module PyQt5.QtQuick --exclude-module PyQt5.QtMultimedia --exclude-module PyQt5.QtBluetooth --exclude-module PyQt5.QtDesigner --exclude-module tkinter --uac-admin app_legacy.py
 
       - name: Verify embedded Win32 icon and LF line endings in built EXE bundle
         shell: pwsh
@@ -71,6 +71,9 @@ jobs:
           $beletWgt = Get-ChildItem -Path "dist\NeonLGControl81" -Filter "BeletSamsungClient-unsigned.wgt" -Recurse | Select-Object -First 1 -ExpandProperty FullName
           if (-not $beletWgt) { throw "Bundled Belet Samsung client WGT missing" }
           Write-Host "Verified bundled Belet Samsung client: $beletWgt"
+          $beletIpk = Get-ChildItem -Path "dist\NeonLGControl81" -Filter "BeletLgClient-webOS-unsigned.ipk" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $beletIpk) { throw "Bundled Belet LG client IPK missing" }
+          Write-Host "Verified bundled Belet LG client: $beletIpk"
 
       - name: Locate or install NSIS 3.x
         shell: pwsh
@@ -139,6 +142,13 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path "dist\NeonLGControl81" -DestinationPath "dist\NeonLGControl-Windows81-Portable.zip" -Force
 
+      - name: Build Belet LG webOS client IPK
+        run: |
+          python scripts/build_belet_lg_client.py
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item "lg-belet/BeletLgClient-webOS-unsigned.ipk" "dist/BeletLgClient-webOS-unsigned.ipk" -Force
+          Get-Item "dist/BeletLgClient-webOS-unsigned.ipk" | Select-Object Name, Length
+
       - name: Publish Windows builds as draft release assets
         shell: pwsh
         env:
@@ -148,6 +158,7 @@ jobs:
           gh release create "$env:RELEASE_TAG" `
             "dist/NEON_Setup_Win81_10_11.exe" `
             "dist/NeonLGControl-Windows81-Portable.zip" `
+            "dist/BeletLgClient-webOS-unsigned.ipk" `
             --draft `
             --title "Windows Installer build $env:GITHUB_RUN_NUMBER" `
             --notes "Windows installer and portable bundle built from commit $env:GITHUB_SHA." `

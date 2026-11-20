@@ -53,6 +53,8 @@
 
 Список хостов закреплён в `config.xml` через `tizen:content-security-policy`: `connect-src` покрывает `beletapis.com`, `*.beletapis.com`, `api.belet.tm` и `*.belet.me` (в том числе `videofilm.belet.me`, откуда hls.js тянет плейлисты и сегменты), `media-src https: blob:`. Телеметрия `sentry.belet.me` и `posthog.belet.me` не используется. Привилегия `avplay` объявлена отдельно — без неё `webapis.avplay` на телевизоре недоступен.
 
+Эти же исходники упаковываются в LG-пакет `tm.belet.neonclient` (`belet_lg_client/`, `scripts/build_belet_lg_client.py`): для webOS добавляется только надстройка `webos-shim.js` и манифест, файлы клиента не дублируются. Подробности — в `belet_lg_client/README.md`.
+
 ## Сборка и установка
 
 ```bash
