@@ -103,8 +103,10 @@ def test_tizen_manifest_is_not_shipped_in_the_lg_package():
 def test_committed_ipk_matches_sources():
     committed = ROOT / 'lg-belet' / belet_lg_client.PACKAGE_NAME
     assert committed.is_file(), 'run scripts/build_belet_lg_client.py'
-    validate_ipk(committed.read_bytes())
-    assert ipk_files(committed.read_bytes()) == ipk_files(belet_lg_client.build_ipk(mtime=1))
+    data = committed.read_bytes()
+    validate_ipk(data)
+    assert ipk_files(data) == ipk_files(belet_lg_client.build_ipk())
+    assert data == belet_lg_client.build_ipk(), 'the IPK is byte-reproducible: rebuild it with scripts/build_belet_lg_client.py'
 
 
 def test_api_exposes_lg_client_actions(tmp_path, monkeypatch):
@@ -115,7 +117,7 @@ def test_api_exposes_lg_client_actions(tmp_path, monkeypatch):
     try:
         ipk = api.belet_lg_client_ipk()
         validate_ipk(ipk)
-        assert ipk_files(ipk)['appinfo.json'] == ipk_files(belet_lg_client.build_ipk(mtime=1))['appinfo.json']
+        assert ipk_files(ipk)['appinfo.json'] == ipk_files(belet_lg_client.build_ipk())['appinfo.json']
         assert api.install_belet_lg_client()['disconnected'] is True
         assert api.launch_belet_lg_client()['disconnected'] is True
         assert api.remove_belet_lg_client()['disconnected'] is True

@@ -9,6 +9,8 @@ import io
 import json
 import re
 import tarfile
+import gzip
+import os
 import time
 from pathlib import Path
 
@@ -123,9 +125,17 @@ def _ar_member(name, data, mtime):
     return out
 
 
-def _tarball(members, mtime):
+def _gzipped_tar(mtime):
+    """(tarfile, buffer) writing a deterministic gzip stream: the header mtime is fixed."""
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode='w:gz', format=tarfile.USTAR_FORMAT) as tar:
+    gz = gzip.GzipFile(fileobj=buf, mode='wb', mtime=mtime)
+    tar = tarfile.open(fileobj=gz, mode='w', format=tarfile.USTAR_FORMAT)
+    return tar, gz, buf
+
+
+def _tarball(members, mtime):
+    tar, gz, buf = _gzipped_tar(mtime)
+    with tar:
         for name, payload in members:
             info = tarfile.TarInfo(name)
             info.type = tarfile.REGTYPE
@@ -137,6 +147,7 @@ def _tarball(members, mtime):
             info.gname = 'root'
             info.mtime = mtime
             tar.addfile(info, io.BytesIO(payload))
+    gz.close()
     return buf.getvalue()
 
 
@@ -145,9 +156,13 @@ def _directories(base):
     return ['/'.join(parts[:index + 1]) for index in range(len(parts))]
 
 
+# Fixed timestamp keeps the IPK byte-reproducible; honour SOURCE_DATE_EPOCH if set.
+DEFAULT_MTIME = int(os.environ.get('SOURCE_DATE_EPOCH', '0'))
+
+
 def build_ipk(mtime=None, version=None):
     """Return the IPK bytes for the LG webOS Belet client."""
-    mtime = int(time.time() if mtime is None else mtime)
+    mtime = int(DEFAULT_MTIME if mtime is None else mtime)
     files = package_files(version)
     base = f'usr/palm/applications/{APP_ID}'
 
@@ -156,8 +171,8 @@ def build_ipk(mtime=None, version=None):
         data_members.append((name + '/', b''))
     data_members.extend((f'{base}/{name}', payload) for name, payload in files)
 
-    data_buf = io.BytesIO()
-    with tarfile.open(fileobj=data_buf, mode='w:gz', format=tarfile.USTAR_FORMAT) as tar:
+    tar, gz, data_buf = _gzipped_tar(mtime)
+    with tar:
         for name, payload in data_members:
             info = tarfile.TarInfo(name)
             info.uid = 0
@@ -175,6 +190,7 @@ def build_ipk(mtime=None, version=None):
                 info.mode = 0o644
                 info.size = len(payload)
                 tar.addfile(info, io.BytesIO(payload))
+    gz.close()
 
     installed_kb = max(1, (sum(len(payload) for _, payload in files) + 1023) // 1024)
     control = (

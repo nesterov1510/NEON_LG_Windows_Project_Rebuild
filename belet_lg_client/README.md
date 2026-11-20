@@ -43,6 +43,10 @@ python scripts/build_belet_lg_client.py      # → lg-belet/BeletLgClient-webOS-
 python -m pytest tests/test_belet_lg_client.py -q
 ```
 
+Сборка байт-воспроизводима: текст нормализуется в LF, а отметка времени в tar/gzip
+фиксирована (`SOURCE_DATE_EPOCH`), поэтому один и тот же коммит даёт одинаковый IPK
+на Linux и Windows — это проверяет `tests/test_belet_lg_client.py`.
+
 IPK кладётся в `lg-belet/BeletLgClient-webOS-unsigned.ipk`, входит в Windows-сборку
 NEON (`--add-data "lg-belet;lg-belet"`) и публикуется ассетом чернового релиза.
 
