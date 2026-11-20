@@ -3,6 +3,8 @@ setlocal
 cd /d "%~dp0"
 py -3.8 -m pip install --upgrade "pip<25"
 py -3.8 -m pip install -r requirements-legacy.txt
+py -3.8 scripts\prepare_vless.py
+if errorlevel 1 exit /b 1
 py -3.8 -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl81 --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "assets;assets" --add-data "samsung-belet/BeletSamsungClient-unsigned.wgt;samsung-belet" --add-data "lg-belet;lg-belet" --exclude-module PyQt5.QtWebEngineWidgets --exclude-module PyQt5.QtWebEngineCore --exclude-module PyQt5.QtQml --exclude-module PyQt5.QtQuick --exclude-module PyQt5.QtMultimedia --exclude-module PyQt5.QtBluetooth --exclude-module PyQt5.QtDesigner --exclude-module tkinter --uac-admin app_legacy.py
 if errorlevel 1 exit /b 1
 

@@ -1190,6 +1190,14 @@ class NeonWindow(QMainWindow):
         stat_row.addWidget(self.vpn_stat_val)
         stat_row.addStretch(1)
         l1.addLayout(stat_row)
+        self.vless_link = QLineEdit()
+        self.vless_link.setEchoMode(QLineEdit.Password)
+        self.vless_link.setPlaceholderText('vless://…')
+        l1.addWidget(self.vless_link)
+        self.btn_vless = QPushButton()
+        self.btn_vless.setObjectName('PrimaryBtn')
+        self.btn_vless.clicked.connect(self.connect_vless)
+        l1.addWidget(self.btn_vless)
         left.addWidget(c1)
 
         # Card 2: Custom DNS for Wi-Fi Hotspot & Ethernet Sharing
@@ -1743,6 +1751,7 @@ class NeonWindow(QMainWindow):
         self.btn_reboot.setText(self.t('btn_reboot'))
         self.reboot_hint.setText(self.t('reboot_hint'))
 
+        self.btn_vless.setText('Подключить VLESS' if self.lang == 'ru' else 'Connect VLESS')
         self.lbl_vpn1.setText(self.t('vpn_card1'))
         self.vpn_card1_desc.setText(self.t('vpn_card1_desc'))
         self.lbl_profile.setText(self.t('lbl_profile'))
@@ -3115,6 +3124,11 @@ class NeonWindow(QMainWindow):
             self._on_profile_changed(self.profile_combo.currentText())
 
         self._run_async('net', self.api.list_profiles, done)
+
+    def connect_vless(self):
+        link = self.vless_link.text().strip()
+        self._run_async('net', lambda: self.api.connect_vless(link),
+                        lambda r: self.vless_link.clear() if r.get('ok') else None)
 
     def connect_vpn(self):
         profile = self.profile_combo.currentText()

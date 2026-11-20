@@ -39,6 +39,12 @@ jobs:
           }
           exit $code
 
+      - name: Bundle and check embedded VLESS engine
+        run: |
+          python scripts/prepare_vless.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -c "import json,vless; print(json.dumps(vless.configuration('vless://00000000-0000-4000-8000-000000000001@example.org:443?security=tls')))" | .\assets\vless\sing-box.exe check -c stdin
+
       - name: Build NeonLGControl81.exe (PyInstaller)
         run: |
           python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl81 --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "assets;assets" --add-data "samsung-belet/BeletSamsungClient-unsigned.wgt;samsung-belet" --add-data "lg-belet;lg-belet" --exclude-module PyQt5.QtWebEngineWidgets --exclude-module PyQt5.QtWebEngineCore --exclude-module PyQt5.QtQml --exclude-module PyQt5.QtQuick --exclude-module PyQt5.QtMultimedia --exclude-module PyQt5.QtBluetooth --exclude-module PyQt5.QtDesigner --exclude-module tkinter --uac-admin app_legacy.py
@@ -48,6 +54,10 @@ jobs:
         run: |
           Add-Type -AssemblyName System.Drawing
           $exe = Resolve-Path "dist\NeonLGControl81\NeonLGControl81.exe"
+          $engine = Get-ChildItem -Path "dist\NeonLGControl81" -Filter "sing-box.exe" -Recurse | Select-Object -First 1
+          if (-not $engine -or (Get-FileHash $engine.FullName).Hash -ne (Get-FileHash "assets/vless/sing-box.exe").Hash) {
+            throw "Missing or altered embedded VLESS engine"
+          }
           $ico = [System.Drawing.Icon]::ExtractAssociatedIcon($exe.Path)
           if ($null -eq $ico) { throw "ExtractAssociatedIcon returned null for $($exe.Path)" }
           $bmp = $ico.ToBitmap()

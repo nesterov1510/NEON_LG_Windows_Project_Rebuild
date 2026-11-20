@@ -33,6 +33,12 @@ jobs:
             }
           }
 
+      - name: Bundle and check embedded VLESS engine
+        run: |
+          python scripts/prepare_vless.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -c "import json,vless; print(json.dumps(vless.configuration('vless://00000000-0000-4000-8000-000000000001@example.org:443?security=tls')))" | .\assets\vless\sing-box.exe check -c stdin
+
       - run: python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "ui.html;." --add-data "assets;assets" --add-data "lg-belet;lg-belet" --add-data "samsung-belet/BeletSamsungClient-unsigned.wgt;samsung-belet" --uac-admin app.py
       - name: Verify bundled Samsung Belet client
         shell: pwsh

@@ -26,6 +26,7 @@ import uuid
 import paramiko
 
 from lg_remote import LGRemote, ALLOWED_KEYS as LG_REMOTE_KEYS
+import vless
 import msb_callback
 import belet_lg_client
 from local_tv_packages import read_package, validate_ipk, validate_wgt
@@ -90,6 +91,7 @@ class Api:
         self.vpn_state = 'DISCONNECTED'
         self.vpn_profile = None
         self.vpn_lock = threading.Lock()
+        self._vpn_control = threading.RLock()
         self.hotspot_active = False
         self.hotspot_mode = None
         self.ethernet_active = False
@@ -1365,7 +1367,48 @@ class Api:
             sock.bind(('127.0.0.1', 0))
             return sock.getsockname()[1]
 
+    def connect_vless(self, link):
+        if platform.system() != 'Windows':
+            return {'error': 'Embedded VLESS is available on Windows x64.'}
+        with self._vpn_control:
+            if self.openvpn_process and self.openvpn_process.poll() is None:
+                return {'error': 'Disconnect the active VPN first.'}
+            try:
+                config = vless.configuration(link)
+            except ValueError as exc:
+                return {'error': str(exc)}
+            exe = resource(os.path.join('assets', 'vless', 'sing-box.exe'))
+            if not os.path.isfile(exe):
+                return {'error': 'Embedded VLESS engine missing. Reinstall the NEON Windows build.'}
+            proc = None
+            try:
+                # stdin avoids putting UUIDs in the process list or temp files.
+                proc = subprocess.Popen([exe, 'run', '-c', 'stdin'], cwd=os.path.dirname(exe),
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        encoding='utf-8', errors='replace', creationflags=self._creation_flags())
+                proc.stdin.write(json.dumps(config))
+                proc.stdin.close()
+                with self.vpn_lock:
+                    self.openvpn_process = proc  # common owner for both engines and ICS teardown
+                    self._vpn_stop_requested = False
+                    self._mgmt_port = None
+                    self.vpn_profile = 'VLESS'
+                    self.vpn_adapter_name = self.vpn_adapter_guid = self.vpn_ifindex = None
+                    self.vpn_state = 'CONNECTING'
+                    self.vpn_logs = ['[NEON] Starting embedded VLESS tunnel.']
+                threading.Thread(target=self._read_openvpn_log, args=(proc, True), daemon=True).start()
+                return {'ok': True, 'output': 'Starting NEON-VLESS.'}
+            except OSError:
+                if proc is not None:
+                    proc.kill()
+                    proc.wait()
+                return {'error': 'Cannot start the embedded VLESS engine. Check the Windows build and permissions.'}
+
     def connect_vpn(self, profile, username='', password=''):
+        with self._vpn_control:
+            return self._connect_openvpn(profile, username, password)
+
+    def _connect_openvpn(self, profile, username, password):
         if platform.system() != 'Windows':
             return {'error': 'Headless Conf engine control is available in the Windows build.'}
         info = self.inspect_profile(profile)
@@ -1464,7 +1507,7 @@ class Api:
         except Exception as exc:
             self._logger.warning('Emergency sharing teardown error: %s', exc)
 
-    def _read_openvpn_log(self, process):
+    def _read_openvpn_log(self, process, is_vless=False):
         fatal_markers = (
             'AUTH_FAILED',
             'Exiting due to fatal error',
@@ -1479,6 +1522,13 @@ class Api:
                     continue
                 drop_auth = False
                 with self.vpn_lock:
+                    if is_vless:
+                        # Do not forward engine logs: they can contain profile data or browsing activity.
+                        if self.openvpn_process is process and 'sing-box started (' in line:
+                            self.vpn_state = 'CONNECTED'
+                            self.vpn_adapter_name = vless.ADAPTER
+                            self.vpn_logs.append('[NEON] VLESS tunnel interface ready.')
+                        continue
                     self.vpn_logs.append(line)
                     if len(self.vpn_logs) > 1500:
                         self.vpn_logs = self.vpn_logs[-1000:]
@@ -1533,8 +1583,9 @@ class Api:
                     process.stdout.close()
             except Exception:
                 pass
-            self._cleanup_auth_file()
-            rc = process.poll()
+            if not is_vless:
+                self._cleanup_auth_file()
+            rc = process.wait() if is_vless else process.poll()
             need_teardown = False
             with self.vpn_lock:
                 is_current = self.openvpn_process is process
@@ -1545,6 +1596,8 @@ class Api:
                     if stop_requested:
                         self.vpn_state = 'DISCONNECTED'
                     else:
+                        if is_vless and rc:
+                            self.vpn_logs.append('[!] VLESS stopped (exit %s). Check the profile and administrator permissions.' % rc)
                         if self.vpn_state != 'ERROR':
                             self.vpn_state = 'ERROR' if (rc is not None and rc != 0) else 'DISCONNECTED'
                         if self.hotspot_active or self.ethernet_active or self.app_shared_pair:
@@ -1580,6 +1633,10 @@ class Api:
             return False
 
     def disconnect_vpn(self, profile=None):
+        with self._vpn_control:
+            return self._disconnect_vpn()
+
+    def _disconnect_vpn(self):
         with self.vpn_lock:
             self._vpn_stop_requested = True
             proc = self.openvpn_process
