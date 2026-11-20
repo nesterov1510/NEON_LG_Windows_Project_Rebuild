@@ -568,6 +568,30 @@ class NeonWindow(QMainWindow):
         b_row.addWidget(self.btn_belet_launch, 1)
         b_row.addWidget(self.btn_belet_remove, 1)
         bl.addLayout(b_row)
+
+        # New native Belet client (Tizen UI packaged for webOS, tm.belet.neonclient)
+        self.belet_lg_hint = QLabel()
+        self.belet_lg_hint.setObjectName('HintLabel')
+        self.belet_lg_hint.setWordWrap(True)
+        bl.addWidget(self.belet_lg_hint)
+        self.btn_belet_lg_install = QPushButton()
+        self.btn_belet_lg_install.setObjectName('NormalBtn')
+        self.btn_belet_lg_install.setCursor(Qt.PointingHandCursor)
+        self.btn_belet_lg_install.clicked.connect(self.install_lg_belet_client)
+        bl.addWidget(self.btn_belet_lg_install)
+        blg_row = QHBoxLayout()
+        blg_row.setSpacing(8)
+        self.btn_belet_lg_launch = QPushButton()
+        self.btn_belet_lg_launch.setObjectName('NormalBtn')
+        self.btn_belet_lg_launch.setCursor(Qt.PointingHandCursor)
+        self.btn_belet_lg_launch.clicked.connect(self.launch_lg_belet_client)
+        self.btn_belet_lg_remove = QPushButton()
+        self.btn_belet_lg_remove.setObjectName('DangerBtn')
+        self.btn_belet_lg_remove.setCursor(Qt.PointingHandCursor)
+        self.btn_belet_lg_remove.clicked.connect(self.remove_lg_belet_client)
+        blg_row.addWidget(self.btn_belet_lg_launch, 1)
+        blg_row.addWidget(self.btn_belet_lg_remove, 1)
+        bl.addLayout(blg_row)
         left.addWidget(belet_card)
 
         # Card 4: Alem TV App (telecom.alemtv.tm)
@@ -870,7 +894,7 @@ class NeonWindow(QMainWindow):
         btn_belet_client = QPushButton('УСТАНОВИТЬ BELET SAMSUNG · НОВЫЙ КЛИЕНТ')
         btn_belet_client.setObjectName('NormalBtn')
         btn_belet_client.setCursor(Qt.PointingHandCursor)
-        btn_belet_client.setToolTip('Отдельный экспериментальный клиент. Обычный Belet не изменяется; вход и видео требуют проверки на ТВ.')
+        btn_belet_client.setToolTip('Клиент Belet для Tizen: вход, каталог, поиск, сезоны, плеер и прогресс. Обычный Belet не изменяется.')
         btn_belet_client.clicked.connect(self.install_samsung_belet_client)
         sbl.addWidget(btn_belet_client)
         sbl_row = QHBoxLayout()
@@ -1640,6 +1664,10 @@ class NeonWindow(QMainWindow):
         self.btn_belet_install.setText(self.t('btn_belet_install'))
         self.btn_belet_launch.setText(self.t('btn_belet_launch'))
         self.btn_belet_remove.setText(self.t('btn_belet_remove'))
+        self.belet_lg_hint.setText(self.t('belet_lg_hint'))
+        self.btn_belet_lg_install.setText(self.t('btn_belet_lg_install'))
+        self.btn_belet_lg_launch.setText(self.t('btn_belet_lg_launch'))
+        self.btn_belet_lg_remove.setText(self.t('btn_belet_lg_remove'))
 
         self.lbl_alem.setText(self.t('card_alemtv'))
         self.alem_desc.setText(self.t('alemtv_desc'))
@@ -2446,6 +2474,62 @@ class NeonWindow(QMainWindow):
                 )
 
         self._run_async('tv', self.api.install_belet_app, done)
+
+    def install_lg_belet_client(self):
+        if not self.tv_connected:
+            self.toast.show_toast(
+                'Сначала подключитесь к телевизору.' if self.lang == 'ru' else 'Connect to the TV first.',
+                'warn',
+            )
+            return
+        self.log('$ luna-send-pub dev/install tm.belet.neonclient.ipk')
+        self._run_async('tv', self.api.install_belet_lg_client, lambda r: self.toast.show_toast(
+            'Новый клиент Belet установлен на LG; откройте его с пульта.'
+            if self.lang == 'ru'
+            else 'New Belet client installed on the LG TV; open it from Home.',
+            'info',
+        ) if r.get('ok') else None)
+
+    def launch_lg_belet_client(self):
+        if not self.tv_connected:
+            self.toast.show_toast(
+                'Сначала подключитесь к телевизору.' if self.lang == 'ru' else 'Connect to the TV first.',
+                'warn',
+            )
+            return
+        self.log('$ luna-send-pub launch tm.belet.neonclient')
+        self._run_async('tv', self.api.launch_belet_lg_client, lambda r: self.toast.show_toast(
+            'Новый клиент Belet запущен на LG.' if self.lang == 'ru' else 'New Belet client launched on the LG TV.',
+            'info',
+        ) if r.get('ok') else None)
+
+    def remove_lg_belet_client(self):
+        if not self.tv_connected:
+            self.toast.show_toast(
+                'Сначала подключитесь к телевизору.' if self.lang == 'ru' else 'Connect to the TV first.',
+                'warn',
+            )
+            return
+        body = (
+            'Удалить новый клиент Belet (tm.belet.neonclient) с телевизора?'
+            if self.lang == 'ru'
+            else 'Uninstall the new Belet client (tm.belet.neonclient) from the TV?'
+        )
+        dlg = ConfirmDialog(
+            self,
+            'Удаление Belet' if self.lang == 'ru' else 'Remove Belet App',
+            body,
+            self.t('confirm_ok'),
+            self.t('confirm_cancel'),
+            danger=True,
+        )
+        if dlg.exec_() != ConfirmDialog.Accepted:
+            return
+        self.log('$ luna-send-pub dev/remove tm.belet.neonclient')
+        self._run_async('tv', self.api.remove_belet_lg_client, lambda r: self.toast.show_toast(
+            'Новый клиент Belet удалён с ТВ.' if self.lang == 'ru' else 'New Belet client removed from the TV.',
+            'info',
+        ) if r.get('ok') else None)
 
     def launch_belet(self):
         if not self.tv_connected:

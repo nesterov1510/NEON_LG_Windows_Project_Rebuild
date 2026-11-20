@@ -1,11 +1,12 @@
-"""Build the experimental, unsigned Samsung Belet client without changing existing apps."""
+"""Build the unsigned Samsung Belet Tizen client without changing existing apps."""
 from pathlib import Path
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / 'belet_samsung_native'
 OUT = ROOT / 'samsung-belet' / 'BeletSamsungClient-unsigned.wgt'
-FILES = ('config.xml', 'index.html', 'style.css', 'app.js', 'icon.png', 'belet-logo.png', 'login-background.png', 'belet-regular.ttf', 'belet-bold.ttf')
+FILES = ('config.xml', 'index.html', 'style.css', 'api.js', 'hls.min.js', 'hls.LICENSE', 'app.js',
+         'icon.png', 'belet-logo.png', 'login-background.png', 'belet-regular.ttf', 'belet-bold.ttf')
 
 
 def build(output=OUT):
