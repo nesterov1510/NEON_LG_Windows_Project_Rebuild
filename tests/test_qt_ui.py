@@ -5,7 +5,7 @@ import pytest
 QtWidgets = pytest.importorskip('PyQt5.QtWidgets', exc_type=ImportError)
 QApplication = QtWidgets.QApplication
 
-from app_legacy import NeonWindow, _setup_windows_environment  # noqa: E402
+from app_legacy import ConfirmDialog, NeonWindow, _setup_windows_environment  # noqa: E402
 from core import Api  # noqa: E402
 
 
@@ -181,6 +181,40 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
             qt_app.processEvents()
         m_sam_inst.assert_called_once()
         assert 'BeletTV001.Belet' in win.sam_term.edit.toPlainText()
+
+    # LG page: the new native Belet client (tm.belet.neonclient) is installable from the UI
+    prev_tv_connected = win.tv_connected
+    assert win.btn_belet_lg_install is not None
+    assert win.btn_belet_lg_launch is not None
+    assert win.btn_belet_lg_remove is not None
+    assert 'neonclient' in win.belet_lg_hint.text()
+
+    with mock.patch.object(api, 'install_belet_lg_client', return_value={'ok': True, 'output': 'installed'}) as m_lg_inst:
+        win.tv_connected = True
+        win.install_lg_belet_client()
+        deadline = __import__('time').time() + 2.0
+        while win.tv_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_lg_inst.assert_called_once()
+
+    with mock.patch.object(api, 'launch_belet_lg_client', return_value={'ok': True, 'output': 'launched'}) as m_lg_launch:
+        win.launch_lg_belet_client()
+        deadline = __import__('time').time() + 2.0
+        while win.tv_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_lg_launch.assert_called_once()
+
+    with mock.patch.object(api, 'remove_belet_lg_client', return_value={'ok': True, 'output': 'removed'}) as m_lg_rm, \
+         mock.patch('app_legacy.ConfirmDialog.exec_', return_value=ConfirmDialog.Accepted):
+        win.remove_lg_belet_client()
+        deadline = __import__('time').time() + 2.0
+        while win.tv_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_lg_rm.assert_called_once()
+    win.tv_connected = prev_tv_connected
 
     # Check zero visible VPN/OpenVPN wording across EN/RU translations & live widgets
     import re

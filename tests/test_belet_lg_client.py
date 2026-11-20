@@ -140,3 +140,34 @@ def test_webos_shim_runs_on_a_fake_webos_dom():
                             capture_output=True, text=True, encoding='utf-8', timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'belet_lg_shim_mock: ok' in result.stdout
+
+
+def test_qt_ui_wires_the_lg_client_actions():
+    """The Windows build is the PyQt5 UI (app_legacy.py); the LG client must be reachable there."""
+    import ast
+
+    legacy = (ROOT / 'app_legacy.py').read_text(encoding='utf-8')
+    tree = ast.parse(legacy)
+    methods = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    for handler, api_call in (
+        ('install_lg_belet_client', 'install_belet_lg_client'),
+        ('launch_lg_belet_client', 'launch_belet_lg_client'),
+        ('remove_lg_belet_client', 'remove_belet_lg_client'),
+    ):
+        assert handler in methods, f'{handler} is missing from the Qt UI'
+        called = {n.attr for n in ast.walk(methods[handler]) if isinstance(n, ast.Attribute)}
+        assert api_call in called, f'{handler} must call Api.{api_call}'
+        assert f'self.btn_belet_lg_{handler.split("_")[0]}.clicked.connect(self.{handler})' in legacy
+
+    for widget in ('btn_belet_lg_install', 'btn_belet_lg_launch', 'btn_belet_lg_remove', 'belet_lg_hint'):
+        assert legacy.count(f'self.{widget}') >= 2, f'{widget} must be created and translated'
+
+    # read the strings without importing PyQt5 (the dependency is optional in this test env)
+    ui_tree = ast.parse((ROOT / 'ui_qt.py').read_text(encoding='utf-8'))
+    tr_node = next(n.value for n in ui_tree.body
+                   if isinstance(n, ast.Assign) and any(getattr(t, 'id', None) == 'TR' for t in n.targets))
+    TR = ast.literal_eval(tr_node)
+    for lang in ('en', 'ru'):
+        for key in ('belet_lg_hint', 'btn_belet_lg_install', 'btn_belet_lg_launch', 'btn_belet_lg_remove'):
+            assert key in TR[lang], f'TR[{lang}][{key}] is missing'
+        assert 'neonclient' in TR[lang]['belet_lg_hint']
