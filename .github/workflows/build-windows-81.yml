@@ -22,6 +22,25 @@ jobs:
           python -m pip install --upgrade "pip<25"
           python -m pip install -r requirements-legacy.txt pytest pytest-timeout
 
+      - name: Diagnose the hanging test (temporary)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $env:PYTHONUNBUFFERED = '1'
+          Remove-Item diag.txt -ErrorAction SilentlyContinue
+          $proc = Start-Process -FilePath 'python' `
+            -ArgumentList '-X','faulthandler','-c',"import faulthandler,sys,pytest; faulthandler.dump_traceback_later(90, repeat=True); sys.exit(pytest.main(['-v','--tb=short','-p','no:cacheprovider']))" `
+            -RedirectStandardOutput 'diag.txt' -RedirectStandardError 'diag.txt' -NoNewWindow -PassThru
+          if (-not $proc.WaitForExit(420000)) {
+            try { $proc.Kill($true) } catch { try { $proc.Kill() } catch {} }
+          }
+          if (Test-Path diag.txt) {
+            Get-Content diag.txt -Tail 400
+            Get-Content diag.txt -Tail 60 | ForEach-Object { Write-Host "::error::$_" }
+          }
+        env:
+          QT_QPA_PLATFORM: offscreen
+
       - name: Run unit & Qt UI tests
         shell: pwsh
         run: |
