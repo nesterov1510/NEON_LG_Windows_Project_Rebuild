@@ -499,24 +499,29 @@ sandbox.global = sandbox;
 sandbox.self = sandbox;
 sandbox.navigator = { userAgent: 'Tizen' };
 
+let nativeRegistration;
 vm.createContext(sandbox);
 if (webosQr) {
   sandbox.navigator.userAgent = 'Mozilla/5.0 (Web0S; Linux/SmartTV) Chrome/38.0';
   sandbox.NodeList = LegacyNodeList;
-  let check;
+  const methods = {};
+  sandbox.PalmSystem = { deviceInfo: { modelName: 'OLED55C9', platform: 'webOS', version: '4.9' } };
   const serviceId = 'tm.belet.neonclient.qr';
   const replies = [[503, {}], [400, {}], [200, { token: 'qr-access', refresh_token: 'qr-refresh' }]];
   const dependencies = {
     './package.json': { name: serviceId },
-    'webos-service': function () { this.register = (method, fn) => { assert.strictEqual(method, 'check'); check = fn; }; },
+    'webos-service': function () { this.register = (method, fn) => { methods[method] = fn; }; },
     https: { request(opts, cb) {
       assert.strictEqual(opts.hostname, 'beletapis.com');
-      assert.strictEqual(opts.path, '/api/v1/auth/check-qrcode');
+      const registering = opts.path === '/api/v1/users/device';
+      if (!registering) assert.strictEqual(opts.path, '/api/v1/auth/check-qrcode');
       assert.strictEqual(opts.method, 'POST');
       return { on() {}, end(body) {
-        assert.deepStrictEqual(JSON.parse(body), { code: 'qr-code-1', fingerprint: store.neon_belet_samsung_device_v2 });
+        if (registering) {
+          nativeRegistration = { body: JSON.parse(body), token: opts.headers.Authorization };
+        } else assert.deepStrictEqual(JSON.parse(body), { code: 'qr-code-1', fingerprint: store.neon_belet_samsung_device_v2 });
         assert.strictEqual(opts.headers.fingerprint, JSON.parse(body).fingerprint);
-        const [statusCode, data] = replies.shift();
+        const [statusCode, data] = registering ? [200, {}] : replies.shift();
         cb({ statusCode, setEncoding() {}, on(event, fn) {
           if (event === 'data') fn(JSON.stringify(data));
           if (event === 'end') fn();
@@ -529,8 +534,9 @@ if (webosQr) {
   });
   sandbox.PalmServiceBridge = function () {
     this.call = (url, args) => {
-      assert.strictEqual(url, 'luna://' + serviceId + '/check');
-      check({ payload: JSON.parse(args), respond: r => this.onservicecallback(JSON.stringify(r)) });
+      const prefix = 'luna://' + serviceId + '/';
+      assert(url.startsWith(prefix));
+      methods[url.slice(prefix.length)]({ payload: JSON.parse(args), respond: r => this.onservicecallback(JSON.stringify(r)) });
     };
   };
   vm.runInContext(fs.readFileSync(path.join(srcDir, 'webos-shim.js'), 'utf8'), sandbox, { filename: 'webos-shim.js' });
@@ -596,6 +602,8 @@ function testQrLogin() {
 
 if (webosQr) {
   testQrLogin();
+  assert.deepStrictEqual(nativeRegistration, { token: 'qr-access', body: { model: 'LG OLED55C9',
+    fingerprint: JSON.parse(store.neon_belet_samsung_session_v2).fingerprint, os_version: 'webOS 4.9', app_version: '4.3.3' } });
   let exits = 0;
   sandbox.PalmSystem = { platformBack() { exits++; } };
   route('/api/v1/categories', 200, { categories: [{ id: 1, name: 'Films' }] });
@@ -612,6 +620,14 @@ if (webosQr) {
   assert.strictEqual(exits, 0, 'first Back on home warns rather than exiting');
   assert(fireKey(461));
   assert.strictEqual(exits, 1, 'confirmed exit goes to webOS exactly once');
+  const restored = JSON.parse(store.neon_belet_samsung_session_v2);
+  restored.fingerprint = 'tv' + 'a'.repeat(32);
+  store.neon_belet_samsung_session_v2 = JSON.stringify(restored);
+  sandbox.Belet.init();
+  assert.strictEqual(store.neon_belet_samsung_device_v2, restored.fingerprint, 'restore repairs the install identifier');
+  sandbox.Belet.forget();
+  sandbox.Belet.init();
+  assert.strictEqual(sandbox.Belet.device(), restored.fingerprint, 'legacy device ID survives logout and relaunch');
   console.log('webos IPK QR login and Back navigation: ok');
   process.exit(0);
 }
@@ -962,6 +978,14 @@ route(/type_id=1&/, 200, { status: 'ok', result: [
 ] });
 click(ids.nav.querySelectorAll('.nav-item')[1]);
 assert(!ids.browse.classList.contains('hidden'), 'catalog opens');
+let tizenExits = 0;
+sandbox.tizen = { application: { getCurrentApplication() { return { exit() { tizenExits++; } }; } } };
+route('/api/v3/movie/21', 200, { movie: { id: 21, type_id: 1, name: 'Film A' } });
+click(ids.browseGrid.querySelector('.card'));
+assert(!ids.detail.classList.contains('hidden'));
+assert(fireKey(10009), 'Samsung Return is consumed in detail');
+assert(!ids.browse.classList.contains('hidden'), 'Samsung Return restores the catalogue');
+assert.strictEqual(tizenExits, 0, 'Samsung Return did not leave the app');
 assert.strictEqual(ids.browseChips.querySelectorAll('.chip').length, 2, 'category chips');
 assert.strictEqual(ids.browseTitle.textContent, 'Фильмы');
 assert.strictEqual(ids.browseGrid.querySelectorAll('.card').length, 2, 'category rows are flattened into the grid');

@@ -7,9 +7,7 @@
  *
  *   • the Tizen surfaces the client touches (webapis.productinfo,
  *     tizen.systeminfo, tizen.tvinputdevice, tizen.application) are emulated so
- *     the client runs exactly the same code path as on a Samsung TV: the device
- *     registration body still says "Samsung Tizen <model>" and os_version still
- *     looks like a Tizen release during post-login registration;
+ *     the shared UI runs on LG; post-login registration uses the LG identity;
  *   • the Magic Remote pointer moves the DOM focus, because the client keeps a
  *     keyboard focus model instead of mouse hover;
  *   • explicit client exit requests are forwarded to the webOS launcher.
@@ -30,8 +28,7 @@
     global.NodeList.prototype.forEach = Array.prototype.forEach;
   }
 
-  /* Reported to the backend through tizen.systeminfo, so keep the shape of a
-   * Tizen release: api.js sends it as os_version of the device registration. */
+  /* Compatibility value for consumers of the emulated Tizen API. */
   var TIZEN_VERSION = '6.0';
 
   function userAgent() {
@@ -180,11 +177,16 @@
   } catch (e) {}
 
   /* A packaged app can display get-qrcode while Chromium blocks the cross-origin
-   * JSON POST. Only QR polling uses the local service; keep Samsung's XHR path
+   * JSON POST. Use the local service for pairing and registration; keep the XHR path
    * available if the LS2 bridge/service is unavailable on this firmware. */
+  global.beletWebosIdentity = function () {
+    var name = modelValue();
+    return { model: /^LG\b/i.test(name) ? name : 'LG ' + name,
+      osVersion: /webos/i.test(realOsVersion) ? realOsVersion : 'webOS ' + realOsVersion };
+  };
   var Bridge = global.WebOSServiceBridge || global.PalmServiceBridge;
   if (Bridge) {
-    global.beletCheckQrNative = function (code, fingerprint, web, callback) {
+    function callService(method, payload, callback) {
       var bridge, timer, done = false;
       function finish(status, data) {
         if (done) return;
@@ -203,8 +205,14 @@
           try { bridge.cancel(); } catch (e) {}
           finish(0);
         }, 16000);
-        bridge.call('luna://tm.belet.neonclient.qr/check', JSON.stringify({ code: code, fingerprint: fingerprint, web: web }));
+        bridge.call('luna://tm.belet.neonclient.qr/' + method, JSON.stringify(payload));
       } catch (e) { finish(0); }
+    }
+    global.beletCheckQrNative = function (code, fingerprint, web, callback) {
+      callService('check', { code: code, fingerprint: fingerprint, web: web }, callback);
+    };
+    global.beletRegisterDeviceNative = function (body, token, callback) {
+      callService('registerDevice', { body: body, token: token }, callback);
     };
   }
 

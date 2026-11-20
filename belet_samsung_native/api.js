@@ -39,10 +39,6 @@
   var refreshQueue = [];
   var generation = 0;
 
-  function nowHex() {
-    return ('0000000' + Date.now().toString(16)).slice(-8);
-  }
-
   function randomHex(bytes) {
     var out = '';
     var data = new Uint8Array(bytes);
@@ -71,9 +67,9 @@
 
   function loadDevice() {
     var saved = storageGet(DEVICE_KEY);
-    if (saved && /^[a-f0-9]{32,64}$/i.test(saved)) return saved;
+    if (saved && /^(?:[a-f0-9]{32,64}|tv[a-f0-9]{32})$/i.test(saved)) return saved;
     // The official clients use a 32 character random fingerprint per installation.
-    var created = 'tv' + nowHex() + randomHex(12);
+    var created = randomHex(16);
     storageSet(DEVICE_KEY, created);
     return created;
   }
@@ -216,11 +212,12 @@
    * Authenticated request with one token refresh + retry on HTTP 401.
    * `options.fallback` may be a second URL used when the first answers 404/405.
    */
-  function authorized(options, callback) {
+  function authorized(options, callback, send) {
+    send = send || rawRequest;
     var started = generation;
     if (!session) return callback(apiError('auth', 401), null);
     withToken(options, session.token);
-    rawRequest(options, function (err, data, http) {
+    send(options, function (err, data, http) {
       if (started !== generation) return;
       if (err && err.kind === 'auth') {
         refreshSession(function (refreshErr, next) {
@@ -230,11 +227,11 @@
           retry = { method: options.method, url: options.url, body: options.body, form: options.form, headers: options.headers, timeout: options.timeout };
           retry.headers = retry.headers || {};
           retry.headers.Authorization = next.token;
-          rawRequest(retry, function (retryErr, retryData, retryHttp) {
+          send(retry, function (retryErr, retryData, retryHttp) {
             if (retryErr && retryErr.kind === 'auth') persist(null);
             if (retryErr && options.fallback && (retryErr.http === 404 || retryErr.http === 405)) {
               retry.url = options.fallback;
-              return rawRequest(retry, callback);
+              return send(retry, callback);
             }
             callback(retryErr, retryData, retryHttp);
           });
@@ -244,7 +241,7 @@
       if (err && options.fallback && (err.http === 404 || err.http === 405)) {
         options.url = options.fallback;
         options.fallback = null;
-        return authorized(options, callback);
+        return authorized(options, callback, send);
       }
       callback(err, data, http);
     });
@@ -715,23 +712,34 @@
     return name || 'Samsung Tizen TV';
   }
 
+  // Keep the ordinary authenticated retry path, including the refreshed token,
+  // but let webOS make this fixed POST outside the browser's CORS policy.
+  function sendDeviceRegistration(options, callback) {
+    if (!global.beletRegisterDeviceNative) return rawRequest(options, callback);
+    global.beletRegisterDeviceNative(options.body, options.headers.Authorization, function (http) {
+      if (!http) return rawRequest(options, callback);
+      callback(http >= 200 && http < 300 ? null : errorFromStatus(http, null), null, http);
+    });
+  }
+
   /* DeviceBody on the Android client is app_version + fingerprint + model + os_version. */
   function registerDevice(callback) {
     var name = model();
+    var lg = global.beletWebosIdentity && global.beletWebosIdentity();
     authorized({
       method: 'POST',
       url: HOSTS.auth + '/api/v1/users/device',
       body: {
         app_version: CLIENT.appVersion,
         fingerprint: device,
-        model: 'Samsung Tizen ' + name,
-        os_version: tizenVersion()
+        model: lg ? lg.model : 'Samsung Tizen ' + name,
+        os_version: lg ? lg.osVersion : tizenVersion()
       },
       headers: { 'X-Device-Model': name }
     }, function (err, data) {
       if (!callback) return;
       callback(err || null, data || null);
-    });
+    }, sendDeviceRegistration);
   }
 
   var playerSession = '';
@@ -798,7 +806,11 @@
     init: function () {
       device = loadDevice();
       session = loadSession();
-      if (session && session.fingerprint) device = session.fingerprint;
+      if (session && session.fingerprint && session.fingerprint !== device) {
+        // Older builds sometimes regenerated DEVICE_KEY before restoring the session.
+        device = session.fingerprint;
+        storageSet(DEVICE_KEY, device);
+      }
       return session;
     },
     hasSession: function () { return !!(session && session.token); },

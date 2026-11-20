@@ -31,16 +31,14 @@ OVERLAY_FILES = ('webos-shim.js',)
 # The IPK must be byte-identical no matter how git checked the sources out, so the
 # text files are normalised to LF while packaging (Windows checkouts are CRLF).
 TEXT_FILES = ('index.html', 'style.css', 'api.js', 'app.js', 'hls.min.js', 'hls.LICENSE', 'webos-shim.js')
-# The client files are shipped verbatim: api.js sends "Samsung Tizen <model>" and
-# a Tizen os_version when registering the device after login. Keep the same
-# auth and registration contract on both platforms. Only the overlay script tag is injected into index.html.
+# Ship shared client files verbatim; only index.html needs the webOS shim tag.
 SHIM_TAG = '<script src="webos-shim.js"></script>\n'
 
 
 # webOS only accepts x.y.z for appinfo.json and needs a higher value to upgrade
 # an already installed package, so the IPK carries its own revision while the
 # Samsung widget keeps the version from the Tizen manifest.
-WEBOS_REVISION = 4
+WEBOS_REVISION = 5
 
 
 def manifest_version():

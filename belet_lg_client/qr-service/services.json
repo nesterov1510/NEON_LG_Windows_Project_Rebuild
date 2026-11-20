@@ -1,4 +1,4 @@
 {
   "id": "tm.belet.neonclient.qr",
-  "services": [{"name": "tm.belet.neonclient.qr", "description": "Belet QR confirmation"}]
+  "services": [{"name": "tm.belet.neonclient.qr", "description": "Belet QR confirmation and device registration"}]
 }

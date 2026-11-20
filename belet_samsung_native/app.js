@@ -436,7 +436,7 @@
         deviceRegistration.state = 'ошибка: ' + describeError(err);
         return;
       }
-      deviceRegistration.state = 'телевизор добавлен в список устройств';
+      deviceRegistration.state = 'сервер принял регистрацию телевизора';
     });
   }
 

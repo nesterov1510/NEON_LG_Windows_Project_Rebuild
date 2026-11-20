@@ -12,7 +12,25 @@ service.register('check', function (message) {
     message.respond({ returnValue: false, errorText: 'Invalid pairing request' });
     return;
   }
-  var body = JSON.stringify({ code: p.code, fingerprint: p.fingerprint });
+  post(message, '/api/v1/auth/check-qrcode' + (p.web === true ? '-web' : ''),
+    { code: p.code, fingerprint: p.fingerprint });
+});
+
+service.register('registerDevice', function (message) {
+  var p = message.payload || {}, b = p.body || {};
+  if (typeof p.token !== 'string' || !/^[\x21-\x7e]{1,8192}$/.test(p.token) ||
+      typeof b.model !== 'string' || !b.model || b.model.length > 200 ||
+      typeof b.os_version !== 'string' || !b.os_version || b.os_version.length > 100 ||
+      typeof b.fingerprint !== 'string' || !/^[A-Za-z0-9]{1,64}$/.test(b.fingerprint)) {
+    message.respond({ returnValue: false, errorText: 'Invalid registration request' });
+    return;
+  }
+  post(message, '/api/v1/users/device', { model: b.model, os_version: b.os_version,
+    fingerprint: b.fingerprint, app_version: '4.3.3' }, p.token);
+});
+
+function post(message, path, payload, token) {
+  var body = JSON.stringify(payload);
   var done = false;
   function finish(status, data) {
     if (done) return;
@@ -20,13 +38,14 @@ service.register('check', function (message) {
     clearTimeout(timer);
     message.respond({ returnValue: true, status: status, data: data || null });
   }
-  var req = https.request({
-    hostname: 'beletapis.com', method: 'POST',
-    path: '/api/v1/auth/check-qrcode' + (p.web === true ? '-web' : ''),
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json; charset=utf-8',
-      'Content-Length': Buffer.byteLength(body), Lang: 'ru', fingerprint: p.fingerprint,
-      'X-Platform': 'Android', 'X-VersionCode': '182', 'app-version': '182', 'X-App-Version': '4.3.3' }
-  }, function (res) {
+  var headers = { Accept: 'application/json', 'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body), Lang: 'ru', fingerprint: payload.fingerprint,
+    'X-Platform': 'Android', 'X-VersionCode': '182', 'app-version': '182', 'X-App-Version': '4.3.3' };
+  if (token) {
+    headers.Authorization = token;
+    headers['X-Device-Model'] = payload.model.replace(/[^ -~]/g, '_');
+  }
+  var req = https.request({ hostname: 'beletapis.com', method: 'POST', path: path, headers: headers }, function (res) {
     var text = '';
     res.setEncoding('utf8');
     res.on('data', function (chunk) {
@@ -37,6 +56,7 @@ service.register('check', function (message) {
     res.on('error', function () { finish(0); });
     res.on('end', function () {
       var data;
+      if (token) return finish(res.statusCode);
       if (res.statusCode >= 200 && res.statusCode < 300 && text) {
         try { data = JSON.parse(text); } catch (err) { return finish(502); }
       }
@@ -47,4 +67,4 @@ service.register('check', function (message) {
   var timer = setTimeout(function () { finish(0); req.abort(); }, 12000);
   req.on('error', function () { finish(0); });
   req.end(body);
-});
+}

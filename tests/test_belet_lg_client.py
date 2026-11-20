@@ -87,8 +87,6 @@ def test_shared_client_sources_are_identical_except_webos_overlays():
                                     '<script src="webos-shim.js"></script>\n<script src="hls.min.js"></script>\n', 1)
     assert html.index('webos-shim.js') < html.index('api.js')
 
-    # The client must be shipped byte-identical: api.js sends "Samsung Tizen <model>"
-    # in the device registration body and the backend only accepts that shape.
     api = files['api.js'].decode('utf-8')
     assert api == lf((SRC / 'api.js').read_bytes()).decode('utf-8')
     assert "'Samsung Tizen '" in api
