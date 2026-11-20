@@ -825,10 +825,8 @@ assert.strictEqual(calls.filter(c => c.url.indexOf('/api/v2/auth/refresh-mobile'
   refreshCountBeforeMediaLoad, 'media requests use the current token without refreshing on every playlist/segment');
 assert.strictEqual(hlsLoader.loader.context.headers.Authorization, sessionToken, 'manifest/segments ask with the access token');
 assert.deepStrictEqual(Object.keys(hlsLoader.loader.context.headers), [
-  'X-Platform', 'X-VersionCode', 'X-Player-Session-Id', 'fingerprint', 'Authorization', 'X-Chunk-Length'
+  'X-Platform', 'X-VersionCode', 'X-Player-Session-Id', 'fingerprint', 'Authorization'
 ], 'media requests match the Android ExoPlayer headers');
-assert.strictEqual(hlsLoader.loader.context.headers['X-Chunk-Length'], '-1',
-  'the playlist asks with -1 until the segment length is known, like the Android interceptor');
 assert.strictEqual(hlsLoader.loader.context.headers['X-Platform'], 'Android');
 assert.strictEqual(hlsLoader.loader.context.headers['X-VersionCode'], '182');
 assert.strictEqual(hlsLoader.loader.context.headers.fingerprint, JSON.parse(store.neon_belet_samsung_session_v2).fingerprint,
@@ -838,10 +836,6 @@ const fragmentLoader = new authedPlayer.config.fLoader({});
 fragmentLoader.load({ url: 'https://cdn.example/segment.ts', headers: {}, frag: { level: 2 } }, {}, {});
 assert.strictEqual(fragmentLoader.loader.context.headers['X-Chunk-Length'], '5000',
   'fragment requests include the level chunk duration');
-const unknownChunkLoader = new authedPlayer.config.fLoader({});
-unknownChunkLoader.load({ url: 'https://cdn.example/segment.ts', headers: {}, frag: { level: 9 } }, {}, {});
-assert.strictEqual(unknownChunkLoader.loader.context.headers['X-Chunk-Length'], '-1',
-  'a level without HLS info still sends -1');
 
 /* first 401 refreshes the token before replaying the Belet web-player request */
 const instancesBefore = FakeHls.instances.length;

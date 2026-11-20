@@ -1653,8 +1653,9 @@
     } catch (e) {}
   }
 
-  function mediaRequestSetup(xhr) {
+  function mediaRequestSetup(xhr, url) {
     if (!xhr || !window.Belet || !window.Belet.mediaHeaders) return;
+    try { if (xhr.readyState === 0) xhr.open('GET', url, true); } catch (e) {}
     var headers = window.Belet.mediaHeaders(state.player.beletSessionId, false, null);
     for (var key in headers) {
       if (!Object.prototype.hasOwnProperty.call(headers, key)) continue;
