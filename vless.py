@@ -54,7 +54,7 @@ def configuration(link):
             outbound['transport']['headers'] = {'Host': q['host']}
     elif transport == 'grpc':
         outbound['transport'] = {'type': 'grpc', 'service_name': q.get('serviceName', '')}
-    return {'log': {'level': 'info', 'disable_color': True},
+    return {'log': {'level': 'info'},
             'inbounds': [{'type': 'tun', 'interface_name': ADAPTER, 'auto_route': True, 'strict_route': True,
                           'address': ['172.19.0.1/30', 'fdfe:dcba:9876::1/126']}],
             'outbounds': [outbound],
