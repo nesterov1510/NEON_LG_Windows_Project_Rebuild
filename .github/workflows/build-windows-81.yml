@@ -20,13 +20,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade "pip<25"
-          python -m pip install -r requirements-legacy.txt pytest
+          python -m pip install -r requirements-legacy.txt pytest pytest-timeout
 
       - name: Run unit & Qt UI tests
         shell: pwsh
         run: |
           foreach ($attempt in 1, 2) {
-            cmd /c "python -m pytest -v --tb=short > pytest_report.txt 2>&1"
+            cmd /c "python -m pytest -v --tb=short --timeout=300 > pytest_report.txt 2>&1"
             $code = $LASTEXITCODE
             if (Test-Path pytest_report.txt) {
               Get-Content pytest_report.txt | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
