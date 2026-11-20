@@ -596,7 +596,23 @@ function testQrLogin() {
 
 if (webosQr) {
   testQrLogin();
-  console.log('webos IPK QR login: ok');
+  let exits = 0;
+  sandbox.PalmSystem = { platformBack() { exits++; } };
+  route('/api/v1/categories', 200, { categories: [{ id: 1, name: 'Films' }] });
+  route(/type_id=1&/, 200, { status: 'ok', result: [{ items: [{ id: 21, type_id: 1, name: 'Film' }] }] });
+  click(ids.nav.querySelectorAll('.nav-item')[1]);
+  route('/api/v3/movie/21', 200, { movie: { id: 21, name: 'Film' } });
+  click(ids.browseGrid.querySelector('.card'));
+  assert(!ids.detail.classList.contains('hidden'));
+  assert(fireKey(461));
+  assert(!ids.browse.classList.contains('hidden'), 'LG Back returns to the catalogue');
+  assert(fireKey(461));
+  assert(!ids.home.classList.contains('hidden'));
+  assert(fireKey(461));
+  assert.strictEqual(exits, 0, 'first Back on home warns rather than exiting');
+  assert(fireKey(461));
+  assert.strictEqual(exits, 1, 'confirmed exit goes to webOS exactly once');
+  console.log('webos IPK QR login and Back navigation: ok');
   process.exit(0);
 }
 

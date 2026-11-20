@@ -61,6 +61,7 @@ def test_appinfo_and_assets_match_webos_requirements():
     assert info['id'] == 'tm.belet.neonclient'
     assert info['type'] == 'web'
     assert info['main'] == 'index.html'
+    assert info['disableBackHistoryAPI'] is True, 'deliver Back to app.js instead of navigating webOS history'
     assert info['version'] == belet_lg_client.app_version()
     for key in ('icon', 'largeIcon', 'splashBackground'):
         assert files[info[key]], f'{key} is bundled'

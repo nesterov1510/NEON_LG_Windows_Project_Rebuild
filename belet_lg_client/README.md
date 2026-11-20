@@ -10,7 +10,7 @@ webOS-пакет `tm.belet.neonclient`. Код приложения не дуб�
 
 | Файл | Назначение |
 | --- | --- |
-| `webos-shim.js` | Подставляет устройства webOS вместо Tizen API (`webapis.productinfo.getModel`, `tizen.systeminfo.getCapability` → модель из `PalmSystem.deviceInfo` и Luna `com.webos.service.tv.systeminfo`, иначе из User-Agent), переносит фокус на элемент под курсором Magic Remote и закрывает приложение по Back на первом экране (`PalmSystem.platformBack`). |
+| `webos-shim.js` | Подставляет устройства webOS вместо Tizen API (`webapis.productinfo.getModel`, `tizen.systeminfo.getCapability` → модель из `PalmSystem.deviceInfo` и Luna `com.webos.service.tv.systeminfo`, иначе из User-Agent), переносит фокус на элемент под курсором Magic Remote и закрывает приложение по запросу клиента (`PalmSystem.platformBack`). |
 | `appinfo.json` | Манифест webOS: `id tm.belet.neonclient`, `type web`, `main index.html`, разрешение `1920x1080`, иконки 80×80 / 130×130 и заставка 1920×1080 из `assets/`. |
 | `icon.png`, `largeIcon.png`, `splash.png` | Иконки и заставка webOS (в Tizen-пакет не входят). |
 
@@ -35,7 +35,7 @@ webOS-пакет `tm.belet.neonclient`. Код приложения не дуб�
 ошибке, 408, 429 или 5xx опрос повторяется в пределах времени жизни экрана QR.
 При окончательном отказе под QR виден HTTP-статус, без токена и кода сопряжения.
 
-Версия пакета — `0.6.6` (версия Tizen-манифеста `0.6.3` + ревизия упаковки):
+Версия пакета — `0.6.7` (версия Tizen-манифеста `0.6.3` + ревизия упаковки):
 webOS требует `x.y.z` в `appinfo.json` и устанавливает обновление только при
 большей версии, а сам Tizen-виджет остаётся 0.6.3.
 
@@ -43,8 +43,9 @@ webOS требует `x.y.z` в `appinfo.json` и устанавливает о�
 
 Клиент уже понимает коды webOS, отдельная трансляция не нужна: стрелки 37–40,
 OK/Enter 13, Back 461, Play 415, Pause 19, FF 417, RW 412, Stop 413.
-Back на первом экране (когда приложение не обработало нажатие) закрывает
-приложение через `PalmSystem.platformBack()`.
+`disableBackHistoryAPI: true` передаёт Back клиенту вместо системной истории.
+Из плеера Back возвращает в карточку, из карточки — в открывший её раздел.
+На главной первое нажатие показывает подсказку, повторное — закрывает клиент.
 
 ## Плеер
 

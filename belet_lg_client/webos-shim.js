@@ -12,7 +12,7 @@
  *     looks like a Tizen release during post-login registration;
  *   • the Magic Remote pointer moves the DOM focus, because the client keeps a
  *     keyboard focus model instead of mouse hover;
- *   • Back on the first screen leaves the app instead of doing nothing.
+ *   • explicit client exit requests are forwarded to the webOS launcher.
  *
  * The client already understands webOS key codes (arrows 37-40, OK 13, Back 461,
  * Play 415, Pause 19, FF 417, RW 412, Stop 413), so no key translation is needed.
@@ -177,19 +177,6 @@
         try { target.focus(); } catch (e) {}
       }
     }, false);
-  } catch (e) {}
-
-  /* Registered after app.js so its handler runs first: when the client consumed
-   * Back it calls preventDefault(), and an unconsumed Back means "leave the app". */
-  try {
-    global.setTimeout(function () {
-      doc.addEventListener('keydown', function (event) {
-        var key = event.keyCode || event.which;
-        if (key !== 461 && key !== 10009) return;
-        if (event.defaultPrevented) return;
-        exitApp();
-      }, false);
-    }, 0);
   } catch (e) {}
 
   /* A packaged app can display get-qrcode while Chromium blocks the cross-origin

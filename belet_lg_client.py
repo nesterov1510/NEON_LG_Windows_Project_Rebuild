@@ -40,7 +40,7 @@ SHIM_TAG = '<script src="webos-shim.js"></script>\n'
 # webOS only accepts x.y.z for appinfo.json and needs a higher value to upgrade
 # an already installed package, so the IPK carries its own revision while the
 # Samsung widget keeps the version from the Tizen manifest.
-WEBOS_REVISION = 3
+WEBOS_REVISION = 4
 
 
 def manifest_version():
@@ -75,7 +75,7 @@ def app_info(version=None):
         'bgColor': '#0d1112',
         'iconColor': '#0d1112',
         'resolution': '1920x1080',
-        'disableBackHistoryAPI': False,
+        'disableBackHistoryAPI': True,
         'handlesRelaunch': False,
         'disallowScrollingInMainFrame': False,
         'useNativeScroll': True,
