@@ -518,8 +518,9 @@
 
   function hasMediaMeta(entry) {
     if (!entry || typeof entry !== 'object') return false;
-    return !!(entry.quality || entry.resolution || entry.height || entry.format ||
-      entry.duration || entry.bitrate || entry.hls);
+    return !!(entry.quality || entry.quality_label || entry.resolution || entry.height || entry.type ||
+      entry.format || entry.mime_type || entry.mimeType || entry.content_type || entry.contentType ||
+      entry.protocol || entry.duration || entry.bitrate || entry.hls);
   }
 
   function normalizeSource(entry) {
@@ -539,8 +540,9 @@
     if (!VIDEO_URL.test(url) && !hasMediaMeta(entry)) return null;
     return {
       url: url,
-      quality: String((entry && (entry.quality || entry.resolution || entry.height)) || ''),
-      type: String((entry && (entry.type || entry.format)) || '')
+      quality: String((entry && (entry.quality || entry.quality_label || entry.resolution || entry.height)) || ''),
+      type: String((entry && (entry.type || entry.format || entry.mime_type || entry.mimeType ||
+        entry.content_type || entry.contentType || entry.protocol)) || '')
     };
   }
 

@@ -1421,8 +1421,10 @@
     setHidden(node, !show);
   }
 
-  function isHlsUrl(url) {
-    return /\.m3u8(\?|$)/i.test(url || '');
+  function isHlsSource(source) {
+    if (!source) return false;
+    if (/\.m3u8(?:[?#]|$)/i.test(source.url || '')) return true;
+    return /(?:^|[\s/+_.-])(?:hls|m3u8|mpegurl|x-mpegurl)(?:$|[\s;,+_.-])/i.test(source.type || '');
   }
 
   function engineLabel(engine) {
@@ -1475,8 +1477,8 @@
       return;
     }
     sources.sort(function (a, b) {
-      var aHls = isHlsUrl(a.url) ? 0 : 1;
-      var bHls = isHlsUrl(b.url) ? 0 : 1;
+      var aHls = isHlsSource(a) ? 0 : 1;
+      var bHls = isHlsSource(b) ? 0 : 1;
       if (aHls !== bHls) return aHls - bHls;
       return (parseInt(b.quality, 10) || 0) - (parseInt(a.quality, 10) || 0);
     });
@@ -1498,7 +1500,7 @@
     var list = [];
     var hlsWorks = false;
     try { hlsWorks = !!(window.Hls && window.Hls.isSupported()); } catch (e) {}
-    if (isHlsUrl(source.url) && hlsWorks) list.push('hls');
+    if (isHlsSource(source) && hlsWorks) list.push('hls');
     if (avplayAvailable()) list.push('avplay');
     list.push('native');
     return list;

@@ -762,12 +762,12 @@ avplayFail = false;
 avplayCalls.length = 0;
 route('/api/v3/files/701?type=4', 200, { sources: [
   { filename: 'https://cdn.example/a.m3u8', quality: '720p' },
-  { filename: 'https://cdn.example/b.m3u8', quality: '1080p' }
+  { filename: 'https://cdn.example/video/high?token=signed', type: 'application/vnd.apple.mpegurl', quality_label: '1080p' }
 ] });
 click(ids.episodeList.querySelectorAll('.episode')[0]);
 const hlsPlayer = FakeHls.instances[FakeHls.instances.length - 1];
 assert(hlsPlayer, 'hls.js instance created');
-assert.strictEqual(hlsPlayer.url, 'https://cdn.example/b.m3u8', 'hls.js loads the best source');
+assert.strictEqual(hlsPlayer.url, 'https://cdn.example/video/high?token=signed', 'HLS MIME type selects hls.js for extensionless signed URLs');
 assert.strictEqual(hlsPlayer.config.enableWorker, false, 'no blob workers, CSP stays strict');
 assert.strictEqual(ids.video.paused, false, 'hls.js playback started on the video element');
 assert.strictEqual(avplayCalls.length, 0, 'AVPlay is not used when MSE works');
