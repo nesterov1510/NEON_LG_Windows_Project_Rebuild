@@ -699,33 +699,72 @@
 
   /* ── catalogue rendering ──────────────────────────────────────────── */
 
+  var IMAGE_BASE = 'https://img.belet.me/';
+  var BRAND_IMAGE = 'belet-logo.png';
+
+  function imageUrl(value) {
+    var url;
+    if (typeof value !== 'string') return null;
+    url = value.replace(/^\s+|\s+$/g, '');
+    if (!url) return null;
+    if (/^(https?:|data:|file:)/i.test(url)) return url;
+    if (url.indexOf('//') === 0) return 'https:' + url;
+    if (/^img\.belet\.me\//i.test(url)) return 'https://' + url;
+    return IMAGE_BASE + (url.charAt(0) === '/' ? url.slice(1) : url);
+  }
+
+  function setContentImage(img, source) {
+    function showBrandFallback() {
+      if (img._beletBrandFallback) {
+        img.style.visibility = 'hidden';
+        return;
+      }
+      img._beletBrandFallback = true;
+      img.classList.add('brand-fallback');
+      img.alt = 'Belet';
+      img.src = BRAND_IMAGE;
+    }
+
+    img._beletBrandFallback = false;
+    img.classList.remove('brand-fallback');
+    img.alt = '';
+    img.style.visibility = '';
+    img.onerror = showBrandFallback;
+    source = imageUrl(source);
+    if (source) img.src = source;
+    else showBrandFallback();
+  }
+
   function pickImage(images, kind, size) {
     var entry, sizes = size || ['medium', 'standard', 'default', 'high'];
     var order = kind === 'horizontal'
-      ? ['horizontal_with_name', 'horizontal_without_name', 'vertical', 'vertical_without_name']
-      : ['vertical', 'vertical_without_name', 'horizontal_without_name', 'horizontal_with_name'];
-    var i, j;
+      ? ['horizontal_with_name', 'horizontal-with-name', 'horizontal_without_name', 'horizontal-without-name', 'vertical', 'vertical_without_name', 'vertical-without-name']
+      : ['vertical', 'vertical_without_name', 'vertical-without-name', 'horizontal_without_name', 'horizontal-without-name', 'horizontal_with_name', 'horizontal-with-name'];
+    var i, j, url;
     if (!images || typeof images !== 'object') return null;
     for (i = 0; i < order.length; i += 1) {
       entry = images[order[i]];
       if (!entry || typeof entry !== 'object') continue;
       for (j = 0; j < sizes.length; j += 1) {
-        if (entry[sizes[j]] && typeof entry[sizes[j]].url === 'string') return entry[sizes[j]].url;
+        if (entry[sizes[j]] && typeof entry[sizes[j]].url === 'string') {
+          url = imageUrl(entry[sizes[j]].url);
+          if (url) return url;
+        }
       }
     }
-    if (images.name && typeof images.name.url === 'string') return images.name.url;
+    if (images.name && typeof images.name.url === 'string') return imageUrl(images.name.url);
     return null;
   }
 
   function posterOf(item) {
     return pickImage(item && item.images, 'vertical', ['medium', 'standard', 'default', 'high']) ||
-      (item && typeof item.image_url === 'string' ? item.image_url : null) ||
-      (item && typeof item.image === 'string' ? item.image : null);
+      (item && typeof item.image_url === 'string' ? imageUrl(item.image_url) : null) ||
+      (item && typeof item.image === 'string' ? imageUrl(item.image) : null);
   }
 
   function backdropOf(item) {
     return pickImage(item && item.images, 'horizontal', ['high', 'default', 'medium', 'standard']) ||
-      (item && typeof item.image_url === 'string' ? item.image_url : null);
+      (item && typeof item.image_url === 'string' ? imageUrl(item.image_url) : null);
   }
 
   function itemsOf(group) {
@@ -755,13 +794,9 @@
     var duration;
     card.className = 'card focusable' + (options.continueWatching ? ' continue' : '');
     card.setAttribute('type', 'button');
-    if (image) {
-      var img = doc.createElement('img');
-      img.alt = '';
-      img.onerror = function () { img.style.visibility = 'hidden'; };
-      img.src = image;
-      poster.appendChild(img);
-    }
+    var img = doc.createElement('img');
+    setContentImage(img, image);
+    poster.appendChild(img);
     if (item && item.age) {
       badge = el('span', 'badge', item.age + '+');
       poster.appendChild(badge);
@@ -819,10 +854,7 @@
     var image = backdropOf(item) || posterOf(item);
     var meta = [];
     state.home.hero = item;
-    if (image) {
-      $('heroImage').src = image;
-      $('heroImage').alt = '';
-    }
+    setContentImage($('heroImage'), image);
     var duration = durationText(item.duration);
     var genres = genreNames(item.genres);
     if (item.age) meta.push(item.age + '+');
@@ -1150,7 +1182,7 @@
     var watch = Number(movie.watch_time || 0);
     detail.movie = movie;
 
-    if (poster) $('detailPoster').src = poster;
+    setContentImage($('detailPoster'), poster);
     if (backdrop) $('detailBackdrop').style.backgroundImage = 'url("' + backdrop + '")';
     $('detailTitle').textContent = movieTitle(movie);
     var year = movie.year || (movie.release_date ? String(movie.release_date).slice(0, 4) : '');

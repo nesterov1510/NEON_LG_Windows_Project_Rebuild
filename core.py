@@ -564,7 +564,7 @@ class Api:
 
     def build_belet_ipk(self, target_url='https://belet.tm/'):
         app_id = 'tm.belet.webos'
-        version = '1.0.2'
+        version = '1.0.3'
         mtime = int(time.time())
 
         appinfo = json.dumps({

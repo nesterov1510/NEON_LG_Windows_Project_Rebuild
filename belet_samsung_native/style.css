@@ -124,6 +124,7 @@ button {
 #home::-webkit-scrollbar { width: 0; }
 .hero { position: relative; height: 560px; margin-bottom: 6px; }
 .hero-image { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; opacity: .85; }
+.hero-image.brand-fallback { object-fit: contain; box-sizing: border-box; padding: 8% 34%; opacity: .35; }
 .hero-shade {
   position: absolute; top: 0; right: 0; bottom: 0; left: 0; z-index: 1;
   background: linear-gradient(90deg, rgba(10,10,11,.95) 0%, rgba(10,10,11,.55) 45%, rgba(10,10,11,.05) 75%),
@@ -153,6 +154,7 @@ button {
 }
 .card .poster { position: relative; width: 100%; height: 300px; background: #1c1c21; overflow: hidden; }
 .card .poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.card .poster img.brand-fallback { box-sizing: border-box; object-fit: contain; padding: 18%; background: #1c1c21; }
 .card .poster::after { content: ''; position: absolute; top: 0; right: 0; bottom: 0; left: 0; box-shadow: inset 0 -40px 60px rgba(0,0,0,.35); }
 .card .name { display: block; padding: 10px 4px 4px; font-size: 18px; line-height: 1.25; color: #d9d9df; max-height: 54px; overflow: hidden; }
 .card .badge { position: absolute; top: 8px; left: 8px; z-index: 2; background: rgba(0,0,0,.7); border-radius: 6px; padding: 3px 8px; font-size: 13px; color: #fff; }
@@ -207,6 +209,7 @@ button {
 .detail-scroll::-webkit-scrollbar { width: 0; }
 .detail-top { display: flex; align-items: flex-start; position: relative; }
 .detail-poster { width: 300px; border-radius: 14px; box-shadow: 0 30px 80px rgba(0,0,0,.65); background: #1a1a1f; }
+.detail-poster.brand-fallback { height: 420px; box-sizing: border-box; object-fit: contain; padding: 48px; }
 .detail-info { max-width: 900px; margin-left: 46px; }
 .detail-info h1 { font-size: 52px; margin: 6px 0 16px; line-height: 1.05; }
 .detail-meta { color: #b7b7c0; font-size: 21px; margin: 0 0 10px; }

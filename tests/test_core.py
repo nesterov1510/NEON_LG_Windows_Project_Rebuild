@@ -522,7 +522,7 @@ def test_build_and_install_belet_ipk_structure_and_luna(tmp_api, tmp_path):
             assert req in names
         appinfo = json.loads(tf.extractfile(f'{base}/appinfo.json').read().decode('utf-8'))
         assert appinfo['id'] == 'tm.belet.webos'
-        assert appinfo['version'] == '1.0.2'
+        assert appinfo['version'] == '1.0.3'
         assert f"Version: {appinfo['version']}\n" in ctrl_txt
         assert appinfo['type'] == 'web'
         assert appinfo['main'] == 'index.html'
