@@ -454,14 +454,24 @@
 
   function seasons(movieId, callback) {
     var id = encodeURIComponent(movieId);
-    authorized({
-      method: 'GET',
-      url: HOSTS.film + '/api/v2/seasons?movieId=' + id,
-      fallback: HOSTS.film + '/api/v1/seasons?movieId=' + id
-    }, function (err, data) {
-      if (err) return callback(err, null);
-      callback(null, listFrom(data));
-    });
+    var urls = [
+      HOSTS.film + '/api/v2/seasons?movie_id=' + id,
+      HOSTS.film + '/api/v2/seasons?movieId=' + id,
+      HOSTS.film + '/api/v1/seasons?movie_id=' + id,
+      HOSTS.film + '/api/v1/seasons?movieId=' + id
+    ];
+    var lastError = null;
+    function tryUrl(index) {
+      if (index >= urls.length) return callback(lastError, []);
+      authorized({ method: 'GET', url: urls[index] }, function (err, data) {
+        var list = err ? [] : listFrom(data);
+        if (list.length) return callback(null, list);
+        if (err && err.kind === 'auth') return callback(err, null);
+        if (err) lastError = err;
+        tryUrl(index + 1);
+      });
+    }
+    tryUrl(0);
   }
 
   /**
@@ -472,23 +482,36 @@
     options = options || {};
     var id = encodeURIComponent(seasonId);
     var limit = encodeURIComponent(options.limit || 100);
-    var simple = HOSTS.film + '/api/v2/episodes?season_id=' + id + '&limit=' + limit;
+    var urls = [
+      HOSTS.film + '/api/v2/episodes?season_id=' + id + '&limit=' + limit,
+      HOSTS.film + '/api/v2/episodes?seasonId=' + id + '&limit=' + limit,
+      HOSTS.film + '/api/v3/episodes?season_id=' + id + '&limit=' + limit +
+        '&current_position=' + encodeURIComponent(options.position || 1) +
+        '&direction=' + encodeURIComponent(options.direction || 'next')
+    ];
     var query = '?season_id=' + id + '&limit=' + limit +
       '&current_position=' + encodeURIComponent(options.position || 1) +
       '&direction=' + encodeURIComponent(options.direction || 'next');
     if (options.episodeId) query += '&episode_id=' + encodeURIComponent(options.episodeId);
-    var firstError = null;
-    authorized({ method: 'GET', url: simple }, function (err, data) {
-      var list = err ? [] : listFrom(data);
-      if (list.length) return callback(null, list);
-      firstError = err || null;
-      authorized({ method: 'GET', url: HOSTS.film + '/api/v3/episodes' + query }, function (err3, data3) {
-        var next = err3 ? [] : listFrom(data3);
-        if (next.length) return callback(null, next);
-        if (err3 && firstError) return callback(firstError, null);
-        callback(null, next);
+    urls.push(HOSTS.film + '/api/v3/episodes' + query);
+    urls.push(HOSTS.film + '/api/v3/episodes?seasonId=' + id + '&limit=' + limit +
+      '&current_position=' + encodeURIComponent(options.position || 1) +
+      '&direction=' + encodeURIComponent(options.direction || 'next'));
+    if (options.episodeId) {
+      urls[urls.length - 1] += '&episodeId=' + encodeURIComponent(options.episodeId);
+    }
+    var lastError = null;
+    function tryUrl(index) {
+      if (index >= urls.length) return callback(lastError, []);
+      authorized({ method: 'GET', url: urls[index] }, function (err, data) {
+        var list = err ? [] : listFrom(data);
+        if (list.length) return callback(null, list);
+        if (err && err.kind === 'auth') return callback(err, null);
+        if (err) lastError = err;
+        tryUrl(index + 1);
       });
-    });
+    }
+    tryUrl(0);
   }
 
   var VIDEO_URL = /\.(m3u8|mpd|mp4|m4v|mov|webm|ts)(\?|#|$)/i;
@@ -503,7 +526,13 @@
     var url = '';
     if (!entry) return null;
     if (typeof entry === 'string') url = entry;
-    else url = entry.filename || entry.url || entry.src || entry.link || entry.file || '';
+    else url = entry.filename || entry.url || entry.src || entry.link || entry.file ||
+      entry.hls || entry.hls_url || entry.hlsUrl || entry.stream_url || entry.streamUrl ||
+      entry.playback_url || entry.playbackUrl || entry.file_url || entry.fileUrl ||
+      entry.download_url || entry.downloadUrl || '';
+    if (url && typeof url === 'object') {
+      url = url.url || url.src || url.filename || url.link || '';
+    }
     if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return null;
     // The payload also carries posters and other images; only video entries may become sources.
     if (/\.(jpe?g|png|webp|gif|svg|ico)(\?|#|$)/i.test(url)) return null;
@@ -544,17 +573,29 @@
   }
 
   function files(movieId, typeId, callback) {
-    var url = HOSTS.film + '/api/v3/files/' + encodeURIComponent(movieId) + '?type=' + encodeURIComponent(typeId);
-    authorized({
-      method: 'GET',
-      url: url,
-      fallback: HOSTS.film + '/api/v3/files/' + encodeURIComponent(movieId)
-    }, function (err, data) {
-      if (err) return callback(err, null);
-      var list = sourcesFrom(data);
-      if (!list.length) return callback(apiError('empty', 200, '', data), null);
-      callback(null, list);
-    });
+    var base = HOSTS.film + '/api/v3/files/' + encodeURIComponent(movieId);
+    var type = encodeURIComponent(typeId);
+    var urls = [base + '?type=' + type, base + '?type_id=' + type, base];
+    var lastError = null;
+    var lastData = null;
+    function tryUrl(index) {
+      if (index >= urls.length) {
+        return callback(lastError || apiError('empty', 200, '', lastData), null);
+      }
+      authorized({ method: 'GET', url: urls[index] }, function (err, data) {
+        var list;
+        if (err) {
+          lastError = err;
+          if (err.kind === 'auth') return callback(err, null);
+          return tryUrl(index + 1);
+        }
+        lastData = data;
+        list = sourcesFrom(data);
+        if (list.length) return callback(null, list);
+        tryUrl(index + 1);
+      });
+    }
+    tryUrl(0);
   }
 
   /* ── Continue watching, favourites, likes ───────────────────────────── */
@@ -609,7 +650,7 @@
       method: 'POST',
       url: HOSTS.film + '/api/v3/lastWatchTime',
       form: form,
-      headers: { 'X-Player-Session-Id': randomHex(8) }
+      headers: { 'X-Player-Session-Id': playerSession || randomHex(8) }
     }, function (err, data) { if (callback) callback(err || null, data); });
   }
 

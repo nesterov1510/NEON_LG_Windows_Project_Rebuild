@@ -1188,33 +1188,58 @@
 
     var seasons = Array.isArray(movie.seasons) ? movie.seasons : [];
     detail.seasons = seasons;
-    if (seasons.length || movie.last_episode_info || movie.type_id === 2) {
+    if (seasons.length || lastEpisodeInfo(movie) || Number(movie.type_id) === 2) {
       loadSeasons(movie, seasons);
     }
     state.mainFocus = $('detailPlay');
   }
 
   function loadSeasons(movie, seasons) {
+    var detail = state.detail;
+    var normalized = normalizeSeasons(seasons);
     $('episodesSection').classList.remove('hidden');
-    if (seasons.length) {
-      renderSeasonChips(movie, seasons);
-      var preferred = movie.last_episode_info && movie.last_episode_info.season_id;
-      selectSeason(preferred || seasons[0].id);
+    if (normalized.length) {
+      detail.seasons = normalized;
+      renderSeasonChips(movie, normalized);
+      var lastEpisode = lastEpisodeInfo(movie);
+      var preferred = lastEpisode && (lastEpisode.season_id || lastEpisode.seasonId);
+      selectSeason(preferred || normalized[0].id);
       return;
     }
     $('episodeList').innerHTML = '<p class="search-state">Загружаем сезоны…</p>';
     Belet.seasons(movie.id, function (err, list) {
-      var fetched = (list || []).filter(function (season) { return season && season.id; });
+      var fetched;
+      if (state.detail !== detail) return;
+      fetched = normalizeSeasons(list);
       if (err || !fetched.length) {
         $('episodeList').innerHTML = '<p class="search-state">' +
           (err ? describeError(err) : 'Список сезонов пуст.') + '</p>';
         return;
       }
-      state.detail.seasons = fetched;
+      detail.seasons = fetched;
       renderSeasonChips(movie, fetched);
-      var preferred = movie.last_episode_info && movie.last_episode_info.season_id;
+      var lastEpisode = lastEpisodeInfo(movie);
+      var preferred = lastEpisode && (lastEpisode.season_id || lastEpisode.seasonId);
       selectSeason(preferred || fetched[0].id);
     });
+  }
+
+  function lastEpisodeInfo(movie) {
+    return movie && (movie.last_episode_info || movie.episode_info || movie.lastEpisodeInfo) || null;
+  }
+
+  function normalizeSeasons(seasons) {
+    if (!Array.isArray(seasons)) seasons = Belet.listFrom(seasons);
+    return (seasons || []).map(function (season, index) {
+      if (!season || typeof season !== 'object') return null;
+      var id = season.id || season.season_id || season.seasonId || season.id_season;
+      if (id === null || typeof id === 'undefined' || id === '') return null;
+      return {
+        id: id,
+        name: season.name || season.title || season.season_name || ('Сезон ' + (index + 1)),
+        raw: season
+      };
+    }).filter(function (season) { return !!season; });
   }
 
   function renderSeasonChips(movie, seasons) {
@@ -1238,11 +1263,16 @@
 
   function selectSeason(seasonId) {
     var detail = state.detail;
+    var requestedId = String(seasonId || '');
     if (!seasonId) return;
     detail.seasonId = seasonId;
+    detail.episodes = [];
+    detail.loadingEpisodes = true;
     markSeasonChips();
     $('episodeList').innerHTML = '<p class="search-state">Загружаем серии…</p>';
     Belet.episodes(seasonId, { limit: 100 }, function (err, list) {
+      if (state.detail !== detail || String(detail.seasonId) !== requestedId) return;
+      detail.loadingEpisodes = false;
       if (err) {
         if (handleAuthError(err)) return;
         $('episodeList').innerHTML = '<p class="search-state">' + describeError(err) + '</p>';
@@ -1251,12 +1281,12 @@
       detail.episodes = (list || []).map(function (episode, index) {
         return {
           raw: episode,
-          id: episode.id || episode.episode_id,
+          id: episode.id || episode.episode_id || episode.episodeId || episode.content_id,
           name: episode.name || episode.title || ('Серия ' + (index + 1)),
-          position: episode.episode_position || episode.position || (index + 1),
+          position: episode.episode_position || episode.position || episode.episode_number || (index + 1),
           duration: episode.duration || ''
         };
-      });
+      }).filter(function (episode) { return episode.id !== null && typeof episode.id !== 'undefined'; });
       renderEpisodes();
     });
   }
@@ -1288,9 +1318,9 @@
   function playEpisode(episode) {
     var detail = state.detail;
     var movie = detail.movie;
-    var typeId = 4;
+    var typeId = episode.raw && (episode.raw.file_type_id || episode.raw.fileTypeId) || 4;
     var resumeAt = 0;
-    var last = movie && movie.last_episode_info;
+    var last = lastEpisodeInfo(movie);
     if (last && Number(last.episode_id) === Number(episode.id)) resumeAt = Number(last.episode_watch_time || 0);
     if (episode.raw && Number(episode.raw.watch_time || 0) > resumeAt) resumeAt = Number(episode.raw.watch_time);
     if (episode.raw && Array.isArray(episode.raw.sources) && episode.raw.sources.length) {
@@ -1317,16 +1347,18 @@
 
   function playMovieOrResume() {
     var movie = state.detail.movie;
+    var lastEpisode;
     if (!movie) return;
-    if (movie.type_id === 2 && !(movie.last_episode_info && movie.last_episode_info.episode_id) &&
+    lastEpisode = lastEpisodeInfo(movie);
+    if (Number(movie.type_id) === 2 && !(lastEpisode && (lastEpisode.episode_id || lastEpisode.episodeId)) &&
         state.detail.episodes.length) {
       playEpisode(state.detail.episodes[0]);
       return;
     }
-    if (movie.type_id === 2 && movie.last_episode_info && movie.last_episode_info.episode_id) {
-      var info = movie.last_episode_info;
+    if (Number(movie.type_id) === 2 && lastEpisode && (lastEpisode.episode_id || lastEpisode.episodeId)) {
+      var info = lastEpisode;
       var episode = {
-        id: info.episode_id,
+        id: info.episode_id || info.episodeId,
         name: info.episode_name || 'Серия',
         position: info.episode_position,
         duration: info.episode_duration,
@@ -1410,7 +1442,9 @@
     player.avError = false;
     player.avOpened = false;
     player.started = false;
+    player.reauthorized = false;
     player.attempts = [];
+    if (window.Belet && window.Belet.newPlayerSession) window.Belet.newPlayerSession();
     player.movieId = options.movieId || null;
     player.seasonId = options.seasonId || null;
     player.episodeId = options.episodeId || null;
@@ -1462,7 +1496,9 @@
 
   function strategiesFor(source) {
     var list = [];
-    if (isHlsUrl(source.url) && window.Hls && window.Hls.isSupported()) list.push('hls');
+    var hlsWorks = false;
+    try { hlsWorks = !!(window.Hls && window.Hls.isSupported()); } catch (e) {}
+    if (isHlsUrl(source.url) && hlsWorks) list.push('hls');
     if (avplayAvailable()) list.push('avplay');
     list.push('native');
     return list;
@@ -1736,6 +1772,9 @@
         } catch (e) {
           fail('avplay play');
         }
+      }, function (error) {
+        var code = error && (error.code || error.name || error.message);
+        fail('avplay prepare' + (code ? ' ' + code : ''));
       });
     } catch (e) {
       fail('avplay open');

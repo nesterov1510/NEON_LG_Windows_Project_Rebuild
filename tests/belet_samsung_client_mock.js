@@ -645,17 +645,19 @@ fireKey(10009);
 assert(!ids.home.classList.contains('hidden'), 'back to home before the serial test');
 route('/api/v3/movie/12', 200, {
   status: 'ok',
-  movie: { id: 12, name: 'Serial', type_id: 2, description: 'Сериал', favorites: true,
-    images: {}, seasons: [], last_episode_info: null }
+  movie: { id: 12, name: 'Serial', type_id: '2', description: 'Сериал', favorites: true,
+    images: {}, seasons: [], episode_info: null }
 });
-route('/api/v2/seasons', 200, { status: 'ok', result: [{ id: 7, name: 'Сезон 1' }] });
+route('/api/v2/seasons', 200, { status: 'ok', result: [{ season_id: 7, season_name: 'Сезон 1' }] });
 route('/api/v2/episodes', 404, { message: 'not found' });
+route('/api/v2/episodes?seasonId=', 404, { message: 'not found' });
 route('/api/v3/episodes', 200, { status: 'ok', result: [
-  { id: 701, name: 'Пилот', episode_position: 1, duration: 2700 }
+  { episode_id: 701, name: 'Пилот', episode_position: 1, duration: 2700, type_id: 4 }
 ] });
-route('/api/v3/files/701?type=4', 200, { sources: [
-  { filename: 'https://cdn.example/a.m3u8', quality: '720p' },
-  { filename: 'https://cdn.example/b.m3u8', quality: '1080p' }
+route('/api/v3/files/701?type=4', 200, { sources: [] });
+route('/api/v3/files/701?type_id=4', 200, { result: [
+  { hls: 'https://cdn.example/a.m3u8', quality: '720p' },
+  { hls: 'https://cdn.example/b.m3u8', quality: '1080p' }
 ] });
 click(ids.rows.querySelectorAll('.row-block')[1].querySelector('.card'));
 assert.strictEqual(ids.seasonChips.querySelectorAll('.chip').length, 1, 'season fetched from the API');
