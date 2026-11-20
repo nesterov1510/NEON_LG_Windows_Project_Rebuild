@@ -27,7 +27,17 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONUNBUFFERED: '1'
-        run: python -m pytest -v --tb=short --timeout=120
+        run: |
+          python -m pytest -v --tb=short --timeout=120 --junitxml=pytest.xml
+          $code = $LASTEXITCODE
+          if ($code -ne 0 -and (Test-Path pytest.xml)) {
+            $report = [xml](Get-Content pytest.xml -Raw)
+            foreach ($case in $report.SelectNodes('//testcase[failure or error]')) {
+              $reason = $case.SelectSingleNode('failure|error').GetAttribute('message') -replace '[\r\n]+', ' '
+              Write-Host "::error::$($case.classname).$($case.name): $($reason.Substring(0,[Math]::Min($reason.Length,1200)))"
+            }
+          }
+          exit $code
 
       - name: Build NeonLGControl81.exe (PyInstaller)
         run: |
