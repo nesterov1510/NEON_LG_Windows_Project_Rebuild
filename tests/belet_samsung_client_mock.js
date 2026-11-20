@@ -389,9 +389,22 @@ function buildDom() {
 const calls = [];
 let store = {};
 let routes = [];
+const blobRecords = {};
+let blobSequence = 0;
+
+class MockBlob {
+  constructor(parts, options) {
+    this.parts = parts;
+    this.type = options && options.type || '';
+  }
+}
 
 function route(match, status, json) {
   routes.push({ match, status, json });
+}
+
+function routeText(match, status, text) {
+  routes.push({ match, status, text });
 }
 
 function headerOf(xhr, name) {
@@ -420,7 +433,7 @@ class XHR {
     if (index < 0) throw new Error('unexpected request: ' + this.method + ' ' + this.url);
     const item = routes.splice(index, 1)[0];
     this.status = item.status;
-    this.responseText = item.json === undefined ? '' : JSON.stringify(item.json);
+    this.responseText = item.text !== undefined ? item.text : (item.json === undefined ? '' : JSON.stringify(item.json));
     this.readyState = 4;
     if (this.onreadystatechange) this.onreadystatechange();
   }
@@ -450,6 +463,15 @@ const sandbox = {
   },
   setInterval: () => 0,
   clearInterval: () => {},
+  Blob: MockBlob,
+  URL: {
+    createObjectURL(blob) {
+      const url = 'blob:belet-' + (++blobSequence);
+      blobRecords[url] = blob;
+      return url;
+    },
+    revokeObjectURL(url) { delete blobRecords[url]; }
+  },
   console,
   Math,
   Date,
@@ -755,25 +777,38 @@ class FakeHls {
   }
   destroy() { this.destroyed = true; }
 }
+class FakeHlsLoader {
+  constructor() { this.stats = {}; }
+  load(context, config, callbacks) { this.context = context; this.callbacks = callbacks; }
+  abort() {}
+  destroy() {}
+  getCacheAge() { return null; }
+  getResponseHeader() { return null; }
+}
 FakeHls.instances = [];
 FakeHls.isSupported = () => true;
-FakeHls.Events = { MEDIA_ATTACHED: 'mediaAttached', MANIFEST_PARSED: 'manifestParsed', ERROR: 'error' };
+FakeHls.DefaultConfig = { loader: FakeHlsLoader };
+FakeHls.Events = { MEDIA_ATTACHED: 'mediaAttached', MANIFEST_PARSED: 'manifestParsed', LEVEL_LOADED: 'levelLoaded', ERROR: 'error' };
 sandbox.Hls = FakeHls;
 avplayFail = true;
 avplayCalls.length = 0;
 route('/api/v3/files/701?type=4', 200, { sources: [
   { filename: 'https://cdn.example/a.m3u8', quality: '720p' },
   { filename: 'https://cdn.example/video/high?token=signed', type: 'application/vnd.apple.mpegurl', quality_label: '1080p' }
-] });
+], session_id: 'belet-player-session' });
+routeText('https://cdn.example/a.m3u8', 200,
+  '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1200000\nv2/prog_index.m3u8\n');
 click(ids.episodeList.querySelectorAll('.episode')[0]);
 const hlsPlayer = FakeHls.instances[FakeHls.instances.length - 1];
 assert(hlsPlayer, 'hls.js instance created');
-assert.strictEqual(hlsPlayer.url, 'https://cdn.example/video/high?token=signed', 'HLS MIME type selects hls.js for extensionless signed URLs');
+assert.strictEqual(hlsPlayer.url, 'blob:belet-1', 'Belet manifests are assembled into an MSE master playlist');
+assert(blobRecords[hlsPlayer.url].parts.join('').includes('https://cdn.example/video/high?token=signed'),
+  'the master playlist keeps signed extensionless HLS sources');
+assert(blobRecords[hlsPlayer.url].parts.join('').includes('https://cdn.example/480/v2/prog_index.m3u8'),
+  'Belet v2 playlist paths are mapped to their quality directory');
 assert.strictEqual(hlsPlayer.config.enableWorker, false, 'no blob workers, CSP stays strict');
 assert.strictEqual(ids.video.paused, false, 'hls.js playback started on the video element');
-assert.strictEqual(avplayCalls[0][0], 'open', 'Samsung AVPlay is tried before the MSE fallback');
-assert(avplayCalls.some(call => call[0] === 'property' && call[1] === 'USER_AGENT' && call[2] === 'belet_films_android'),
-  'AVPlay uses the Android player user-agent');
+assert.strictEqual(avplayCalls.length, 0, 'Belet HLS/MSE is preferred before AVPlay');
 /* a fatal HLS error degrades to the next engine without losing the position */
 hlsPlayer.handlers.error({}, { fatal: true, details: 'manifestLoadError' });
 assert.strictEqual(hlsPlayer.destroyed, true, 'broken hls.js instance is destroyed');
@@ -783,38 +818,52 @@ fireKey(10009);
 /* 9e-2. Media requests carry the API auth headers and a 401 replays them after a refresh */
 route('/api/v3/files/701?type=4', 200, { sources: [
   { filename: 'https://cdn.example/c.m3u8', quality: '1080p' }
-] });
+], session_id: 'belet-player-session' });
+routeText('https://cdn.example/c.m3u8', 200, '#EXTM3U\n#EXTINF:5,\nsegment.ts\n');
 click(ids.episodeList.querySelectorAll('.episode')[0]);
 const authedPlayer = FakeHls.instances[FakeHls.instances.length - 1];
-const probe = { headers: {}, setRequestHeader: function (key, value) { this.headers[key] = value; } };
-authedPlayer.config.xhrSetup(probe);
 const sessionToken = JSON.parse(store.neon_belet_samsung_session_v2).token;
-assert.strictEqual(probe.headers.Authorization, sessionToken, 'manifest/segments ask with the access token');
-assert.deepStrictEqual(Object.keys(probe.headers), ['Authorization'],
-  'media requests carry the token and nothing else: the CDN preflight only allows Authorization');
+route('/api/v2/auth/refresh-mobile', 200, { token: sessionToken, refresh_token: 'refresh-token' });
+const hlsLoader = new authedPlayer.config.loader({});
+const hlsContext = { url: 'https://cdn.example/c.m3u8', headers: {} };
+hlsLoader.load(hlsContext, {}, {});
+assert.strictEqual(hlsLoader.loader.context.headers.Authorization, sessionToken, 'manifest/segments ask with the access token');
+assert.deepStrictEqual(Object.keys(hlsLoader.loader.context.headers), [
+  'X-Platform', 'X-VersionCode', 'X-Player-Session-Id', 'Fingerprint', 'Authorization'
+], 'media requests use Belet web-player headers and the files session id');
+authedPlayer.handlers.levelLoaded({}, { level: 2, details: { totalduration: 15, fragments: [{}, {}, {}] } });
+route('/api/v2/auth/refresh-mobile', 200, { token: sessionToken, refresh_token: 'refresh-token' });
+const fragmentLoader = new authedPlayer.config.fLoader({});
+fragmentLoader.load({ url: 'https://cdn.example/segment.ts', headers: {}, frag: { level: 2 } }, {}, {});
+assert.strictEqual(fragmentLoader.loader.context.headers['X-Chunk-Length'], '5000',
+  'fragment requests include the level chunk duration');
 
-/* first 401: the token is retried with the `Bearer` scheme, without touching the session */
+/* first 401 refreshes the token before replaying the Belet web-player request */
 const instancesBefore = FakeHls.instances.length;
+route('/api/v2/auth/refresh-mobile', 200, { token: 'media-token', refresh_token: 'media-refresh' });
+routeText('https://cdn.example/c.m3u8', 200, '#EXTM3U\n#EXTINF:5,\nsegment.ts\n');
 authedPlayer.handlers.error({}, { fatal: true, details: 'manifestLoadError', response: { code: 401 } });
 const replay = FakeHls.instances[FakeHls.instances.length - 1];
 assert.strictEqual(FakeHls.instances.length, instancesBefore + 1, 'a media 401 restarts hls.js');
-assert.strictEqual(replay.url, 'https://cdn.example/c.m3u8', 'the same source is replayed');
-const probe2 = { headers: {}, setRequestHeader: function (key, value) { this.headers[key] = value; } };
-replay.config.xhrSetup(probe2);
-assert.strictEqual(probe2.headers.Authorization, 'Bearer ' + sessionToken, 'the retry uses the Bearer scheme');
-assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, sessionToken, 'no refresh is spent on the scheme retry');
-
-/* second 401: the session is refreshed and the stream replayed with the new token */
-const instancesAfterScheme = FakeHls.instances.length;
+assert.strictEqual(replay.url, 'blob:belet-3', 'the Belet playlist is rebuilt after token refresh');
 route('/api/v2/auth/refresh-mobile', 200, { token: 'media-token', refresh_token: 'media-refresh' });
+const replayLoader = new replay.config.loader({});
+replayLoader.load({ url: 'https://cdn.example/c.m3u8', headers: {} }, {}, {});
+assert.strictEqual(replayLoader.loader.context.headers.Authorization, 'media-token', 'the retry uses the refreshed raw token');
+assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, 'media-token', 'the access token was refreshed');
+
+/* a further 401 tries the CDN's Bearer scheme after the refreshed raw token */
+const instancesAfterScheme = FakeHls.instances.length;
+routeText('https://cdn.example/c.m3u8', 200, '#EXTM3U\n#EXTINF:5,\nsegment.ts\n');
 replay.handlers.error({}, { fatal: true, details: 'manifestLoadError', response: { code: 401 } });
 const replay2 = FakeHls.instances[FakeHls.instances.length - 1];
-assert.strictEqual(FakeHls.instances.length, instancesAfterScheme + 1, 'a second media 401 restarts hls.js after the refresh');
-assert.strictEqual(replay2.url, 'https://cdn.example/c.m3u8');
-assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, 'media-token', 'media 401 refreshed the session');
-const probe3 = { headers: {}, setRequestHeader: function (key, value) { this.headers[key] = value; } };
-replay2.config.xhrSetup(probe3);
-assert.strictEqual(probe3.headers.Authorization, 'Bearer media-token', 'the refreshed token keeps the working scheme');
+assert.strictEqual(FakeHls.instances.length, instancesAfterScheme + 1, 'the Bearer fallback restarts hls.js');
+assert.strictEqual(replay2.url, 'blob:belet-4');
+assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, 'media-token', 'the refreshed session is retained');
+route('/api/v2/auth/refresh-mobile', 200, { token: 'media-token', refresh_token: 'media-refresh' });
+const replayLoader2 = new replay2.config.loader({});
+replayLoader2.load({ url: 'https://cdn.example/c.m3u8', headers: {} }, {}, {});
+assert.strictEqual(replayLoader2.loader.context.headers.Authorization, 'Bearer media-token', 'the refreshed token keeps the working scheme');
 fireKey(10009);
 
 sandbox.Hls = undefined;

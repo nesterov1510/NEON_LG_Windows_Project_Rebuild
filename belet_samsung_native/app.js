@@ -1492,8 +1492,8 @@
     });
     player.sources = sources;
     player.manifestSources = manifestSources;
-    player.beletSessionId = meta && meta.sessionId ? String(meta.sessionId) : '';
-    if (window.Belet && window.Belet.newPlayerSession && player.beletSessionId) {
+    if (meta && meta.sessionId) player.beletSessionId = String(meta.sessionId);
+    if (window.Belet && window.Belet.newPlayerSession && meta && meta.sessionId) {
       window.Belet.newPlayerSession(player.beletSessionId);
     }
     player.chunkLengths = {};
