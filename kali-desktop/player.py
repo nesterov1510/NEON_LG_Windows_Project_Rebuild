@@ -42,8 +42,42 @@ def player_window(app):
         return False
 
     window.connect('key-press-event', key_press)
-    window.add(view)
-    view.load_uri((base / 'index.html').as_uri())
+    home = (base / 'index.html').as_uri()
+    if app == 'beletfilm':
+        # Keep the desktop website's normal origin, cookies and CORS policy;
+        # never forward tokens or pairing codes from the bundled TV client.
+        stack = Gtk.Stack()
+        stack.add_named(view, 'client')
+        window.add(stack)
+        header = Gtk.HeaderBar(title=title, show_close_button=True)
+        switch = Gtk.ToggleButton(label='Веб-версия belet.tm')
+        header.pack_end(switch)
+        window.set_titlebar(header)
+
+        def switch_mode(button):
+            if button.get_active():
+                view.load_uri('about:blank')  # stop any outstanding QR polling
+                web = WebKit2.WebView.new_with_context(context)
+                web.get_settings().set_media_playback_requires_user_gesture(False)
+                stack.add_named(web, 'website')
+                web.show()
+                stack.set_visible_child(web)
+                web.load_uri('https://belet.tm/')
+                web.grab_focus()
+            else:
+                stack.get_child_by_name('website').destroy()
+                stack.set_visible_child(view)
+                view.load_uri(home)
+                view.grab_focus()
+
+        # Website login may use persistent cookies rather than localStorage.
+        context.get_cookie_manager().set_persistent_storage(
+            str(Path(data.get_base_data_directory()) / 'web-cookies.sqlite'),
+            WebKit2.CookiePersistentStorage.SQLITE)
+        switch.connect('toggled', switch_mode)
+    else:
+        window.add(view)
+    view.load_uri(home)
     window.show_all()
     view.grab_focus()
     return window

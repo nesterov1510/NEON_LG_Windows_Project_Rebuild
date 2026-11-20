@@ -236,7 +236,7 @@ button, .btn {
 .info-val { color: #ffffff; font-weight: 700; }
 """
 
-def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
+def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL, *, desktop=False):
     """Generate the complete Alem TV Smart TV client JavaScript (compatible with ES5+ engines)."""
     safe_default_portal = json.dumps(str(default_portal or ALEMTV_DEFAULT_PORTAL).rstrip('/'))
     safe_portals_json = json.dumps(ALEMTV_PORTALS)
@@ -704,7 +704,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     xhr.open("POST", url, true);
     xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
     if (encrypted && aresHeader) xhr.setRequestHeader("Ares-Cipher", aresHeader);
-    xhr.timeout = 5000;
+    xhr.timeout = __RPC_TIMEOUT__;
 
     xhr.onload = function() {
       if (xhr.status >= 200 && xhr.status < 300) {
@@ -724,7 +724,11 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
       }
     };
     xhr.onerror = function() { callback(new Error("Network Error"), null); };
-    xhr.ontimeout = function() { callback(new Error("Timeout"), null); };
+    xhr.ontimeout = function() {
+      var host = document.createElement("a");
+      host.href = url;
+      callback(new Error("Нет ответа от " + host.hostname + " (" + method + ", " + (xhr.timeout / 1000) + " с). Проверьте портал и сеть оператора."), null);
+    };
     try {
       xhr.send(bodyText);
     } catch (e) {
@@ -1009,7 +1013,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
       if (currentScreen === "splash" && (!authData.channels || authData.channels.length === 0)) {
         showBootError("Сервер " + currentPortal.replace(/^https?:\/\//, "") + " не ответил вовремя. Выберите другой сервер или запустите автопоиск.");
       }
-    }, 7000);
+    }, __BOOT_TIMEOUT__);
 
     // 1. Get Domain Config (Sync time & fetch portal settings)
     jsonRpc("get_domain_config", { terminal_type: "smarttv" }, false, function(err, res) {
@@ -2643,12 +2647,17 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     document.addEventListener("DOMContentLoaded", startBoot);
   }
 })();"""
-    return template.replace('__DEFAULT_PORTAL__', safe_default_portal).replace('__PORTAL_LIST__', safe_portals_json)
+    # Three sequential RPCs during boot. Do not report a desktop timeout while
+    # an individual request still has time left. Keep TV timing unchanged.
+    rpc_timeout = 15000 if desktop else 5000
+    return (template.replace('__DEFAULT_PORTAL__', safe_default_portal).replace('__PORTAL_LIST__', safe_portals_json)
+            .replace('__RPC_TIMEOUT__', str(rpc_timeout))
+            .replace('__BOOT_TIMEOUT__', str(3 * rpc_timeout + 2000 if desktop else 7000)))
 
-def build_alemtv_html(default_portal=ALEMTV_DEFAULT_PORTAL):
+def build_alemtv_html(default_portal=ALEMTV_DEFAULT_PORTAL, *, desktop=False):
     """Generate the self-contained Alem TV Smart TV client HTML with embedded CSS and JS."""
     css = build_alemtv_css()
-    js = build_alemtv_js(default_portal=default_portal)
+    js = build_alemtv_js(default_portal=default_portal, desktop=desktop)
 
     template = """<!DOCTYPE html>
 <html lang="ru">

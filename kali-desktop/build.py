@@ -12,7 +12,7 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 import alemtv_app
 
-VERSION = '1.0.1'
+VERSION = '1.0.2'
 DEPENDENCIES = ('python3, python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1, '
                 'gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav')
 BELET_FILES = ('index.html', 'style.css', 'api.js', 'app.js', 'hls.min.js', 'hls.LICENSE',
@@ -45,7 +45,7 @@ def build(app, title):
             origins = ['https://beletapis.com/*', 'https://*.beletapis.com/*', 'https://api.belet.tm/*', 'https://*.belet.me/*']
             icon = 'belet_large_icon.png'
         else:
-            put(root, shared / 'index.html', alemtv_app.build_alemtv_html())
+            put(root, shared / 'index.html', alemtv_app.build_alemtv_html(desktop=True))
             put(root, shared / 'style.css', alemtv_app.build_alemtv_css())
             icon = 'alemtv_large_icon.png'
             put(root, shared / 'icon.png', (ROOT / 'assets' / icon).read_bytes())

@@ -11,7 +11,7 @@ app, = sys.argv[1:]
 launcher = runpy.run_path('/usr/bin/' + app)
 Gtk, GLib = launcher['Gtk'], launcher['GLib']
 window = launcher['player_window'](app)
-view = window.get_child()
+view = window.get_child().get_visible_child() if app == 'beletfilm' else window.get_child()
 ready = False
 checking = False
 probe = {
@@ -42,3 +42,11 @@ Gtk.main()
 if not ready:
     sys.exit(f'{app}: packaged client did not initialize')
 print(f'{app}: installed client initialized in WebKitGTK')
+
+if app == 'beletfilm':
+    switch = next(w for w in window.get_titlebar().get_children() if isinstance(w, Gtk.ToggleButton))
+    switch.set_active(True)
+    website = window.get_child().get_visible_child()
+    assert website != view and website.get_uri() == 'https://belet.tm/'
+    switch.set_active(False)
+    assert window.get_child().get_visible_child() == view
