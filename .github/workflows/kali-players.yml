@@ -17,7 +17,7 @@ jobs:
       - name: Install committed DEBs and launch both clients in WebKitGTK
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ./kali-desktop/packages/*.deb xvfb xauth desktop-file-utils
+          sudo apt-get install -y ./kali-desktop/packages/*.deb gir1.2-gtk-4.0 xvfb xauth desktop-file-utils
           for app in beletfilm alemtv; do
             desktop-file-validate /usr/share/applications/$app.desktop
             xvfb-run -a /usr/bin/python3 kali-desktop/smoke.py "$app"

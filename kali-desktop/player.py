@@ -5,6 +5,8 @@ from pathlib import Path
 
 import gi
 
+# GTK 3 and GTK 4 can coexist on Kali. Do not let PyGI select Gdk 4.
+gi.require_version('Gdk', '3.0')
 gi.require_version('Gtk', '3.0')
 gi.require_version('WebKit2', '4.1')
 from gi.repository import Gdk, GLib, Gtk, WebKit2

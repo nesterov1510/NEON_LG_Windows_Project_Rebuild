@@ -7,7 +7,7 @@
 ```sh
 cd kali-desktop/packages
 sudo apt update
-sudo apt install ./beletfilm_1.0.0_all.deb ./alemtv_1.0.0_all.deb
+sudo apt install ./beletfilm_1.0.1_all.deb ./alemtv_1.0.1_all.deb
 ```
 
 Можно указать только один файл. Если пакеты скачаны отдельно, выполняйте команду `apt install` из каталога загрузки. Нужны графическая сессия Kali Rolling и возможность установить системные зависимости.

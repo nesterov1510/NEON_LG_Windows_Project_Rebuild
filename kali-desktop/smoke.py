@@ -1,6 +1,11 @@
 """After apt install: xvfb-run -a /usr/bin/python3 smoke.py beletfilm (or alemtv)."""
 import runpy
 import sys
+import warnings
+
+from gi import PyGIWarning
+
+warnings.filterwarnings("error", category=PyGIWarning)
 
 app, = sys.argv[1:]
 launcher = runpy.run_path('/usr/bin/' + app)
