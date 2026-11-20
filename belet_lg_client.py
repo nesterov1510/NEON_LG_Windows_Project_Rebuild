@@ -130,6 +130,18 @@ def _ar_member(name, data, mtime):
     return out
 
 
+class _UstarEntry(tarfile.TarInfo):
+    def tobuf(self, format=tarfile.USTAR_FORMAT, encoding='utf-8', errors='strict'):
+        header = bytearray(super().tobuf(format, encoding, errors))
+        # Python 3.8 writes ASCII octal zero in devmajor/devminor even for
+        # regular files and directories; newer versions leave the fields empty.
+        # These are single-block USTAR headers, never device nodes or PAX entries.
+        header[329:345] = bytes(16)
+        header[148:156] = b' ' * 8
+        header[148:156] = ('%06o\0 ' % sum(header)).encode('ascii')
+        return bytes(header)
+
+
 def _gzipped_tar(mtime):
     """(tarfile, buffer) writing a deterministic gzip stream: the header mtime is fixed."""
     buf = io.BytesIO()
@@ -142,7 +154,7 @@ def _tarball(members, mtime):
     tar, gz, buf = _gzipped_tar(mtime)
     with tar:
         for name, payload in members:
-            info = tarfile.TarInfo(name)
+            info = _UstarEntry(name)
             info.type = tarfile.REGTYPE
             info.mode = 0o644
             info.size = len(payload)
@@ -185,7 +197,7 @@ def build_ipk(mtime=None, version=None):
     tar, gz, data_buf = _gzipped_tar(mtime)
     with tar:
         for name, payload in data_members:
-            info = tarfile.TarInfo(name)
+            info = _UstarEntry(name)
             info.uid = 0
             info.gid = 0
             info.uname = 'root'
