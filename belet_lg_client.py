@@ -26,6 +26,9 @@ ASSETS = ROOT / 'assets'
 SHARED_FILES = ('index.html', 'style.css', 'api.js', 'app.js', 'hls.min.js', 'hls.LICENSE',
                 'belet-logo.png', 'login-background.png', 'belet-regular.ttf', 'belet-bold.ttf')
 OVERLAY_FILES = ('webos-shim.js',)
+# The IPK must be byte-identical no matter how git checked the sources out, so the
+# text files are normalised to LF while packaging (Windows checkouts are CRLF).
+TEXT_FILES = ('index.html', 'style.css', 'api.js', 'app.js', 'hls.min.js', 'hls.LICENSE', 'webos-shim.js')
 # The Android/Tizen build labels the device as "Samsung Tizen <model>"; on LG the
 # device list should say "LG webOS <model>". Only the webOS copy is patched.
 API_PATCHES = ((b"'Samsung Tizen '", b"'LG webOS '"),)
@@ -34,7 +37,7 @@ SHIM_TAG = '<script src="webos-shim.js"></script>\n'
 
 def app_version():
     """Client version, taken from the shared Tizen manifest so both builds agree."""
-    manifest = (SRC / 'config.xml').read_text(encoding='utf-8')
+    manifest = _read_text_file(SRC / 'config.xml').decode('utf-8')
     match = re.search(r'<widget[^>]*\bversion="([^"]+)"', manifest)
     if not match:
         raise ValueError('belet_samsung_native/config.xml has no widget version')
@@ -64,6 +67,10 @@ def app_info(version=None):
     }
 
 
+def _read_text_file(path):
+    return path.read_bytes().replace(b'\r\n', b'\n')
+
+
 def _patch_api(data):
     for old, new in API_PATCHES:
         if old not in data:
@@ -73,7 +80,7 @@ def _patch_api(data):
 
 
 def _index_html():
-    html = (SRC / 'index.html').read_text(encoding='utf-8')
+    html = _read_text_file(SRC / 'index.html').decode('utf-8')
     marker = '<script src="hls.min.js"></script>\n'
     if marker not in html:
         raise ValueError('index.html no longer loads hls.min.js; update the webOS overlay injection')
@@ -86,14 +93,14 @@ def package_files(version=None):
     """Ordered (name, bytes) list placed at the root of the webOS application."""
     files = [('appinfo.json', json.dumps(app_info(version), indent=2, ensure_ascii=False).encode('utf-8') + b'\n')]
     for name in SHARED_FILES:
-        data = (SRC / name).read_bytes()
+        data = _read_text_file(SRC / name) if name in TEXT_FILES else (SRC / name).read_bytes()
         if name == 'index.html':
             data = _index_html()
         elif name == 'api.js':
             data = _patch_api(data)
         files.append((name, data))
     for name in OVERLAY_FILES:
-        files.append((name, (OVERLAY / name).read_bytes()))
+        files.append((name, _read_text_file(OVERLAY / name)))
     files.append(('icon.png', (ASSETS / 'belet_icon.png').read_bytes()))
     files.append(('largeIcon.png', (ASSETS / 'belet_large_icon.png').read_bytes()))
     files.append(('splash.png', (ASSETS / 'belet_splash.png').read_bytes()))

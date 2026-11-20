@@ -14,3 +14,5 @@ belet_samsung_native/*.css text eol=lf
 *.wgt binary
 belet_samsung_native/*.LICENSE text eol=lf
 belet_samsung_native/hls.min.js text eol=lf
+belet_lg_client/*.js text eol=lf
+lg-belet/*.ipk binary

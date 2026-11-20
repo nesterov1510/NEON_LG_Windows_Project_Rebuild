@@ -66,22 +66,28 @@ def test_appinfo_and_assets_match_webos_requirements():
     assert b'<widget' not in files['appinfo.json']
 
 
+def lf(data):
+    """The IPK is line-ending independent; compare against LF-normalised sources."""
+    return data.replace(b'\r\n', b'\n')
+
+
 def test_shared_client_sources_are_identical_except_webos_overlays():
     files = ipk_files(belet_lg_client.build_ipk(mtime=1700000000))
     for name in belet_lg_client.SHARED_FILES:
         if name in ('index.html', 'api.js'):
             continue
-        assert files[name] == (SRC / name).read_bytes(), f'{name} is the shared client file'
+        expected = lf((SRC / name).read_bytes()) if name in belet_lg_client.TEXT_FILES else (SRC / name).read_bytes()
+        assert files[name] == expected, f'{name} is the shared client file'
 
     html = files['index.html'].decode('utf-8')
-    original = (SRC / 'index.html').read_text(encoding='utf-8')
+    original = lf((SRC / 'index.html').read_bytes()).decode('utf-8')
     assert html == original.replace('<script src="hls.min.js"></script>\n',
                                     '<script src="webos-shim.js"></script>\n<script src="hls.min.js"></script>\n', 1)
     assert html.index('webos-shim.js') < html.index('api.js')
 
     api = files['api.js'].decode('utf-8')
     assert "'LG webOS '" in api and "'Samsung Tizen '" not in api
-    assert api.replace("'LG webOS '", "'Samsung Tizen '") == (SRC / 'api.js').read_text(encoding='utf-8')
+    assert api.replace("'LG webOS '", "'Samsung Tizen '") == lf((SRC / 'api.js').read_bytes()).decode('utf-8')
 
     shim = files['webos-shim.js'].decode('utf-8')
     assert 'platformBack' in shim and 'getCapability' in shim
