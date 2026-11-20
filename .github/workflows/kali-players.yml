@@ -1,0 +1,32 @@
+name: Standalone Kali desktop players
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'kali-desktop/**'
+      - 'belet_samsung_native/**'
+      - 'alemtv_app.py'
+      - '.github/workflows/kali-players.yml'
+permissions:
+  contents: read
+jobs:
+  installed-players:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install committed DEBs and launch both clients in WebKitGTK
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ./kali-desktop/packages/*.deb xvfb xauth desktop-file-utils
+          for app in beletfilm alemtv; do
+            desktop-file-validate /usr/share/applications/$app.desktop
+            xvfb-run -a /usr/bin/python3 kali-desktop/smoke.py "$app"
+          done
+      - name: Rebuild and compare installed payloads
+        run: |
+          python3 kali-desktop/build.py
+          for app in beletfilm alemtv; do
+            dpkg-deb -x kali-desktop/packages/${app}_*_all.deb "$RUNNER_TEMP/$app"
+            diff -r /usr/share/$app "$RUNNER_TEMP/$app/usr/share/$app"
+            cmp /usr/bin/$app "$RUNNER_TEMP/$app/usr/bin/$app"
+          done
