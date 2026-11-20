@@ -32,16 +32,15 @@ OVERLAY_FILES = ('webos-shim.js',)
 # text files are normalised to LF while packaging (Windows checkouts are CRLF).
 TEXT_FILES = ('index.html', 'style.css', 'api.js', 'app.js', 'hls.min.js', 'hls.LICENSE', 'webos-shim.js')
 # The client files are shipped verbatim: api.js sends "Samsung Tizen <model>" and
-# a Tizen os_version in the device registration body, and the Belet backend only
-# answers the login-code/QR flow for that shape, so the webOS build must not
-# rewrite it. Only the overlay script tag is injected into index.html.
+# a Tizen os_version when registering the device after login. Keep the same
+# auth and registration contract on both platforms. Only the overlay script tag is injected into index.html.
 SHIM_TAG = '<script src="webos-shim.js"></script>\n'
 
 
 # webOS only accepts x.y.z for appinfo.json and needs a higher value to upgrade
 # an already installed package, so the IPK carries its own revision while the
 # Samsung widget keeps the version from the Tizen manifest.
-WEBOS_REVISION = 1
+WEBOS_REVISION = 3
 
 
 def manifest_version():
@@ -172,10 +171,16 @@ def build_ipk(mtime=None, version=None):
     files = package_files(version)
     base = f'usr/palm/applications/{APP_ID}'
 
-    data_members = []
-    for name in _directories(base):
-        data_members.append((name + '/', b''))
-    data_members.extend((f'{base}/{name}', payload) for name, payload in files)
+    service = APP_ID + '.qr'
+    service_root = f'usr/palm/services/{service}'
+    package_root = f'usr/palm/packages/{APP_ID}'
+    metadata = {'id': APP_ID, 'app': APP_ID, 'version': version or app_version(), 'services': [service]}
+    payloads = [(f'{base}/{name}', payload) for name, payload in files]
+    for name in ('package.json', 'services.json', 'qr.js'):
+        payloads.append((f'{service_root}/{name}', _read_text_file(OVERLAY / 'qr-service' / name)))
+    payloads.append((f'{package_root}/packageinfo.json', json.dumps(metadata).encode('utf-8')))
+    dirs = dict.fromkeys(d for root in (base, service_root, package_root) for d in _directories(root))
+    data_members = [(d + '/', b'') for d in dirs] + payloads
 
     tar, gz, data_buf = _gzipped_tar(mtime)
     with tar:
@@ -198,7 +203,7 @@ def build_ipk(mtime=None, version=None):
                 tar.addfile(info, io.BytesIO(payload))
     gz.close()
 
-    installed_kb = max(1, (sum(len(payload) for _, payload in files) + 1023) // 1024)
+    installed_kb = max(1, (sum(len(payload) for _, payload in payloads) + 1023) // 1024)
     control = (
         f'Package: {APP_ID}\n'
         f'Version: {app_info(version)["version"]}\n'

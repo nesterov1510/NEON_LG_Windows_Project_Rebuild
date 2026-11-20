@@ -9,8 +9,7 @@
  *     tizen.systeminfo, tizen.tvinputdevice, tizen.application) are emulated so
  *     the client runs exactly the same code path as on a Samsung TV: the device
  *     registration body still says "Samsung Tizen <model>" and os_version still
- *     looks like a Tizen release, which is what the Belet backend expects when
- *     the login code / QR flow is started;
+ *     looks like a Tizen release during post-login registration;
  *   • the Magic Remote pointer moves the DOM focus, because the client keeps a
  *     keyboard focus model instead of mouse hover;
  *   • Back on the first screen leaves the app instead of doing nothing.
@@ -23,6 +22,13 @@
   var doc = global.document;
   var modelName = '';
   var realOsVersion = '';
+
+  /* wire() and screen() iterate querySelectorAll results. Older webOS DOMs
+   * lack NodeList.forEach even though Array.forEach is available. Install it
+   * before app.js boots, otherwise the login buttons never get handlers. */
+  if (global.NodeList && !global.NodeList.prototype.forEach) {
+    global.NodeList.prototype.forEach = Array.prototype.forEach;
+  }
 
   /* Reported to the backend through tizen.systeminfo, so keep the shape of a
    * Tizen release: api.js sends it as os_version of the device registration. */
@@ -185,6 +191,35 @@
       }, false);
     }, 0);
   } catch (e) {}
+
+  /* A packaged app can display get-qrcode while Chromium blocks the cross-origin
+   * JSON POST. Only QR polling uses the local service; keep Samsung's XHR path
+   * available if the LS2 bridge/service is unavailable on this firmware. */
+  var Bridge = global.WebOSServiceBridge || global.PalmServiceBridge;
+  if (Bridge) {
+    global.beletCheckQrNative = function (code, fingerprint, web, callback) {
+      var bridge, timer, done = false;
+      function finish(status, data) {
+        if (done) return;
+        done = true;
+        global.clearTimeout(timer);
+        callback(status, data);
+      }
+      try {
+        bridge = new Bridge();
+        bridge.onservicecallback = function (raw) {
+          var response;
+          try { response = JSON.parse(raw); } catch (e) {}
+          finish(response && response.returnValue && Number(response.status) || 0, response && response.data);
+        };
+        timer = global.setTimeout(function () {
+          try { bridge.cancel(); } catch (e) {}
+          finish(0);
+        }, 16000);
+        bridge.call('luna://tm.belet.neonclient.qr/check', JSON.stringify({ code: code, fingerprint: fingerprint, web: web }));
+      } catch (e) { finish(0); }
+    };
+  }
 
   global.__NEON_TV_PLATFORM__ = 'webos';
 }(this));

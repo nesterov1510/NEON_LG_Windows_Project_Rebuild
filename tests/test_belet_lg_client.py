@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import shutil
@@ -116,8 +117,7 @@ def test_committed_ipk_matches_sources():
     assert committed.is_file(), 'run scripts/build_belet_lg_client.py'
     data = committed.read_bytes()
     validate_ipk(data)
-    assert ipk_files(data) == ipk_files(belet_lg_client.build_ipk())
-    assert data == belet_lg_client.build_ipk(), 'the IPK is byte-reproducible: rebuild it with scripts/build_belet_lg_client.py'
+    assert hashlib.sha256(data).hexdigest() == hashlib.sha256(belet_lg_client.build_ipk()).hexdigest(), 'the IPK is byte-reproducible: rebuild it with scripts/build_belet_lg_client.py'
 
 
 def test_api_exposes_lg_client_actions(tmp_path, monkeypatch):
@@ -156,6 +156,25 @@ def test_webos_shim_runs_on_a_fake_webos_dom():
                             capture_output=True, text=True, encoding='utf-8', timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'belet_lg_shim_mock: ok' in result.stdout
+
+
+def test_packaged_qr_login_on_legacy_webos(tmp_path):
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js is not available')
+    files = ipk_files((ROOT / 'lg-belet' / belet_lg_client.PACKAGE_NAME).read_bytes())
+    for name in ('webos-shim.js', 'api.js', 'app.js'):
+        (tmp_path / name).write_bytes(files[name])
+    service = belet_lg_client.APP_ID + '.qr'
+    with tarfile.open(fileobj=io.BytesIO(ar_members((ROOT / 'lg-belet' / belet_lg_client.PACKAGE_NAME).read_bytes())['data.tar.gz'])) as tar:
+        meta = json.load(tar.extractfile(f'usr/palm/packages/{belet_lg_client.APP_ID}/packageinfo.json'))
+        assert meta['app'] == belet_lg_client.APP_ID and meta['services'] == [service]
+        root = f'usr/palm/services/{service}'
+        package = json.load(tar.extractfile(root + '/package.json'))
+        assert package['name'] == json.load(tar.extractfile(root + '/services.json'))['services'][0]['name'] == service
+        (tmp_path / 'qr.js').write_bytes(tar.extractfile(root + '/' + package['main']).read())
+    subprocess.run([node, str(ROOT / 'tests/belet_samsung_client_mock.js'), str(tmp_path), '--webos-qr'],
+                   check=True, timeout=60)
 
 
 def test_qt_ui_wires_the_lg_client_actions():

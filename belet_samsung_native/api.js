@@ -343,40 +343,18 @@
     });
   }
 
-  function qrCheck(code, callback) {
-    rawRequest({
-      method: 'POST',
-      url: HOSTS.auth + '/api/v1/auth/check-qrcode',
-      body: { code: code, fingerprint: device }
-    }, function (err, data, http) {
-      if (err) {
-        // HTTP 400 means "not scanned yet" for this endpoint.
-        if (err.http === 400) return callback(apiError('pending', 400), data, 400);
-        return callback(err, null, http);
-      }
-      if (data && typeof data.token === 'string' && data.token) {
-        generation += 1;
-        persist({ token: data.token, refresh_token: String(data.refresh_token || ''), fingerprint: device, saved_at: Date.now() });
-        return callback(null, data, 200);
-      }
-      callback(apiError('pending', 200), data, 200);
-    });
-  }
-
-  function qrCheckWeb(code, callback) {
-    // The web variant is a documented fallback for accounts bound to the web QR flow.
-    rawRequest({
-      method: 'POST',
-      url: HOSTS.auth + '/api/v1/auth/check-qrcode-web',
-      body: { code: code, fingerprint: device }
-    }, function (err, data, http) {
-      if (err) return callback(err, null, http);
-      if (data && typeof data.token === 'string' && data.token) {
-        generation += 1;
-        persist({ token: data.token, refresh_token: String(data.refresh_token || ''), fingerprint: device, saved_at: Date.now() });
-        return callback(null, data, http);
-      }
-      callback(apiError('pending', http), data, http);
+  function qrCheck(code, web, callback) {
+    function direct() {
+      rawRequest({
+        method: 'POST',
+        url: HOSTS.auth + '/api/v1/auth/check-qrcode' + (web ? '-web' : ''),
+        body: { code: code, fingerprint: device }
+      }, callback);
+    }
+    if (!global.beletCheckQrNative) return direct();
+    global.beletCheckQrNative(code, device, web, function (http, data) {
+      if (!http) return direct();
+      callback(http >= 200 && http < 300 ? null : errorFromStatus(http, null), data, http);
     });
   }
 
@@ -832,11 +810,20 @@
     checkCode: checkCode,
     qrCode: qrCode,
     qrCheck: function (code, callback) {
-      qrCheck(code, function (err, data, http) {
-        if (!err || err.kind === 'pending' || err.http === 400) return callback(err, data, http);
-        if (err.kind !== 'missing' && err.http !== 404 && err.http !== 405) return callback(err, data, http);
-        qrCheckWeb(code, callback);
+      function result(err, data, http) {
+        if ((err && http === 400) || (!err && !(data && typeof data.token === 'string' && data.token))) {
+          return callback(apiError('pending', http), null, http);
+        }
+        callback(err, data, http);
+      }
+      qrCheck(code, false, function (err, data, http) {
+        if (http === 404 || http === 405) return qrCheck(code, true, result);
+        result(err, data, http);
       });
+    },
+    acceptQrSession: function (data) {
+      generation += 1;
+      persist({ token: data.token, refresh_token: String(data.refresh_token || ''), fingerprint: device, saved_at: Date.now() });
     },
     logout: logout,
     home: home,

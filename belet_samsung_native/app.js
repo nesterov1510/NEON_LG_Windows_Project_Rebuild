@@ -680,6 +680,7 @@
         Belet.qrCheck(code, function (checkErr, checkData) {
           if (generation !== state.qr.generation) return;
           if (!checkErr && checkData && checkData.token) {
+            Belet.acceptQrSession(checkData);
             stopQr();
             $('qrStatus').textContent = 'Вход выполнен.';
             registerDevice();
@@ -690,7 +691,13 @@
             state.qr.timer = setTimeout(poll, 3000);
             return;
           }
-          $('qrStatus').textContent = 'Не удалось проверить QR-код. Обновите его или войдите по SMS.';
+          var status = checkErr ? checkErr.http : 0;
+          if (!status || status === 408 || status === 429 || status >= 500) {
+            $('qrStatus').textContent = 'Проверка QR: HTTP ' + status + '. Повторяем запрос…';
+            state.qr.timer = setTimeout(poll, 5000);
+            return;
+          }
+          $('qrStatus').textContent = 'Не удалось проверить QR-код (HTTP ' + status + '). Обновите его или войдите по SMS.';
         });
       }
       state.qr.timer = setTimeout(poll, 2500);

@@ -17,6 +17,13 @@ const srcArg = process.argv[2] || path.join(__dirname, '..', 'belet_samsung_nati
 // Accept either the client directory or the path of app.js.
 const srcDir = srcArg.endsWith('.js') ? path.dirname(srcArg) : srcArg;
 
+const webosQr = process.argv[3] === '--webos-qr';
+// Older webOS engines return indexed NodeLists with no native forEach.
+function LegacyNodeList(nodes) {
+  this.length = nodes.length;
+  nodes.forEach((node, i) => { this[i] = node; });
+}
+
 /* ── DOM ───────────────────────────────────────────────────────────── */
 
 let document;
@@ -170,7 +177,8 @@ function descendants(node, out) {
 }
 
 Element.prototype.querySelectorAll = function (selector) {
-  return descendants(this).filter(node => !node._selectorOnly && matchesSelector(node, selector));
+  const nodes = descendants(this).filter(node => !node._selectorOnly && matchesSelector(node, selector));
+  return webosQr ? new LegacyNodeList(nodes) : nodes;
 };
 Element.prototype.querySelector = function (selector) {
   return this.querySelectorAll(selector)[0] || null;
@@ -492,6 +500,41 @@ sandbox.self = sandbox;
 sandbox.navigator = { userAgent: 'Tizen' };
 
 vm.createContext(sandbox);
+if (webosQr) {
+  sandbox.navigator.userAgent = 'Mozilla/5.0 (Web0S; Linux/SmartTV) Chrome/38.0';
+  sandbox.NodeList = LegacyNodeList;
+  let check;
+  const serviceId = 'tm.belet.neonclient.qr';
+  const replies = [[503, {}], [400, {}], [200, { token: 'qr-access', refresh_token: 'qr-refresh' }]];
+  const dependencies = {
+    './package.json': { name: serviceId },
+    'webos-service': function () { this.register = (method, fn) => { assert.strictEqual(method, 'check'); check = fn; }; },
+    https: { request(opts, cb) {
+      assert.strictEqual(opts.hostname, 'beletapis.com');
+      assert.strictEqual(opts.path, '/api/v1/auth/check-qrcode');
+      assert.strictEqual(opts.method, 'POST');
+      return { on() {}, end(body) {
+        assert.deepStrictEqual(JSON.parse(body), { code: 'qr-code-1', fingerprint: store.neon_belet_samsung_device_v2 });
+        assert.strictEqual(opts.headers.fingerprint, JSON.parse(body).fingerprint);
+        const [statusCode, data] = replies.shift();
+        cb({ statusCode, setEncoding() {}, on(event, fn) {
+          if (event === 'data') fn(JSON.stringify(data));
+          if (event === 'end') fn();
+        } });
+      } };
+    } }
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(srcDir, 'qr.js'), 'utf8'), {
+    require: name => dependencies[name], Buffer, setTimeout, clearTimeout
+  });
+  sandbox.PalmServiceBridge = function () {
+    this.call = (url, args) => {
+      assert.strictEqual(url, 'luna://' + serviceId + '/check');
+      check({ payload: JSON.parse(args), respond: r => this.onservicecallback(JSON.stringify(r)) });
+    };
+  };
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'webos-shim.js'), 'utf8'), sandbox, { filename: 'webos-shim.js' });
+}
 vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), sandbox, { filename: 'api.js' });
 vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), sandbox, { filename: 'app.js' });
 
@@ -527,6 +570,35 @@ runTimers();
 assert(!ids.login.classList.contains('hidden'), 'login is shown without a session');
 assert.strictEqual(ids.methodValue.textContent, 'SMS');
 assert.strictEqual(calls.filter(c => c.url.indexOf('available-otp') >= 0).length, 1);
+
+function testQrLogin() {
+  route('/api/v1/auth/get-qrcode', 200, {
+    code: 'https://film.belet.me/register/qr-code-1',
+    qr_png: 'iVBORw0KGgoAAAANSUhEUg=='
+  });
+  click(ids.toQr);
+  assert(!ids.loginQr.classList.contains('hidden'));
+  assert(ids.qrImage.src.indexOf('data:image/png;base64,') === 0);
+  const qrCheckRoute = timers.find(t => t.delay >= 2000);
+  assert(qrCheckRoute, 'QR polling scheduled');
+  if (webosQr) {
+    runTimers();
+    assert(ids.qrStatus.textContent.includes('503'), 'transient service error is retried');
+  } else route('/api/v1/auth/check-qrcode', 400, { message: 'waiting' });
+  runTimers();
+  if (!webosQr) route('/api/v1/auth/check-qrcode', 200, { token: 'qr-access', refresh_token: 'qr-refresh' });
+  route('/api/v1/users/device', 200, { msg: 'Successfully added' });
+  route('/api/v2/home_page', 200, { status: 'ok', result: [] });
+  runTimers();
+  assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, 'qr-access');
+  assert(!ids.home.classList.contains('hidden'), 'QR login opens home');
+}
+
+if (webosQr) {
+  testQrLogin();
+  console.log('webos IPK QR login: ok');
+  process.exit(0);
+}
 
 /* 2. Phone entry through the on-screen numeric pad */
 click(ids.phoneDisplay);
@@ -924,23 +996,7 @@ assert(!store.neon_belet_samsung_session_v2, 'session removed');
 assert(!ids.login.classList.contains('hidden'), 'back at login');
 
 /* 12. QR sign-in flow */
-route('/api/v1/auth/get-qrcode', 200, {
-  code: 'https://film.belet.me/register/qr-code-1',
-  qr_png: 'iVBORw0KGgoAAAANSUhEUg=='
-});
-click(ids.toQr);
-assert(!ids.loginQr.classList.contains('hidden'));
-assert(ids.qrImage.src.indexOf('data:image/png;base64,') === 0);
-const qrCheckRoute = timers.find(t => t.delay >= 2000);
-assert(qrCheckRoute, 'QR polling scheduled');
-route('/api/v1/auth/check-qrcode', 400, { message: 'waiting' });
-runTimers();
-route('/api/v1/auth/check-qrcode', 200, { token: 'qr-access', refresh_token: 'qr-refresh' });
-route('/api/v1/users/device', 200, { msg: 'Successfully added' });
-route('/api/v2/home_page', 200, { status: 'ok', result: [] });
-runTimers();
-assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, 'qr-access');
-assert(!ids.home.classList.contains('hidden'), 'QR login opens home');
+testQrLogin();
 
 /* 13. A 401 refreshes the token once and retries the same request */
 route('/api/v2/home_page', 200, {

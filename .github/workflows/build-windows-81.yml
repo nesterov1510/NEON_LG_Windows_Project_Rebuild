@@ -22,59 +22,12 @@ jobs:
           python -m pip install --upgrade "pip<25"
           python -m pip install -r requirements-legacy.txt pytest pytest-timeout
 
-      - name: Diagnose the hanging test (temporary)
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          $env:PYTHONUNBUFFERED = '1'
-          Remove-Item diag.txt -ErrorAction SilentlyContinue
-          $proc = Start-Process -FilePath 'python' `
-            -ArgumentList '-X','faulthandler','-c',"import faulthandler,sys,pytest; faulthandler.dump_traceback_later(90, repeat=True); sys.exit(pytest.main(['-v','--tb=short','-p','no:cacheprovider']))" `
-            -RedirectStandardOutput 'diag.txt' -RedirectStandardError 'diag.txt' -NoNewWindow -PassThru
-          if (-not $proc.WaitForExit(420000)) {
-            try { $proc.Kill($true) } catch { try { $proc.Kill() } catch {} }
-          }
-          if (Test-Path diag.txt) {
-            Get-Content diag.txt -Tail 400
-            Get-Content diag.txt -Tail 60 | ForEach-Object { Write-Host "::error::$_" }
-          }
-        env:
-          QT_QPA_PLATFORM: offscreen
-
       - name: Run unit & Qt UI tests
-        shell: pwsh
-        run: |
-          $env:PYTHONUNBUFFERED = '1'
-          foreach ($attempt in 1, 2) {
-            Remove-Item pytest_report.txt, pytest_error.txt -ErrorAction SilentlyContinue
-            $proc = Start-Process -FilePath 'python' `
-              -ArgumentList '-m','pytest','-v','--tb=short','--timeout=300' `
-              -RedirectStandardOutput 'pytest_report.txt' `
-              -RedirectStandardError 'pytest_error.txt' `
-              -NoNewWindow -PassThru
-            # Watchdog: a hung test must fail the step instead of eating the job.
-            $finished = $proc.WaitForExit(900000)
-            if (-not $finished) {
-              Write-Host "::error::pytest did not finish within 15 minutes; killing it (last started test is in the tail below)"
-              try { $proc.Kill($true) } catch { try { $proc.Kill() } catch {} }
-            }
-            if (Test-Path pytest_report.txt) {
-              Get-Content pytest_report.txt -Tail 400
-              Get-Content pytest_report.txt | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-            }
-            if (Test-Path pytest_error.txt) { Get-Content pytest_error.txt -Tail 100 }
-            $code = if ($finished) { $proc.ExitCode } else { 1 }
-            if ($code -eq 0) { break }
-            Write-Host "pytest failed (attempt $attempt, exit $code)"
-            if ($attempt -eq 2) {
-              Select-String -Path pytest_report.txt -Pattern '^FAILED ', '^E   ', '^tests/', 'PASSED' -ErrorAction SilentlyContinue |
-                Select-Object -Last 15 |
-                ForEach-Object { Write-Host "::error::$(($_.Line) -replace '%','%25' -replace '\r','%0D' -replace '\n','%0A')" }
-              exit 1
-            }
-          }
+        timeout-minutes: 15
         env:
           QT_QPA_PLATFORM: offscreen
+          PYTHONUNBUFFERED: '1'
+        run: python -m pytest -v --tb=short --timeout=120
 
       - name: Build NeonLGControl81.exe (PyInstaller)
         run: |
@@ -107,6 +60,9 @@ jobs:
           Write-Host "Verified bundled Belet Samsung client: $beletWgt"
           $beletIpk = Get-ChildItem -Path "dist\NeonLGControl81" -Filter "BeletLgClient-webOS-unsigned.ipk" -Recurse | Select-Object -First 1 -ExpandProperty FullName
           if (-not $beletIpk) { throw "Bundled Belet LG client IPK missing" }
+          if ((Get-FileHash $beletIpk).Hash -ne (Get-FileHash "lg-belet/BeletLgClient-webOS-unsigned.ipk").Hash) {
+            throw "Embedded LG IPK differs from tested release file"
+          }
           Write-Host "Verified bundled Belet LG client: $beletIpk"
 
       - name: Locate or install NSIS 3.x
@@ -176,9 +132,8 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path "dist\NeonLGControl81" -DestinationPath "dist\NeonLGControl-Windows81-Portable.zip" -Force
 
-      - name: Build Belet LG webOS client IPK
+      - name: Stage tested Belet LG webOS client IPK
         run: |
-          python scripts/build_belet_lg_client.py
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item "lg-belet/BeletLgClient-webOS-unsigned.ipk" "dist/BeletLgClient-webOS-unsigned.ipk" -Force
           Get-Item "dist/BeletLgClient-webOS-unsigned.ipk" | Select-Object Name, Length
@@ -193,6 +148,7 @@ jobs:
             "dist/NEON_Setup_Win81_10_11.exe" `
             "dist/NeonLGControl-Windows81-Portable.zip" `
             "dist/BeletLgClient-webOS-unsigned.ipk" `
+            --target $env:GITHUB_SHA `
             --draft `
             --title "Windows Installer build $env:GITHUB_RUN_NUMBER" `
             --notes "Windows installer and portable bundle built from commit $env:GITHUB_SHA." `

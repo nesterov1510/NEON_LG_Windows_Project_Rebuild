@@ -33,7 +33,7 @@ jobs:
             }
           }
 
-      - run: python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "ui.html;." --add-data "assets;assets" --add-data "samsung-belet/BeletSamsungClient-unsigned.wgt;samsung-belet" --uac-admin app.py
+      - run: python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "ui.html;." --add-data "assets;assets" --add-data "lg-belet;lg-belet" --add-data "samsung-belet/BeletSamsungClient-unsigned.wgt;samsung-belet" --uac-admin app.py
       - name: Verify bundled Samsung Belet client
         shell: pwsh
         run: |
