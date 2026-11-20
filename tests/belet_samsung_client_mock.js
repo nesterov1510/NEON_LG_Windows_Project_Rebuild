@@ -796,16 +796,11 @@ route('/api/v3/files/701?type=4', 200, { sources: [
   { filename: 'https://cdn.example/a.m3u8', quality: '720p' },
   { filename: 'https://cdn.example/video/high?token=signed', type: 'application/vnd.apple.mpegurl', quality_label: '1080p' }
 ], session_id: 'belet-player-session' });
-routeText('https://cdn.example/a.m3u8', 200,
-  '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1200000\nv2/prog_index.m3u8\n');
 click(ids.episodeList.querySelectorAll('.episode')[0]);
 const hlsPlayer = FakeHls.instances[FakeHls.instances.length - 1];
 assert(hlsPlayer, 'hls.js instance created');
-assert.strictEqual(hlsPlayer.url, 'blob:belet-1', 'Belet manifests are assembled into an MSE master playlist');
-assert(blobRecords[hlsPlayer.url].parts.join('').includes('https://cdn.example/video/high?token=signed'),
-  'the master playlist keeps signed extensionless HLS sources');
-assert(blobRecords[hlsPlayer.url].parts.join('').includes('https://cdn.example/480/v2/prog_index.m3u8'),
-  'Belet v2 playlist paths are mapped to their quality directory');
+assert.strictEqual(hlsPlayer.url, 'https://cdn.example/video/high?token=signed',
+  'hls.js opens the selected original Belet source directly');
 assert.strictEqual(hlsPlayer.config.enableWorker, false, 'no blob workers, CSP stays strict');
 assert.strictEqual(ids.video.paused, false, 'hls.js playback started on the video element');
 assert.strictEqual(avplayCalls.length, 0, 'Belet HLS/MSE is preferred before AVPlay');
@@ -819,20 +814,24 @@ fireKey(10009);
 route('/api/v3/files/701?type=4', 200, { sources: [
   { filename: 'https://cdn.example/c.m3u8', quality: '1080p' }
 ], session_id: 'belet-player-session' });
-routeText('https://cdn.example/c.m3u8', 200, '#EXTM3U\n#EXTINF:5,\nsegment.ts\n');
 click(ids.episodeList.querySelectorAll('.episode')[0]);
 const authedPlayer = FakeHls.instances[FakeHls.instances.length - 1];
 const sessionToken = JSON.parse(store.neon_belet_samsung_session_v2).token;
-route('/api/v2/auth/refresh-mobile', 200, { token: sessionToken, refresh_token: 'refresh-token' });
 const hlsLoader = new authedPlayer.config.loader({});
 const hlsContext = { url: 'https://cdn.example/c.m3u8', headers: {} };
+const refreshCountBeforeMediaLoad = calls.filter(c => c.url.indexOf('/api/v2/auth/refresh-mobile') >= 0).length;
 hlsLoader.load(hlsContext, {}, {});
+assert.strictEqual(calls.filter(c => c.url.indexOf('/api/v2/auth/refresh-mobile') >= 0).length,
+  refreshCountBeforeMediaLoad, 'media requests use the current token without refreshing on every playlist/segment');
 assert.strictEqual(hlsLoader.loader.context.headers.Authorization, sessionToken, 'manifest/segments ask with the access token');
 assert.deepStrictEqual(Object.keys(hlsLoader.loader.context.headers), [
-  'X-Platform', 'X-VersionCode', 'X-Player-Session-Id', 'Fingerprint', 'Authorization'
-], 'media requests use Belet web-player headers and the files session id');
+  'X-Platform', 'X-VersionCode', 'X-Player-Session-Id', 'fingerprint', 'Authorization'
+], 'media requests match the Android ExoPlayer headers');
+assert.strictEqual(hlsLoader.loader.context.headers['X-Platform'], 'Android');
+assert.strictEqual(hlsLoader.loader.context.headers['X-VersionCode'], '182');
+assert.strictEqual(hlsLoader.loader.context.headers.fingerprint, JSON.parse(store.neon_belet_samsung_session_v2).fingerprint,
+  'the Android fingerprint header is sent on manifests');
 authedPlayer.handlers.levelLoaded({}, { level: 2, details: { totalduration: 15, fragments: [{}, {}, {}] } });
-route('/api/v2/auth/refresh-mobile', 200, { token: sessionToken, refresh_token: 'refresh-token' });
 const fragmentLoader = new authedPlayer.config.fLoader({});
 fragmentLoader.load({ url: 'https://cdn.example/segment.ts', headers: {}, frag: { level: 2 } }, {}, {});
 assert.strictEqual(fragmentLoader.loader.context.headers['X-Chunk-Length'], '5000',
@@ -841,12 +840,10 @@ assert.strictEqual(fragmentLoader.loader.context.headers['X-Chunk-Length'], '500
 /* first 401 refreshes the token before replaying the Belet web-player request */
 const instancesBefore = FakeHls.instances.length;
 route('/api/v2/auth/refresh-mobile', 200, { token: 'media-token', refresh_token: 'media-refresh' });
-routeText('https://cdn.example/c.m3u8', 200, '#EXTM3U\n#EXTINF:5,\nsegment.ts\n');
 authedPlayer.handlers.error({}, { fatal: true, details: 'manifestLoadError', response: { code: 401 } });
 const replay = FakeHls.instances[FakeHls.instances.length - 1];
 assert.strictEqual(FakeHls.instances.length, instancesBefore + 1, 'a media 401 restarts hls.js');
-assert.strictEqual(replay.url, 'blob:belet-3', 'the Belet playlist is rebuilt after token refresh');
-route('/api/v2/auth/refresh-mobile', 200, { token: 'media-token', refresh_token: 'media-refresh' });
+assert.strictEqual(replay.url, 'https://cdn.example/c.m3u8', 'the original manifest URL is replayed after token refresh');
 const replayLoader = new replay.config.loader({});
 replayLoader.load({ url: 'https://cdn.example/c.m3u8', headers: {} }, {}, {});
 assert.strictEqual(replayLoader.loader.context.headers.Authorization, 'media-token', 'the retry uses the refreshed raw token');
@@ -854,16 +851,14 @@ assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, 'media
 
 /* a further 401 tries the CDN's Bearer scheme after the refreshed raw token */
 const instancesAfterScheme = FakeHls.instances.length;
-routeText('https://cdn.example/c.m3u8', 200, '#EXTM3U\n#EXTINF:5,\nsegment.ts\n');
 replay.handlers.error({}, { fatal: true, details: 'manifestLoadError', response: { code: 401 } });
 const replay2 = FakeHls.instances[FakeHls.instances.length - 1];
 assert.strictEqual(FakeHls.instances.length, instancesAfterScheme + 1, 'the Bearer fallback restarts hls.js');
-assert.strictEqual(replay2.url, 'blob:belet-4');
+assert.strictEqual(replay2.url, 'https://cdn.example/c.m3u8');
 assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, 'media-token', 'the refreshed session is retained');
-route('/api/v2/auth/refresh-mobile', 200, { token: 'media-token', refresh_token: 'media-refresh' });
 const replayLoader2 = new replay2.config.loader({});
 replayLoader2.load({ url: 'https://cdn.example/c.m3u8', headers: {} }, {}, {});
-assert.strictEqual(replayLoader2.loader.context.headers.Authorization, 'Bearer media-token', 'the refreshed token keeps the working scheme');
+assert.strictEqual(replayLoader2.loader.context.headers.Authorization, 'Bearer media-token', 'the retry supports CDNs that require Bearer');
 fireKey(10009);
 
 sandbox.Hls = undefined;

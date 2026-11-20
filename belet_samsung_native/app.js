@@ -1453,7 +1453,6 @@
     player.beletSessionId = window.Belet && window.Belet.newPlayerSession ?
       String(window.Belet.newPlayerSession()) : '';
     player.chunkLengths = {};
-    player.hlsBlobUrl = '';
     player.movieId = options.movieId || null;
     player.seasonId = options.seasonId || null;
     player.episodeId = options.episodeId || null;
@@ -1479,7 +1478,6 @@
   function startSources(sources, options, meta) {
     var player = state.player;
     sources = (sources || []).filter(function (source) { return source && source.url; });
-    var manifestSources = sources.slice();
     if (!sources.length) {
       playerError('Сервис не предоставил видеопоток для этого фильма.');
       return;
@@ -1491,7 +1489,6 @@
       return (parseInt(b.quality, 10) || 0) - (parseInt(a.quality, 10) || 0);
     });
     player.sources = sources;
-    player.manifestSources = manifestSources;
     if (meta && meta.sessionId) player.beletSessionId = String(meta.sessionId);
     if (window.Belet && window.Belet.newPlayerSession && meta && meta.sessionId) {
       window.Belet.newPlayerSession(player.beletSessionId);
@@ -1655,8 +1652,7 @@
         self.loader.load(context, config, callbacks);
         self.stats = self.loader.stats;
       }
-      if (window.Belet.refresh) window.Belet.refresh(function () { send(); });
-      else send();
+      send();
     };
     BeletLoader.prototype.abort = function () {
       this.cancelled = true;
@@ -1737,7 +1733,8 @@
         }
       }
       var code = status ? ' HTTP ' + status : '';
-      attemptFailed('hls ' + (data.details || data.type || 'error') + code);
+      var failedUrl = data.context && data.context.url ? hostOf(data.context.url) : '';
+      attemptFailed('hls ' + (data.details || data.type || 'error') + code + (failedUrl ? ' @ ' + failedUrl : ''));
     });
     hls.on(window.Hls.Events.LEVEL_LOADED, function (event, data) {
       var details = data && data.details;
@@ -1747,22 +1744,10 @@
       }
     });
     hls.on(window.Hls.Events.MEDIA_ATTACHED, function () {
-      window.Belet.prepareHlsManifest(player.manifestSources || player.sources, function (err, manifestUrl, isBlob) {
-        if (!player.active || player.hls !== hls) {
-          if (isBlob && manifestUrl && window.URL && window.URL.revokeObjectURL) window.URL.revokeObjectURL(manifestUrl);
-          return;
-        }
-        if (err) {
-          if (Number(err.http) === 401) {
-            player.reauthorized = true;
-            hls.loadSource(source.url);
-            return;
-          }
-          return attemptFailed('manifest ' + (err.http || err.kind || 'error'));
-        }
-        if (isBlob) player.hlsBlobUrl = manifestUrl;
-        hls.loadSource(manifestUrl || source.url);
-      });
+      if (!player.active || player.hls !== hls) return;
+      /* ExoPlayer consumes Belet's exact source URL and headers. Keep the original
+       * manifest intact so HLS.js resolves its relative playlist/segment paths. */
+      hls.loadSource(source.url);
     });
     hls.on(window.Hls.Events.MANIFEST_PARSED, function () { playVideoElement(); });
     try {
@@ -1914,12 +1899,6 @@
     if (player.hls) {
       try { player.hls.destroy(); } catch (e) {}
       player.hls = null;
-    }
-    if (player.hlsBlobUrl) {
-      try {
-        if (window.URL && window.URL.revokeObjectURL) window.URL.revokeObjectURL(player.hlsBlobUrl);
-      } catch (e) {}
-      player.hlsBlobUrl = '';
     }
     stopAvplay();
     avplaySurface(false);

@@ -29,9 +29,6 @@
     lang: 'ru'
   };
 
-  // The live belet.tm player uses the web client identity for HLS playlists/fragments.
-  var WEB_CLIENT = { platform: 'Web', version: '4.3.148', versionCode: '17300' };
-
   var SESSION_KEY = 'neon_belet_samsung_session_v2';
   var DEVICE_KEY = 'neon_belet_samsung_device_v2';
   var REQUEST_TIMEOUT = 25000;
@@ -760,214 +757,18 @@
   }
 
   var playerSession = '';
-  /* Keep the raw token used by the live belet.tm HLS client. */
+  /* The Android ExoPlayer sends the token as-is; some CDN edges accept Bearer as fallback. */
   var mediaScheme = '';
 
   function mediaHeaders(sessionId, isFragment, chunkLength) {
     var headers = {};
-    headers['X-Platform'] = WEB_CLIENT.platform;
-    headers['X-VersionCode'] = WEB_CLIENT.versionCode;
+    headers['X-Platform'] = CLIENT.platform;
+    headers['X-VersionCode'] = CLIENT.versionCode;
     headers['X-Player-Session-Id'] = String(sessionId || playerSession || '');
-    headers.Fingerprint = device || '';
+    headers.fingerprint = device || '';
     if (session && session.token) headers.Authorization = mediaScheme + session.token;
     if (isFragment) headers['X-Chunk-Length'] = String(chunkLength || '-1');
     return headers;
-  }
-
-  function mediaManifestRequest(url, retried, callback) {
-    var xhr;
-    var current;
-    if (!session || !session.token) return callback(apiError('auth', 401), null);
-    xhr = new XMLHttpRequest();
-    current = session;
-    try {
-      xhr.open('GET', url, true);
-      xhr.timeout = 15000;
-      // This first manifest request matches belet.tm: Authorization + Fingerprint only.
-      xhr.setRequestHeader('Authorization', mediaScheme + current.token);
-      if (device) xhr.setRequestHeader('Fingerprint', device);
-      xhr.onreadystatechange = function () {
-        var status;
-        if (xhr.readyState !== 4) return;
-        status = Number(xhr.status) || 0;
-        if (status >= 200 && status < 300) return callback(null, xhr.responseText || '');
-        if (status === 401 && !retried) {
-          return refreshSession(function (refreshErr) {
-            if (refreshErr) return callback(refreshErr, null);
-            mediaManifestRequest(url, true, callback);
-          });
-        }
-        callback(errorFromStatus(status, null), null);
-      };
-      xhr.onerror = function () { callback(apiError('network', 0), null); };
-      xhr.ontimeout = function () { callback(apiError('network', 0), null); };
-      xhr.send(null);
-    } catch (e) {
-      callback(apiError('network', 0), null);
-    }
-  }
-
-  function mediaOrigin(url) {
-    var match = String(url || '').match(/^(https?:\/\/[^/]+)(\/[^?#]*)?/i);
-    return match ? match[1] : '';
-  }
-
-  function mediaRoot(url) {
-    var match = String(url || '').match(/^(https?:\/\/[^/]+)(\/[^?#]*)?/i);
-    var parts;
-    if (!match) return '';
-    parts = (match[2] || '/').split('/').filter(function (part) { return !!part; });
-    if (parts.length) parts.pop();
-    if (parts.length && /^v[0-9]+$/i.test(parts[parts.length - 1])) {
-      parts.pop();
-    } else if (parts.length >= 2 && /^[0-9]+$/.test(parts[parts.length - 2]) &&
-        /^(480|720|1080)p?$/i.test(parts[parts.length - 1])) {
-      parts.splice(parts.length - 2, 2);
-    }
-    return match[1] + (parts.length ? '/' + parts.join('/') : '');
-  }
-
-  function mediaQuality(source) {
-    var value = String(source && (source.quality || source.type || source.url) || '').toLowerCase();
-    return /(?:^|[^0-9])(?:360|480)(?:p|[^0-9]|$)|\/480\//.test(value) ? '480' : '1080';
-  }
-
-  function absolutizeMediaUri(uri, sourceUrl, root, quality, addQuality) {
-    var origin;
-    var base;
-    var clean = String(uri || '').replace(/^\s+|\s+$/g, '');
-    if (!clean || /^https?:\/\//i.test(clean)) return clean;
-    origin = mediaOrigin(sourceUrl);
-    if (/^\/\//.test(clean)) return 'https:' + clean;
-    if (clean.charAt(0) === '/') return origin + clean;
-    if (root && /^(?:[0-9]+\/)?(?:480|720|1080)p?\//i.test(clean)) return root + '/' + clean;
-    if (root && /^v[0-9]+\//i.test(clean)) return root + '/' + quality + '/' + clean;
-    if (root && addQuality) return root + '/' + quality + '/' + clean;
-    if (root) return root + '/' + clean;
-    base = String(sourceUrl || '').replace(/[?#].*$/, '');
-    base = base.substring(0, base.lastIndexOf('/') + 1);
-    return base + clean;
-  }
-
-  function hlsAttributes(text) {
-    var out = [];
-    var value = String(text || '');
-    var start = 0;
-    var quoted = false;
-    var i;
-    for (i = 0; i <= value.length; i += 1) {
-      if (value.charAt(i) === '"') quoted = !quoted;
-      if (i === value.length || (value.charAt(i) === ',' && !quoted)) {
-        var part = value.substring(start, i).replace(/^\s+|\s+$/g, '');
-        if (part) out.push(part);
-        start = i + 1;
-      }
-    }
-    return out;
-  }
-
-  function hlsAttributeName(attribute) {
-    var split = String(attribute || '').indexOf('=');
-    return split < 0 ? '' : String(attribute).substring(0, split).toUpperCase();
-  }
-
-  function hlsBandwidth(attributes, value) {
-    var found = false;
-    var out = [];
-    attributes.forEach(function (attribute) {
-      var name = hlsAttributeName(attribute);
-      if (name === 'CODECS') return;
-      if (name === 'BANDWIDTH') {
-        out.push('BANDWIDTH=' + value);
-        found = true;
-      } else {
-        out.push(attribute);
-      }
-    });
-    if (!found) out.unshift('BANDWIDTH=' + value);
-    return out.join(',');
-  }
-
-  function hlsVariantEntries(text, source, index, root) {
-    var lines = String(text || '').replace(/\bv2\//g, (index === 0 ? '480' : '1080') + '/v2/').split(/\r?\n/);
-    var variants = [];
-    var attrs = null;
-    var i;
-    var line;
-    var bandwidth;
-    var quality;
-    for (i = 0; i < lines.length; i += 1) {
-      line = String(lines[i] || '').replace(/^\s+|\s+$/g, '');
-      if (/^#EXT-X-STREAM-INF:/i.test(line)) {
-        attrs = hlsAttributes(line.substring(line.indexOf(':') + 1));
-      } else if (attrs && line && line.charAt(0) !== '#') {
-        quality = /(?:^|[^0-9])480(?:p|\/|[^0-9]|$)/i.test(line) ? '480' : '1080';
-        bandwidth = quality === '480' ? '2564000' : '5128000';
-        variants.push({
-          attributes: hlsBandwidth(attrs, bandwidth),
-          uri: absolutizeMediaUri(line, source.filename || source.url, root, quality, false)
-        });
-        attrs = null;
-      }
-    }
-    return variants;
-  }
-
-  function prepareHlsManifest(sources, callback) {
-    var list = (Array.isArray(sources) ? sources : [sources]).filter(function (source) {
-      return source && (source.filename || source.url);
-    });
-    var manifests = [];
-    var pending = list.length;
-    var root;
-    var hasHls = false;
-    var failed = false;
-    var urlApi = global.URL || global.webkitURL;
-    function done(err, text, index) {
-      var variants = [];
-      var playlist = '#EXTM3U\n';
-      var i;
-      var bandwidth;
-      var blobUrl;
-      if (failed) return;
-      if (err) { failed = true; return callback(err, null, false); }
-      manifests[index] = String(text || '');
-      pending -= 1;
-      if (pending) return;
-      for (i = 0; i < list.length; i += 1) {
-        if (hasHls && /#EXT-X-STREAM-INF:/i.test(manifests[i])) {
-          variants = variants.concat(hlsVariantEntries(manifests[i], list[i], i, root));
-        } else {
-          bandwidth = mediaQuality(list[i]) === '480' ? '2564000' : '5128000';
-          variants.push({
-            attributes: 'BANDWIDTH=' + bandwidth,
-            uri: String(list[i].filename || list[i].url)
-          });
-        }
-      }
-      for (i = 0; i < variants.length; i += 1) {
-        playlist += '#EXT-X-STREAM-INF:' + variants[i].attributes + '\n' + variants[i].uri + '\n';
-      }
-      if (!variants.length) return callback(apiError('format', 200), null, false);
-      if (!global.Blob || !urlApi || !urlApi.createObjectURL) {
-        return callback(null, variants[0].uri, false);
-      }
-      try {
-        blobUrl = urlApi.createObjectURL(new global.Blob([playlist], { type: 'application/x-mpegURL' }));
-        callback(null, blobUrl, true);
-      } catch (e) {
-        callback(null, variants[0].uri, false);
-      }
-    }
-    if (!list.length) return callback(apiError('empty', 200), null, false);
-    root = mediaRoot(list[0].filename || list[0].url);
-    hasHls = list.some(function (source) { return /\.m3u8(?:[?#]|$)/i.test(source.filename || source.url); });
-    list.forEach(function (source, index) {
-      var url = String(source.filename || source.url);
-      if (!hasHls) return done(null, '', index);
-      if (!/\.m3u8(?:[?#]|$)/i.test(url)) return done(null, '', index);
-      mediaManifestRequest(url, false, function (err, text) { done(err, text, index); });
-    });
   }
 
   function nextMediaScheme() {
@@ -1061,7 +862,6 @@
     mediaHeaders: mediaHeaders,
     nextMediaScheme: nextMediaScheme,
     newPlayerSession: newPlayerSession,
-    prepareHlsManifest: prepareHlsManifest,
     healthCheck: healthCheck,
     listFrom: listFrom,
     sourcesFrom: sourcesFrom,
