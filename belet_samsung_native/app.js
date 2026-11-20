@@ -1324,7 +1324,7 @@
     if (last && Number(last.episode_id) === Number(episode.id)) resumeAt = Number(last.episode_watch_time || 0);
     if (episode.raw && Number(episode.raw.watch_time || 0) > resumeAt) resumeAt = Number(episode.raw.watch_time);
     if (episode.raw && Array.isArray(episode.raw.sources) && episode.raw.sources.length) {
-      playSources(Belet.sourcesFrom(episode.raw), {
+      playById(episode.id, typeId, {
         title: movieTitle(movie),
         subtitle: episode.name,
         movieId: movie.id,
@@ -1332,7 +1332,8 @@
         episodeId: episode.id,
         startAt: resumeAt,
         trackProgress: true,
-        typeId: typeId
+        typeId: typeId,
+        fallbackSources: Belet.sourcesFrom(episode.raw)
       });
       return;
     }
@@ -1384,13 +1385,17 @@
     options = options || {};
     options.title = options.title || '';
     openPlayer(options);
-    Belet.files(id, typeId, function (err, sources) {
+    Belet.files(id, typeId, function (err, sources, meta) {
       if (err) {
         if (handleAuthError(err)) return;
+        if (options.fallbackSources && options.fallbackSources.length) {
+          startSources(options.fallbackSources, options);
+          return;
+        }
         playerError(describeError(err));
         return;
       }
-      startSources(sources, options);
+      startSources(sources, options, meta);
     });
   }
 
@@ -1402,8 +1407,7 @@
 
   /* ── player ───────────────────────────────────────────────────────── */
 
-  /* Try Samsung's native adaptive-streaming engine first, then hls.js over MSE, and finally
-     the plain <video> element for sources the TV can play natively. */
+  /* Follow belet.tm's HLS.js/MSE path first, with AVPlay and native video as fallbacks. */
   function avplayApi() {
     try {
       if (window.webapis && window.webapis.avplay) return window.webapis.avplay;
@@ -1446,7 +1450,10 @@
     player.started = false;
     player.reauthorized = false;
     player.attempts = [];
-    if (window.Belet && window.Belet.newPlayerSession) window.Belet.newPlayerSession();
+    player.beletSessionId = window.Belet && window.Belet.newPlayerSession ?
+      String(window.Belet.newPlayerSession()) : '';
+    player.chunkLengths = {};
+    player.hlsBlobUrl = '';
     player.movieId = options.movieId || null;
     player.seasonId = options.seasonId || null;
     player.episodeId = options.episodeId || null;
@@ -1469,9 +1476,10 @@
     try { $('video').removeAttribute('src'); $('video').load(); } catch (e) {}
   }
 
-  function startSources(sources, options) {
+  function startSources(sources, options, meta) {
     var player = state.player;
     sources = (sources || []).filter(function (source) { return source && source.url; });
+    var manifestSources = sources.slice();
     if (!sources.length) {
       playerError('Сервис не предоставил видеопоток для этого фильма.');
       return;
@@ -1483,6 +1491,12 @@
       return (parseInt(b.quality, 10) || 0) - (parseInt(a.quality, 10) || 0);
     });
     player.sources = sources;
+    player.manifestSources = manifestSources;
+    player.beletSessionId = meta && meta.sessionId ? String(meta.sessionId) : '';
+    if (window.Belet && window.Belet.newPlayerSession && player.beletSessionId) {
+      window.Belet.newPlayerSession(player.beletSessionId);
+    }
+    player.chunkLengths = {};
     player.sourceIndex = 0;
     player.strategyIndex = 0;
     player.failed = false;
@@ -1500,8 +1514,8 @@
     var list = [];
     var hlsWorks = false;
     try { hlsWorks = !!(window.Hls && window.Hls.isSupported()); } catch (e) {}
-    if (avplayAvailable()) list.push('avplay');
     if (isHlsSource(source) && hlsWorks) list.push('hls');
+    if (avplayAvailable()) list.push('avplay');
     list.push('native');
     return list;
   }
@@ -1610,34 +1624,84 @@
     } catch (e) {}
   }
 
-  /* The video CDN expects the same auth headers as the JSON API. */
-  function mediaRequestSetup(xhr) {
+  function mediaRequestSetup(xhr, url) {
     if (!xhr || !window.Belet || !window.Belet.mediaHeaders) return;
-    var headers = window.Belet.mediaHeaders();
+    try { if (xhr.readyState === 0) xhr.open('GET', url, true); } catch (e) {}
+    var headers = window.Belet.mediaHeaders(state.player.beletSessionId, false, null);
     for (var key in headers) {
       if (!Object.prototype.hasOwnProperty.call(headers, key)) continue;
       try { xhr.setRequestHeader(key, headers[key]); } catch (e) {}
     }
   }
 
+  function beletHlsLoaderClass(hls, isFragment) {
+    var BaseLoader = window.Hls && window.Hls.DefaultConfig && window.Hls.DefaultConfig.loader;
+    if (!BaseLoader || !window.Belet || !window.Belet.mediaHeaders) return null;
+    function BeletLoader(config) {
+      this.loader = new BaseLoader(config);
+      this.stats = this.loader.stats;
+      this.cancelled = false;
+    }
+    BeletLoader.prototype.load = function (context, config, callbacks) {
+      var self = this;
+      function send() {
+        var level = context && context.frag ? Number(context.frag.level) : -1;
+        var chunkLength = isFragment && state.player.chunkLengths ? state.player.chunkLengths[level] : null;
+        var headers;
+        if (self.cancelled || !state.player.active || (hls && state.player.hls !== hls)) return;
+        context.headers = context.headers || {};
+        headers = window.Belet.mediaHeaders(state.player.beletSessionId, isFragment, chunkLength);
+        Object.keys(headers).forEach(function (key) { context.headers[key] = headers[key]; });
+        self.loader.load(context, config, callbacks);
+        self.stats = self.loader.stats;
+      }
+      if (window.Belet.refresh) window.Belet.refresh(function () { send(); });
+      else send();
+    };
+    BeletLoader.prototype.abort = function () {
+      this.cancelled = true;
+      if (this.loader && this.loader.abort) this.loader.abort();
+    };
+    BeletLoader.prototype.destroy = function () {
+      this.cancelled = true;
+      if (this.loader && this.loader.destroy) this.loader.destroy();
+      this.loader = null;
+    };
+    BeletLoader.prototype.getCacheAge = function () {
+      return this.loader && this.loader.getCacheAge ? this.loader.getCacheAge() : null;
+    };
+    BeletLoader.prototype.getResponseHeader = function (name) {
+      return this.loader && this.loader.getResponseHeader ? this.loader.getResponseHeader(name) : null;
+    };
+    return BeletLoader;
+  }
+
   function startHls(source) {
     var player = state.player;
     var video = $('video');
     var hls;
+    var requestLoader;
+    var fragmentLoader;
     avplaySurface(false);
     try { video.classList.remove('hidden'); } catch (e) {}
     try {
+      requestLoader = beletHlsLoaderClass(null, false);
+      fragmentLoader = beletHlsLoaderClass(null, true);
       hls = new window.Hls({
         enableWorker: false,
         lowLatencyMode: false,
-        backBufferLength: 60,
+        backBufferLength: 10,
         maxBufferLength: 30,
-        manifestLoadingTimeOut: 12000,
-        fragLoadingTimeOut: 20000,
-        manifestLoadingMaxRetry: 2,
+        manifestLoadingTimeOut: 15000,
+        fragLoadingTimeOut: 15000,
+        manifestLoadingMaxRetry: 3,
+        manifestLoadingRetryDelay: 500,
         levelLoadingMaxRetry: 2,
-        fragLoadingMaxRetry: 2,
-        xhrSetup: mediaRequestSetup
+        fragLoadingMaxRetry: 3,
+        fragLoadingRetryDelay: 500,
+        loader: requestLoader || undefined,
+        fLoader: fragmentLoader || undefined,
+        xhrSetup: requestLoader ? undefined : mediaRequestSetup
       });
     } catch (e) {
       attemptFailed('hls init');
@@ -1649,15 +1713,7 @@
       if (!data || !data.fatal) return;
       var status = data.response && data.response.code ? data.response.code : 0;
       if (status === 401) {
-        /* First 401: the CDN may want `Bearer <token>` instead of the raw token. */
-        if (window.Belet && window.Belet.nextMediaScheme && window.Belet.nextMediaScheme()) {
-          teardownEngine();
-          disarmWatchdog();
-          player.strategyIndex = 0;
-          beginAttempt();
-          return;
-        }
-        /* Stored access token expired while the player was open: refresh once, retry. */
+        /* Match belet.tm: refresh the access token before retrying the raw-token request. */
         if (!player.reauthorized && window.Belet && window.Belet.refresh) {
           player.reauthorized = true;
           teardownEngine();
@@ -1665,17 +1721,49 @@
           window.Belet.refresh(function (refreshErr) {
             if (!state.player.active) return;
             if (refreshErr) { attemptFailed('hls http 401'); return; }
-            window.Belet.newPlayerSession();
+            window.Belet.newPlayerSession(player.beletSessionId || undefined);
             state.player.strategyIndex = 0;
             beginAttempt();
           });
+          return;
+        }
+        /* Some regional CDN paths still require the HTTP Bearer authorization scheme. */
+        if (window.Belet && window.Belet.nextMediaScheme && window.Belet.nextMediaScheme()) {
+          teardownEngine();
+          disarmWatchdog();
+          player.strategyIndex = 0;
+          beginAttempt();
           return;
         }
       }
       var code = status ? ' HTTP ' + status : '';
       attemptFailed('hls ' + (data.details || data.type || 'error') + code);
     });
-    hls.on(window.Hls.Events.MEDIA_ATTACHED, function () { hls.loadSource(source.url); });
+    hls.on(window.Hls.Events.LEVEL_LOADED, function (event, data) {
+      var details = data && data.details;
+      var fragments = details && details.fragments;
+      if (details && fragments && fragments.length && isFinite(details.totalduration)) {
+        player.chunkLengths[data.level] = String(Math.floor(details.totalduration / fragments.length * 1000));
+      }
+    });
+    hls.on(window.Hls.Events.MEDIA_ATTACHED, function () {
+      window.Belet.prepareHlsManifest(player.manifestSources || player.sources, function (err, manifestUrl, isBlob) {
+        if (!player.active || player.hls !== hls) {
+          if (isBlob && manifestUrl && window.URL && window.URL.revokeObjectURL) window.URL.revokeObjectURL(manifestUrl);
+          return;
+        }
+        if (err) {
+          if (Number(err.http) === 401) {
+            player.reauthorized = true;
+            hls.loadSource(source.url);
+            return;
+          }
+          return attemptFailed('manifest ' + (err.http || err.kind || 'error'));
+        }
+        if (isBlob) player.hlsBlobUrl = manifestUrl;
+        hls.loadSource(manifestUrl || source.url);
+      });
+    });
     hls.on(window.Hls.Events.MANIFEST_PARSED, function () { playVideoElement(); });
     try {
       hls.attachMedia(video);
@@ -1826,6 +1914,12 @@
     if (player.hls) {
       try { player.hls.destroy(); } catch (e) {}
       player.hls = null;
+    }
+    if (player.hlsBlobUrl) {
+      try {
+        if (window.URL && window.URL.revokeObjectURL) window.URL.revokeObjectURL(player.hlsBlobUrl);
+      } catch (e) {}
+      player.hlsBlobUrl = '';
     }
     stopAvplay();
     avplaySurface(false);

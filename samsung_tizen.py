@@ -556,7 +556,9 @@ def _build_belet_nav_js(target_url=BELET_URL):
         'var IS_FILE=(location.protocol==="file:"||location.origin==="null"||!!window.__NEON_FETCH_MODE__);\n'
         'function isTargetHost(h){\n'
         '  var low=String(h||"").toLowerCase();\n'
-        '  return low===TARGET_HOST||(low.length>TARGET_HOST.length+1&&low.slice(-TARGET_HOST.length-1)==="."+TARGET_HOST);\n'
+        '  if(low===TARGET_HOST||(low.length>TARGET_HOST.length+1&&low.slice(-TARGET_HOST.length-1)==="."+TARGET_HOST))return true;\n'
+        '  if(TARGET_HOST==="belet.tm"&&(low==="belet.me"||(low.length>9&&low.slice(-9)===".belet.me")||low==="beletapis.com"||(low.length>14&&low.slice(-14)===".beletapis.com")))return true;\n'
+        '  return false;\n'
         '}\n'
         'function rewriteForProxy(raw){\n'
         '  if(!IS_PROXY||typeof raw!=="string")return raw;\n'
@@ -2728,7 +2730,9 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "}\n"
         "function isAllowedUpstreamHost(h){\n"
         "  var low=String(h||'').toLowerCase().replace(/:\\d+$/,'');\n"
-        "  return low===BASE_HOSTNAME||(low.length>BASE_HOSTNAME.length+1&&low.slice(-BASE_HOSTNAME.length-1)==='.'+BASE_HOSTNAME)||(BASE_HOSTNAME==='belet.tm'&&BASE_PROTOCOL==='https:'&&low==='homepage.belet.me');\n"
+        "  if(low===BASE_HOSTNAME||(low.length>BASE_HOSTNAME.length+1&&low.slice(-BASE_HOSTNAME.length-1)==='.'+BASE_HOSTNAME))return true;\n"
+        "  if(BASE_HOSTNAME==='belet.tm'&&BASE_PROTOCOL==='https:'&&(low==='belet.me'||(low.length>9&&low.slice(-9)==='.belet.me')||low==='beletapis.com'||(low.length>14&&low.slice(-14)==='.beletapis.com')))return true;\n"
+        "  return false;\n"
         "}\n"
         "function ownAddresses(){\n"
         "  var out=['127.0.0.1'],ifs;\n"
@@ -2801,9 +2805,11 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "  }catch(e){return BASE_PROTOCOL+'//'+BASE_HOST+'/';}\n"
         "}\n"
         "function escapeRx(str){return String(str).replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&');}\n"
-        "var ORIGIN_ATTR_RX=new RegExp('(href|src|action|poster|data-src)=([\"\\'])(?:https?:)?\\\\/\\\\/((?:[a-z0-9-]+\\\\.)*'+escapeRx(BASE_HOSTNAME)+')(?::\\\\d+)?([\\\\/?#][^\"\\']*?)?\\\\2','gi');\n"
-        "var ORIGIN_INLINE_RX=new RegExp('(?:https?:)?\\\\/\\\\/((?:[a-z0-9-]+\\\\.)*'+escapeRx(BASE_HOSTNAME)+')(?::\\\\d+)?([\\\\/?#][^\\\\s,\"\\'>]*)?','gi');\n"
-        "var META_REFRESH_RX=new RegExp('(<meta[^>]*http-equiv\\\\s*=\\\\s*[\"\\']?refresh[\"\\']?[^>]*content\\\\s*=\\\\s*[\"\\'][^\"\\']*?url=)(?:https?:)?\\\\/\\\\/((?:[a-z0-9-]+\\\\.)*'+escapeRx(BASE_HOSTNAME)+')(?::\\\\d+)?([\\\\/?#][^\"\\';>]*)?','gi');\n"
+        "var ORIGIN_HOST_PATTERN='(?:[a-z0-9-]+\\\\.)*'+escapeRx(BASE_HOSTNAME);\n"
+        "if(BASE_HOSTNAME==='belet.tm')ORIGIN_HOST_PATTERN='(?:[a-z0-9-]+\\\\.)*(?:'+escapeRx(BASE_HOSTNAME)+'|belet\\\\.me|beletapis\\\\.com)';\n"
+        "var ORIGIN_ATTR_RX=new RegExp('(href|src|action|poster|data-src)=([\"\\'])(?:https?:)?\\\\/\\\\/('+ORIGIN_HOST_PATTERN+')(?::\\\\d+)?([\\\\/?#][^\"\\']*?)?\\\\2','gi');\n"
+        "var ORIGIN_INLINE_RX=new RegExp('(?:https?:)?\\\\/\\\\/('+ORIGIN_HOST_PATTERN+')(?::\\\\d+)?([\\\\/?#][^\\\\s,\"\\'>]*)?','gi');\n"
+        "var META_REFRESH_RX=new RegExp('(<meta[^>]*http-equiv\\\\s*=\\\\s*[\"\\']?refresh[\"\\']?[^>]*content\\\\s*=\\\\s*[\"\\'][^\"\\']*?url=)(?:https?:)?\\\\/\\\\/('+ORIGIN_HOST_PATTERN+')(?::\\\\d+)?([\\\\/?#][^\"\\';>]*)?','gi');\n"
         "function rewriteHtml(html){\n"
         "  var out=String(html||'');\n"
         "  out=out.replace(/<meta[^>]*http-equiv\\s*=\\s*[\"']?(?:Content-Security-Policy|Content-Security-Policy-Report-Only|X-WebKit-CSP|X-Content-Security-Policy|X-Frame-Options)[\"']?[^>]*>/gi,'');\n"
