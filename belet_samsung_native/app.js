@@ -1572,6 +1572,16 @@
     } catch (e) {}
   }
 
+  /* The video CDN expects the same auth headers as the JSON API. */
+  function mediaRequestSetup(xhr) {
+    if (!xhr || !window.Belet || !window.Belet.mediaHeaders) return;
+    var headers = window.Belet.mediaHeaders();
+    for (var key in headers) {
+      if (!Object.prototype.hasOwnProperty.call(headers, key)) continue;
+      try { xhr.setRequestHeader(key, headers[key]); } catch (e) {}
+    }
+  }
+
   function startHls(source) {
     var player = state.player;
     var video = $('video');
@@ -1585,7 +1595,11 @@
         backBufferLength: 60,
         maxBufferLength: 30,
         manifestLoadingTimeOut: 12000,
-        fragLoadingTimeOut: 20000
+        fragLoadingTimeOut: 20000,
+        manifestLoadingMaxRetry: 2,
+        levelLoadingMaxRetry: 2,
+        fragLoadingMaxRetry: 2,
+        xhrSetup: mediaRequestSetup
       });
     } catch (e) {
       attemptFailed('hls init');
@@ -1595,7 +1609,32 @@
     attachVideoEvents();
     hls.on(window.Hls.Events.ERROR, function (event, data) {
       if (!data || !data.fatal) return;
-      var code = data.response && data.response.code ? ' HTTP ' + data.response.code : '';
+      var status = data.response && data.response.code ? data.response.code : 0;
+      if (status === 401) {
+        /* First 401: the CDN may want `Bearer <token>` instead of the raw token. */
+        if (window.Belet && window.Belet.nextMediaScheme && window.Belet.nextMediaScheme()) {
+          teardownEngine();
+          disarmWatchdog();
+          player.strategyIndex = 0;
+          beginAttempt();
+          return;
+        }
+        /* Stored access token expired while the player was open: refresh once, retry. */
+        if (!player.reauthorized && window.Belet && window.Belet.refresh) {
+          player.reauthorized = true;
+          teardownEngine();
+          disarmWatchdog();
+          window.Belet.refresh(function (refreshErr) {
+            if (!state.player.active) return;
+            if (refreshErr) { attemptFailed('hls http 401'); return; }
+            window.Belet.newPlayerSession();
+            state.player.strategyIndex = 0;
+            beginAttempt();
+          });
+          return;
+        }
+      }
+      var code = status ? ' HTTP ' + status : '';
       attemptFailed('hls ' + (data.details || data.type || 'error') + code);
     });
     hls.on(window.Hls.Events.MEDIA_ATTACHED, function () { hls.loadSource(source.url); });

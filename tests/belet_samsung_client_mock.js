@@ -564,6 +564,11 @@ assert(deviceCall, 'TV registers itself in the account device list');
 assert.strictEqual(deviceCall.method, 'POST');
 assert(deviceCall.body.indexOf('"app_version":"4.3.3"') >= 0, 'device payload has app_version');
 assert(deviceCall.body.indexOf('Samsung Tizen') >= 0, 'device payload has the model name');
+const deviceBody = JSON.parse(deviceCall.body);
+assert(deviceBody.fingerprint === JSON.parse(store.neon_belet_samsung_session_v2).fingerprint,
+  'device payload repeats the install fingerprint (DeviceBody on Android does)');
+assert(deviceBody.os_version, 'device payload has os_version');
+assert(deviceCall.headers['X-Device-Model'], 'device request names the TV model');
 assert(!ids.home.classList.contains('hidden'), 'home opens after login');
 const rows = ids.rows.querySelectorAll('.row-block');
 assert.strictEqual(rows.length, 2, 'two content rows');
@@ -582,7 +587,7 @@ route('/api/v3/movie/12', 200, {
     last_episode_info: { episode_id: 501, season_id: 5, episode_position: 2, episode_name: 'Серия 2' }
   }
 });
-route('/api/v3/episodes', 200, { status: 'ok', result: [{ id: 501, name: 'Серия 2', episode_position: 2, duration: '00:45:00' }] });
+route('/api/v2/episodes', 200, { status: 'ok', result: [{ id: 501, name: 'Серия 2', episode_position: 2, duration: '00:45:00' }] });
 click(ids.rows.querySelectorAll('.card')[1]);
 assert(!ids.detail.classList.contains('hidden'));
 assert.strictEqual(ids.detailTitle.textContent, 'Serial');
@@ -644,6 +649,7 @@ route('/api/v3/movie/12', 200, {
     images: {}, seasons: [], last_episode_info: null }
 });
 route('/api/v2/seasons', 200, { status: 'ok', result: [{ id: 7, name: 'Сезон 1' }] });
+route('/api/v2/episodes', 404, { message: 'not found' });
 route('/api/v3/episodes', 200, { status: 'ok', result: [
   { id: 701, name: 'Пилот', episode_position: 1, duration: 2700 }
 ] });
@@ -768,6 +774,44 @@ hlsPlayer.handlers.error({}, { fatal: true, details: 'manifestLoadError' });
 assert.strictEqual(hlsPlayer.destroyed, true, 'broken hls.js instance is destroyed');
 assert.strictEqual(avplayCalls[0][0], 'open', 'AVPlay retries the same source');
 fireKey(10009);
+
+/* 9e-2. Media requests carry the API auth headers and a 401 replays them after a refresh */
+route('/api/v3/files/701?type=4', 200, { sources: [
+  { filename: 'https://cdn.example/c.m3u8', quality: '1080p' }
+] });
+click(ids.episodeList.querySelectorAll('.episode')[0]);
+const authedPlayer = FakeHls.instances[FakeHls.instances.length - 1];
+const probe = { headers: {}, setRequestHeader: function (key, value) { this.headers[key] = value; } };
+authedPlayer.config.xhrSetup(probe);
+const sessionToken = JSON.parse(store.neon_belet_samsung_session_v2).token;
+assert.strictEqual(probe.headers.Authorization, sessionToken, 'manifest/segments ask with the access token');
+assert.deepStrictEqual(Object.keys(probe.headers), ['Authorization'],
+  'media requests carry the token and nothing else: the CDN preflight only allows Authorization');
+
+/* first 401: the token is retried with the `Bearer` scheme, without touching the session */
+const instancesBefore = FakeHls.instances.length;
+authedPlayer.handlers.error({}, { fatal: true, details: 'manifestLoadError', response: { code: 401 } });
+const replay = FakeHls.instances[FakeHls.instances.length - 1];
+assert.strictEqual(FakeHls.instances.length, instancesBefore + 1, 'a media 401 restarts hls.js');
+assert.strictEqual(replay.url, 'https://cdn.example/c.m3u8', 'the same source is replayed');
+const probe2 = { headers: {}, setRequestHeader: function (key, value) { this.headers[key] = value; } };
+replay.config.xhrSetup(probe2);
+assert.strictEqual(probe2.headers.Authorization, 'Bearer ' + sessionToken, 'the retry uses the Bearer scheme');
+assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, sessionToken, 'no refresh is spent on the scheme retry');
+
+/* second 401: the session is refreshed and the stream replayed with the new token */
+const instancesAfterScheme = FakeHls.instances.length;
+route('/api/v2/auth/refresh-mobile', 200, { token: 'media-token', refresh_token: 'media-refresh' });
+replay.handlers.error({}, { fatal: true, details: 'manifestLoadError', response: { code: 401 } });
+const replay2 = FakeHls.instances[FakeHls.instances.length - 1];
+assert.strictEqual(FakeHls.instances.length, instancesAfterScheme + 1, 'a second media 401 restarts hls.js after the refresh');
+assert.strictEqual(replay2.url, 'https://cdn.example/c.m3u8');
+assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, 'media-token', 'media 401 refreshed the session');
+const probe3 = { headers: {}, setRequestHeader: function (key, value) { this.headers[key] = value; } };
+replay2.config.xhrSetup(probe3);
+assert.strictEqual(probe3.headers.Authorization, 'Bearer media-token', 'the refreshed token keeps the working scheme');
+fireKey(10009);
+
 sandbox.Hls = undefined;
 avplayFail = false;
 

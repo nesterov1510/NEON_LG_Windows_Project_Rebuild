@@ -261,8 +261,21 @@
       if (Array.isArray(data.result.items)) return data.result.items;
       if (Array.isArray(data.result.movies)) return data.result.movies;
       if (Array.isArray(data.result.data)) return data.result.data;
+      var nested = firstArray(data.result);
+      if (nested) return nested;
     }
-    return [];
+    var direct = firstArray(data);
+    return direct || [];
+  }
+
+  /* Endpoints disagree on the collection key (`episodes`, `seasons`, `categories`, …). */
+  function firstArray(object) {
+    if (!object || typeof object !== 'object') return null;
+    for (var key in object) {
+      if (!Object.prototype.hasOwnProperty.call(object, key)) continue;
+      if (Array.isArray(object[key])) return object[key];
+    }
+    return null;
   }
 
   function statusOk(data) {
@@ -415,35 +428,66 @@
     });
   }
 
+  /**
+   * v3 answers with the richest card (seasons, trailers), but it rejects some
+   * catalogue ids, so any non-auth failure retries v2 before giving up.
+   */
   function movie(id, callback) {
-    var url = HOSTS.film + '/api/v3/movie/' + encodeURIComponent(id);
-    authorized({ method: 'GET', url: url, fallback: HOSTS.film + '/api/v2/movie/' + encodeURIComponent(id) }, function (err, data) {
-      if (err) return callback(err, null);
-      var film = data && (data.movie || data.film || data.result || data);
-      if (!film || typeof film !== 'object' || typeof film.id === 'undefined') return callback(apiError('format', 200), null);
-      callback(null, film);
+    var path = '/movie/' + encodeURIComponent(id);
+    function attempt(version, next) {
+      authorized({ method: 'GET', url: HOSTS.film + '/api/v' + version + path }, function (err, data) {
+        if (err) return next(err);
+        var film = data && (data.movie || data.film || data.result || data);
+        if (!film || typeof film !== 'object' || typeof film.id === 'undefined') return next(apiError('format', 200));
+        next(null, film);
+      });
+    }
+    attempt(3, function (err, film) {
+      if (!err) return callback(null, film);
+      if (err.kind === 'auth') return callback(err, null);
+      attempt(2, function (fallbackErr, fallbackFilm) {
+        if (fallbackErr) return callback(err, null);
+        callback(null, fallbackFilm);
+      });
     });
   }
 
   function seasons(movieId, callback) {
+    var id = encodeURIComponent(movieId);
     authorized({
       method: 'GET',
-      url: HOSTS.film + '/api/v2/seasons?movieId=' + encodeURIComponent(movieId)
+      url: HOSTS.film + '/api/v2/seasons?movieId=' + id,
+      fallback: HOSTS.film + '/api/v1/seasons?movieId=' + id
     }, function (err, data) {
       if (err) return callback(err, null);
       callback(null, listFrom(data));
     });
   }
 
+  /**
+   * v2 returns a plain season list; v3 paginates around `current_position` and needs
+   * `direction`, so an incomplete v3 query answers empty. Try v2 first, then v3.
+   */
   function episodes(seasonId, options, callback) {
     options = options || {};
-    var query = '?season_id=' + encodeURIComponent(seasonId) + '&limit=' + encodeURIComponent(options.limit || 100);
-    if (options.position) query += '&current_position=' + encodeURIComponent(options.position);
-    if (options.direction) query += '&direction=' + encodeURIComponent(options.direction);
+    var id = encodeURIComponent(seasonId);
+    var limit = encodeURIComponent(options.limit || 100);
+    var simple = HOSTS.film + '/api/v2/episodes?season_id=' + id + '&limit=' + limit;
+    var query = '?season_id=' + id + '&limit=' + limit +
+      '&current_position=' + encodeURIComponent(options.position || 1) +
+      '&direction=' + encodeURIComponent(options.direction || 'next');
     if (options.episodeId) query += '&episode_id=' + encodeURIComponent(options.episodeId);
-    authorized({ method: 'GET', url: HOSTS.film + '/api/v3/episodes' + query }, function (err, data) {
-      if (err) return callback(err, null);
-      callback(null, listFrom(data));
+    var firstError = null;
+    authorized({ method: 'GET', url: simple }, function (err, data) {
+      var list = err ? [] : listFrom(data);
+      if (list.length) return callback(null, list);
+      firstError = err || null;
+      authorized({ method: 'GET', url: HOSTS.film + '/api/v3/episodes' + query }, function (err3, data3) {
+        var next = err3 ? [] : listFrom(data3);
+        if (next.length) return callback(null, next);
+        if (err3 && firstError) return callback(firstError, null);
+        callback(null, next);
+      });
     });
   }
 
@@ -602,6 +646,17 @@
     });
   }
 
+  function tizenVersion() {
+    var match = String(window.navigator.userAgent || '').match(/Tizen[\s\/]*([\d.]+)/i);
+    if (match) return match[1];
+    try {
+      if (window.tizen && window.tizen.systeminfo) {
+        return String(window.tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version') || 'Tizen');
+      }
+    } catch (e) {}
+    return 'Tizen';
+  }
+
   function model() {
     var name = '';
     try {
@@ -610,17 +665,29 @@
       }
     } catch (e) {}
     if (!name) {
+      try {
+        var device = window.tizen && window.tizen.systeminfo && window.tizen.systeminfo.getCapability('http://tizen.org/system/model_name');
+        if (device) name = String(device);
+      } catch (e) {}
+    }
+    if (!name) {
       try { name = String(window.navigator.userAgent.match(/Tizen[^)]*/) || ''); } catch (e) {}
     }
     return name || 'Samsung Tizen TV';
   }
 
+  /* DeviceBody on the Android client is app_version + fingerprint + model + os_version. */
   function registerDevice(callback) {
     var name = model();
     authorized({
       method: 'POST',
       url: HOSTS.auth + '/api/v1/users/device',
-      body: { app_version: CLIENT.appVersion, model: 'Samsung Tizen ' + name },
+      body: {
+        app_version: CLIENT.appVersion,
+        fingerprint: device,
+        model: 'Samsung Tizen ' + name,
+        os_version: tizenVersion()
+      },
       headers: { 'X-Device-Model': name }
     }, function (err, data) {
       if (!callback) return;
@@ -628,10 +695,36 @@
     });
   }
 
+  var playerSession = '';
+  /* Media may expect the raw token (JSON API style) or a `Bearer` prefix. */
+  var mediaScheme = '';
+
+  /**
+   * The video CDN answers its preflight with `Access-Control-Allow-Headers:
+   * DNT,Authorization,…` only, so media requests may carry the access token and
+   * nothing else — an extra header makes the preflight fail and the stream 401s.
+   */
+  function mediaHeaders() {
+    var headers = {};
+    if (session && session.token) headers.Authorization = mediaScheme + session.token;
+    return headers;
+  }
+
+  function nextMediaScheme() {
+    if (mediaScheme) return false;
+    mediaScheme = 'Bearer ';
+    return true;
+  }
+
+  function newPlayerSession() {
+    playerSession = randomHex(8);
+    return playerSession;
+  }
+
   function deviceInfo() {
     return {
       fingerprint: device,
-      model: 'Samsung Tizen',
+      model: model(),
       appVersion: CLIENT.appVersion,
       versionCode: CLIENT.versionCode,
       hosts: { auth: HOSTS.auth, home: HOSTS.home, film: HOSTS.film, search: HOSTS.search }
@@ -700,7 +793,12 @@
     profile: profile,
     deviceInfo: deviceInfo,
     model: model,
+    tizenVersion: tizenVersion,
     registerDevice: registerDevice,
+    refresh: refreshSession,
+    mediaHeaders: mediaHeaders,
+    nextMediaScheme: nextMediaScheme,
+    newPlayerSession: newPlayerSession,
     healthCheck: healthCheck,
     listFrom: listFrom,
     sourcesFrom: sourcesFrom,

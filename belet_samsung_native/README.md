@@ -2,7 +2,7 @@
 
 Самостоятельное веб-приложение Tizen (WGT), повторяющее основные сценарии приложения Belet для Android 4.3.3 (`tm.belet.films`, versionCode 182). Это не APK, не обёртка сайта и не оригинальное приложение Belet: код написан заново, сетевые вызовы воспроизведены по разобранному Android-архиву и сверены с запросами сайта `belet.tm`.
 
-* Пакет: `BeletFilm1`, приложение `BeletFilm1.BeletClient`, версия 0.6.0.
+* Пакет: `BeletFilm1`, приложение `BeletFilm1.BeletClient`, версия 0.6.1.
 * Не пересекается с обычным приложением NEON `BeletTV001.Belet`: установка клиента не заменяет его.
 * Tizen `required_version="4.0"` и выше (телевизоры Samsung 2018 года и новее), профиль `tv-samsung`.
 
@@ -41,11 +41,15 @@
 | --- | --- | --- |
 | Авторизация, профиль | `https://beletapis.com` (резерв `https://api.belet.tm`) | `/api/v1/auth/*`, `/api/v2/auth/refresh-mobile`, `/api/v2/users/profile` |
 | Каталог | `https://homepage.belet.me` | `/api/v2/home_page`, `/api/v2/home_page/{id}`, `/api/v1/categories` |
-| Фильмы | `https://film.beletapis.com` | `/api/v3/movie/{id}`, `/api/v2/seasons`, `/api/v3/episodes`, `/api/v3/files/{id}`, `/api/v3/lastWatchTime`, `/api/v1/favorites`, `/api/v1/continues` |
+| Фильмы | `https://film.beletapis.com` | `/api/v3/movie/{id}` (резерв `/api/v2/movie/{id}`), `/api/v2/seasons`, `/api/v2/episodes` (резерв `/api/v3/episodes`), `/api/v3/files/{id}`, `/api/v3/lastWatchTime`, `/api/v1/favorites`, `/api/v1/continues` |
 | Поиск | `https://film-search.belet.me` | `POST /api/v2/search` (резерв `https://search.belet.me`) |
 | Видео и картинки | `https://videofilm.belet.me`, `https://img.belet.me` | HLS-потоки и изображения |
 
 Каждый запрос, как в Android-клиенте, отправляет `lang`, `fingerprint`, `app-version: 182`, `X-App-Version: 4.3.3`, `X-Platform: Android`, `X-VersionCode: 182` и `Authorization: <token>` (кроме входа и обновления). Заголовки выставляются ровно один раз: дубликаты ломают CORS-preflight.
+
+Запросы к видео (`videofilm.belet.me`) уходят через `xhrSetup` в hls.js и несут только `Authorization: <token>`, как у сайта: preflight этого CDN разрешает лишь `Authorization`, любой лишний заголовок ломает воспроизведение и даёт HTTP 401. На первый 401 токен повторяется со схемой `Bearer`, на второй — обновляется сессия и поток запускается заново тем же движком.
+
+Регистрация устройства отправляет ровно то тело, что и Android-класс `DeviceBody`: `app_version`, `fingerprint`, `model`, `os_version` (версия Tizen из User-Agent), плюс заголовок `X-Device-Model`. Без `fingerprint`/`os_version` сервер Belet отвечал `HTTP 400` и телевизор не появлялся в списке устройств телефона.
 
 Список хостов закреплён в `config.xml` через `tizen:content-security-policy`: `connect-src` покрывает `beletapis.com`, `*.beletapis.com`, `api.belet.tm` и `*.belet.me` (в том числе `videofilm.belet.me`, откуда hls.js тянет плейлисты и сегменты), `media-src https: blob:`. Телеметрия `sentry.belet.me` и `posthog.belet.me` не используется. Привилегия `avplay` объявлена отдельно — без неё `webapis.avplay` на телевизоре недоступен.
 
@@ -72,7 +76,7 @@ python -m pytest tests/test_belet_samsung_client.py -q        # упаковка
 
 ## Статус проверки
 
-Логика, сетевой слой и разметка проверены автоматическими тестами и сверены с запросами сайта `belet.tm` и структурами Android-архива. Проверка на реальном телевизоре Samsung с реальной подпиской ещё не выполнялась:
+Логика, сетевой слой и разметка проверены автоматическими тестами и сверены с запросами сайта `belet.tm` и структурами Android-архива. Сборка 0.6.0 проверена на телевизоре Samsung (Tizen 6.0): вход по коду и QR, главная, каталог, поиск, профиль и картинки работали; по результатам этой проверки в 0.6.1 исправлены регистрация устройства (`DeviceBody` + `X-Device-Model`), HTTP 401 на плейлистах HLS (заголовок `Authorization` в `xhrSetup`, повтор со схемой `Bearer`, обновление сессии) и загрузка серий (сначала `/api/v2/episodes`, затем `/api/v3/episodes`, резерв `/api/v2/movie/{id}` для карточки). Остаётся открытым:
 
 * порядок движков — hls.js (MSE) → AVPlay → `<video>`; набор кодеков и DRM-потоки на разных моделях не проверялись, текущий движок и причина сбоя видны в бейдже плеера и на экране «О приложении»;
 * серверы Belet отвечают `Access-Control-Allow-Origin: https://belet.tm`, поэтому теоретически встроенный браузер ТВ может заблокировать запросы из WGT. На телевизоре, где проверялся предыдущий прототип, вход и каталог открывались; при ошибке HTTP 0 экран «О приложении» покажет, какой хост недоступен;
