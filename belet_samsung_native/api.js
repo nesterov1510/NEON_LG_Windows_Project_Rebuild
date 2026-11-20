@@ -760,6 +760,11 @@
   /* The Android ExoPlayer sends the token as-is; some CDN edges accept Bearer as fallback. */
   var mediaScheme = '';
 
+  /**
+   * Android's `xn.o0` interceptor stamps every player request (playlist and segment)
+   * with `X-Chunk-Length`, using the average segment duration in milliseconds or
+   * `-1` while it is still unknown, so the manifest gets `-1` here.
+   */
   function mediaHeaders(sessionId, isFragment, chunkLength) {
     var headers = {};
     headers['X-Platform'] = CLIENT.platform;
@@ -767,7 +772,7 @@
     headers['X-Player-Session-Id'] = String(sessionId || playerSession || '');
     headers.fingerprint = device || '';
     if (session && session.token) headers.Authorization = mediaScheme + session.token;
-    if (isFragment) headers['X-Chunk-Length'] = String(chunkLength || '-1');
+    headers['X-Chunk-Length'] = String(chunkLength || '-1');
     return headers;
   }
 
