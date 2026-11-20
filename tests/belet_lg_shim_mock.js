@@ -46,10 +46,15 @@ vm.runInNewContext(fs.readFileSync(SHIM, 'utf8'), sandbox, { filename: 'webos-sh
 
 /* device identity is exposed through the Tizen surfaces api.js already reads */
 assert.strictEqual(sandbox.webapis.productinfo.getModel(), 'OLED55C9PUA', 'model comes from PalmSystem.deviceInfo');
-assert.strictEqual(sandbox.tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version'), 'webOS 4.9.0',
-  'os_version is reported as webOS <version>');
+assert.strictEqual(sandbox.tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version'), '6.0',
+  'the registration body needs a Tizen-shaped os_version');
 assert.strictEqual(sandbox.tizen.systeminfo.getCapability('http://tizen.org/system/model_name'), 'OLED55C9PUA');
 assert.strictEqual(sandbox.__NEON_TV_PLATFORM__, 'webos');
+assert.strictEqual(sandbox.tizen.tvinputdevice.registerKey('MediaPlay'), true,
+  'app.js registers media keys at start-up');
+sandbox.tizen.application.getCurrentApplication().exit();
+assert.strictEqual(calls.platformBack, 1, 'tizen.application exit leaves the app on webOS');
+calls.platformBack = 0;
 
 /* the shim must not fake Tizen-only player APIs */
 assert.strictEqual(sandbox.webapis.avplay, undefined, 'no avplay on webOS: the hls.js/<video> chain is used');

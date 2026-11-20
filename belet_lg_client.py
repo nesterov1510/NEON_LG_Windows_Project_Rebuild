@@ -31,19 +31,35 @@ OVERLAY_FILES = ('webos-shim.js',)
 # The IPK must be byte-identical no matter how git checked the sources out, so the
 # text files are normalised to LF while packaging (Windows checkouts are CRLF).
 TEXT_FILES = ('index.html', 'style.css', 'api.js', 'app.js', 'hls.min.js', 'hls.LICENSE', 'webos-shim.js')
-# The Android/Tizen build labels the device as "Samsung Tizen <model>"; on LG the
-# device list should say "LG webOS <model>". Only the webOS copy is patched.
-API_PATCHES = ((b"'Samsung Tizen '", b"'LG webOS '"),)
+# The client files are shipped verbatim: api.js sends "Samsung Tizen <model>" and
+# a Tizen os_version in the device registration body, and the Belet backend only
+# answers the login-code/QR flow for that shape, so the webOS build must not
+# rewrite it. Only the overlay script tag is injected into index.html.
 SHIM_TAG = '<script src="webos-shim.js"></script>\n'
 
 
-def app_version():
-    """Client version, taken from the shared Tizen manifest so both builds agree."""
+# webOS only accepts x.y.z for appinfo.json and needs a higher value to upgrade
+# an already installed package, so the IPK carries its own revision while the
+# Samsung widget keeps the version from the Tizen manifest.
+WEBOS_REVISION = 1
+
+
+def manifest_version():
+    """Version of the shared Tizen client (the Samsung WGT ships exactly this)."""
     manifest = _read_text_file(SRC / 'config.xml').decode('utf-8')
     match = re.search(r'<widget[^>]*\bversion="([^"]+)"', manifest)
     if not match:
         raise ValueError('belet_samsung_native/config.xml has no widget version')
     return match.group(1)
+
+
+def app_version():
+    """webOS package version: manifest version with the packaging revision bumped."""
+    base = manifest_version()
+    parts = base.split('.')
+    while len(parts) < 3:
+        parts.append('0')
+    return '%s.%s.%s' % (parts[0], parts[1], int(parts[2]) + WEBOS_REVISION)
 
 
 def app_info(version=None):
@@ -73,14 +89,6 @@ def _read_text_file(path):
     return path.read_bytes().replace(b'\r\n', b'\n')
 
 
-def _patch_api(data):
-    for old, new in API_PATCHES:
-        if old not in data:
-            raise ValueError('api.js no longer contains %r; update belet_lg_client.API_PATCHES' % old)
-        data = data.replace(old, new)
-    return data
-
-
 def _index_html():
     html = _read_text_file(SRC / 'index.html').decode('utf-8')
     marker = '<script src="hls.min.js"></script>\n'
@@ -98,8 +106,6 @@ def package_files(version=None):
         data = _read_text_file(SRC / name) if name in TEXT_FILES else (SRC / name).read_bytes()
         if name == 'index.html':
             data = _index_html()
-        elif name == 'api.js':
-            data = _patch_api(data)
         files.append((name, data))
     for name in OVERLAY_FILES:
         files.append((name, _read_text_file(OVERLAY / name)))

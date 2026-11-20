@@ -1,22 +1,32 @@
 /*
  * LG webOS overlay for the shared Belet TV client (tm.belet.neonclient).
  *
- * index.html/api.js/app.js/style.css are the very same files that ship in the
- * Samsung WGT; this script only fills the platform seams webOS does not have:
+ * index.html / api.js / app.js / style.css are the byte-identical files that
+ * ship in the Samsung WGT — nothing in them is rewritten for LG. This script
+ * only fills the platform seams webOS does not have:
  *
- *   • Tizen device APIs (webapis.productinfo / tizen.systeminfo) are emulated so
- *     the About screen and the device registration report a real LG model;
+ *   • the Tizen surfaces the client touches (webapis.productinfo,
+ *     tizen.systeminfo, tizen.tvinputdevice, tizen.application) are emulated so
+ *     the client runs exactly the same code path as on a Samsung TV: the device
+ *     registration body still says "Samsung Tizen <model>" and os_version still
+ *     looks like a Tizen release, which is what the Belet backend expects when
+ *     the login code / QR flow is started;
  *   • the Magic Remote pointer moves the DOM focus, because the client keeps a
  *     keyboard focus model instead of mouse hover;
  *   • Back on the first screen leaves the app instead of doing nothing.
  *
  * The client already understands webOS key codes (arrows 37-40, OK 13, Back 461,
  * Play 415, Pause 19, FF 417, RW 412, Stop 413), so no key translation is needed.
+ * Every call is wrapped: a missing webOS API must never break the client.
  */
 (function (global) {
   var doc = global.document;
   var modelName = '';
-  var osVersion = '';
+  var realOsVersion = '';
+
+  /* Reported to the backend through tizen.systeminfo, so keep the shape of a
+   * Tizen release: api.js sends it as os_version of the device registration. */
+  var TIZEN_VERSION = '6.0';
 
   function userAgent() {
     try { return String(global.navigator.userAgent || ''); } catch (e) { return ''; }
@@ -24,20 +34,20 @@
 
   function guessFromUserAgent() {
     var ua = userAgent();
-    var webos = /Web0S|webOS\.TV|webOS/i.test(ua);
+    var webos = /Web0S|webOS/i.test(ua);
     var chromium = ua.match(/Chrome\/([0-9]+)/);
-    if (!osVersion) osVersion = webos ? 'webOS' : 'LG';
+    if (!realOsVersion) realOsVersion = webos ? 'webOS' : 'LG';
     if (!modelName) {
       modelName = webos ? 'LG webOS TV' : 'LG Smart TV';
-      if (chromium) modelName = modelName + ' · Chromium ' + chromium[1];
+      if (chromium) modelName = modelName + ' ' + chromium[1];
     }
   }
 
   function applySystemInfo(info) {
     if (!info || typeof info !== 'object') return;
     if (info.modelName) modelName = String(info.modelName);
-    if (info.version) osVersion = String(info.version);
-    if (info.platform) osVersion = String(info.platform) + (info.version ? ' ' + info.version : '');
+    if (info.version) realOsVersion = String(info.version);
+    if (info.platform) realOsVersion = String(info.platform) + (info.version ? ' ' + info.version : '');
   }
 
   /* PalmSystem.deviceInfo exists on every webOS TV and needs no permission. */
@@ -62,42 +72,22 @@
 
   guessFromUserAgent();
 
-  /* api.js already reads model()/tizenVersion() through these two surfaces. */
-  global.webapis = global.webapis || {};
-  if (!global.webapis.productinfo) {
-    global.webapis.productinfo = {
-      getModel: function () { return modelName; },
-      getVersion: function () { return osVersion; }
-    };
-  }
-  global.tizen = global.tizen || {};
-  if (!global.tizen.systeminfo) {
-    global.tizen.systeminfo = {
-      getCapability: function (name) {
-        if (name === 'http://tizen.org/feature/platform.version') return osVersion;
-        if (name === 'http://tizen.org/system/model_name') return modelName;
-        return '';
-      }
-    };
+  function modelValue() {
+    return modelName || 'LG webOS TV';
   }
 
-  function focusableOf(node) {
-    var limit = 0;
-    while (node && limit < 6) {
-      if (node.classList && node.classList.contains('focusable') && !node.disabled) return node;
-      node = node.parentNode;
-      limit += 1;
+  function capability(name) {
+    switch (name) {
+      case 'http://tizen.org/feature/platform.version': return TIZEN_VERSION;
+      case 'http://tizen.org/feature/platform.name': return 'Tizen';
+      case 'http://tizen.org/feature/platform.core.cpu.arch': return 'arm';
+      case 'http://tizen.org/system/model_name': return modelValue();
+      case 'http://tizen.org/feature/screen.size.all': return '1920x1080';
+      default: return '';
     }
-    return null;
   }
 
-  /* Magic Remote: hovering an item focuses it, so OK/arrows continue from there. */
-  doc.addEventListener('mouseover', function (event) {
-    var target = focusableOf(event.target);
-    if (target && target !== doc.activeElement && target.focus) {
-      try { target.focus(); } catch (e) {}
-    }
-  }, false);
+  function noop() {}
 
   function exitApp() {
     try {
@@ -109,16 +99,92 @@
     try { global.close(); } catch (e) {}
   }
 
+  /* ── webapis (Tizen web API namespace) ─────────────────────────────── */
+  try {
+    global.webapis = global.webapis || {};
+    if (!global.webapis.productinfo) {
+      global.webapis.productinfo = {
+        getModel: function () { return modelValue(); },
+        getVersion: function () { return realOsVersion || TIZEN_VERSION; },
+        getDuid: function () { return ''; },
+        isSamsungTV: function () { return false; }
+      };
+    }
+    /* No avplay on webOS: app.js then uses the hls.js → <video> chain. */
+  } catch (e) {}
+
+  /* ── tizen (systeminfo / tvinputdevice / application) ──────────────── */
+  try {
+    global.tizen = global.tizen || {};
+    if (!global.tizen.systeminfo) {
+      global.tizen.systeminfo = {
+        getCapability: function (name) { return capability(name); },
+        getPropertyValue: function (name, onSuccess, onError) {
+          var values = {
+            MODEL_NAME: modelValue(),
+            VENDOR: 'LG',
+            PLATFORM_VERSION: TIZEN_VERSION,
+            FIRMWARE_VERSION: realOsVersion
+          };
+          if (Object.prototype.hasOwnProperty.call(values, name)) {
+            try { if (onSuccess) onSuccess({ value: values[name] }); } catch (e) {}
+          } else {
+            try { if (onError) onError(new Error('Not supported on webOS')); } catch (e) {}
+          }
+        }
+      };
+    }
+    if (!global.tizen.tvinputdevice) {
+      global.tizen.tvinputdevice = {
+        registerKey: function () { return true; },
+        registerKeyBatch: function () { return true; },
+        unregisterKey: function () { return true; },
+        getSupportedKeys: function (onSuccess) {
+          try { if (onSuccess) onSuccess([]); } catch (e) {}
+        }
+      };
+    }
+    if (!global.tizen.application) {
+      var currentApp = { exit: function () { exitApp(); }, hide: noop };
+      global.tizen.application = {
+        getCurrentApplication: function () { return currentApp; },
+        exit: function () { exitApp(); }
+      };
+    }
+  } catch (e) {}
+
+  /* ── Magic Remote: hovering an item focuses it ─────────────────────── */
+  function focusableOf(node) {
+    var limit = 0;
+    while (node && limit < 6) {
+      if (node.classList && node.classList.contains('focusable') && !node.disabled) return node;
+      node = node.parentNode;
+      limit += 1;
+    }
+    return null;
+  }
+
+  try {
+    doc.addEventListener('mouseover', function (event) {
+      var target = focusableOf(event.target);
+      if (target && target !== doc.activeElement && target.focus) {
+        try { target.focus(); } catch (e) {}
+      }
+    }, false);
+  } catch (e) {}
+
   /* Registered after app.js so its handler runs first: when the client consumed
    * Back it calls preventDefault(), and an unconsumed Back means "leave the app". */
-  global.setTimeout(function () {
-    doc.addEventListener('keydown', function (event) {
-      var key = event.keyCode || event.which;
-      if (key !== 461 && key !== 10009) return;
-      if (event.defaultPrevented) return;
-      exitApp();
-    }, false);
-  }, 0);
+  try {
+    global.setTimeout(function () {
+      doc.addEventListener('keydown', function (event) {
+        var key = event.keyCode || event.which;
+        if (key !== 461 && key !== 10009) return;
+        if (event.defaultPrevented) return;
+        exitApp();
+      }, false);
+    }, 0);
+  } catch (e) {}
 
   global.__NEON_TV_PLATFORM__ = 'webos';
 }(this));

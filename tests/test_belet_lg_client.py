@@ -85,13 +85,24 @@ def test_shared_client_sources_are_identical_except_webos_overlays():
                                     '<script src="webos-shim.js"></script>\n<script src="hls.min.js"></script>\n', 1)
     assert html.index('webos-shim.js') < html.index('api.js')
 
+    # The client must be shipped byte-identical: api.js sends "Samsung Tizen <model>"
+    # in the device registration body and the backend only accepts that shape.
     api = files['api.js'].decode('utf-8')
-    assert "'LG webOS '" in api and "'Samsung Tizen '" not in api
-    assert api.replace("'LG webOS '", "'Samsung Tizen '") == lf((SRC / 'api.js').read_bytes()).decode('utf-8')
+    assert api == lf((SRC / 'api.js').read_bytes()).decode('utf-8')
+    assert "'Samsung Tizen '" in api
 
     shim = files['webos-shim.js'].decode('utf-8')
     assert 'platformBack' in shim and 'getCapability' in shim
     assert 'var ' in shim and '=>' not in shim, 'overlay stays ES5 for old webOS engines'
+
+
+def test_webos_package_has_its_own_version_above_the_tizen_one():
+    manifest = belet_lg_client.manifest_version()
+    webos = belet_lg_client.app_version()
+    assert manifest == '0.6.3', 'the Samsung widget version must not change'
+    numeric = tuple(int(part) for part in webos.split('.'))
+    assert len(numeric) == 3 and all(0 <= part <= 99 for part in numeric), 'appinfo.json needs x.y.z'
+    assert numeric > tuple(int(part) for part in manifest.split('.')), 'webOS upgrades need a higher version'
 
 
 def test_tizen_manifest_is_not_shipped_in_the_lg_package():
@@ -126,12 +137,15 @@ def test_api_exposes_lg_client_actions(tmp_path, monkeypatch):
         api.close()
 
 
-def test_ipk_builder_refuses_drifted_shared_sources(monkeypatch):
-    original = belet_lg_client.API_PATCHES
-    monkeypatch.setattr(belet_lg_client, 'API_PATCHES', ((b"'not in api.js'", b"'x'"),))
+def test_ipk_builder_refuses_drifted_shared_sources(tmp_path, monkeypatch):
+    """If index.html stops loading hls.js the overlay shim would never run: fail loudly."""
+    broken = tmp_path / 'src'
+    broken.mkdir()
+    shutil.copy(SRC / 'config.xml', broken / 'config.xml')
+    (broken / 'index.html').write_text('<html></html>', encoding='utf-8')
+    monkeypatch.setattr(belet_lg_client, 'SRC', broken)
     with pytest.raises(ValueError):
         belet_lg_client.build_ipk()
-    monkeypatch.setattr(belet_lg_client, 'API_PATCHES', original)
 
 
 def test_webos_shim_runs_on_a_fake_webos_dom():
