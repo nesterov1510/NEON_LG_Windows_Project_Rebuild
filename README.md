@@ -33,6 +33,8 @@ NEON runs on Linux/Ubuntu as a self-contained **AppImage** (no install needed �
 
 **Build via GitHub Actions:** open **Actions → Build Linux AppImage → Run workflow** and download the **NeonLGControl-Linux-AppImage** artifact.
 
+**Alem TV на LG и Samsung:** для смены аккаунта откройте в приложении на ТВ **Настройки → Выйти из аккаунта → Да, выйти**. Клиент отвяжет терминал у оператора и откроет форму входа; выбранный портал сохранится. При ошибке отвязки привязка на ТВ не стирается — выход можно повторить.
+
 **Persistent login:** the WebView profile (cookies, localStorage) is stored in `~/.local/share/NEON_LG_Windows_Project` (or `$XDG_DATA_HOME/NEON_LG_Windows_Project`), so the Alem TV terminal MAC and session survive exit and relaunch — you only enter login/password once.
 
 ## OpenVPN integration

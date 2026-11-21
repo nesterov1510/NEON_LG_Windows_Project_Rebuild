@@ -236,6 +236,63 @@ button, .btn {
 .info-val { color: #ffffff; font-weight: 700; }
 """
 
+# TV-only settings controls; the Kali desktop package keeps its existing UI.
+_TV_SIGN_OUT_HTML = """
+      <button id="accountLogout" class="btn focusable" onclick="askAccountLogout()">Выйти из аккаунта</button>
+      <div id="logoutConfirm" style="display:none;align-items:center;gap:12px;">
+        <span>Выйти и отвязать этот телевизор?</span>
+        <button id="cancelLogout" class="btn focusable" onclick="cancelAccountLogout()">Отмена</button>
+        <button class="btn focusable" onclick="confirmAccountLogout()">Да, выйти</button>
+      </div>
+      <div id="logoutStatus" role="status"></div>"""
+
+_TV_SIGN_OUT_JS = """
+  var signingOut = false;
+  function resetLogoutControls() {
+    var button = document.getElementById("accountLogout");
+    button.style.display = !signingOut && (getStoredMac() || (sessionId && sessionId !== "silky_open")) ? "block" : "none";
+    document.getElementById("logoutConfirm").style.display = "none";
+    document.getElementById("logoutStatus").textContent = signingOut ? "Выполняется выход…" : "";
+  }
+  function focusLogoutControl(id) {
+    var index = getFocusableElements().indexOf(document.getElementById(id));
+    if (index >= 0) { currentFocusIndex = index; updateFocus(); }
+  }
+  window.askAccountLogout = function() {
+    if (signingOut) return;
+    document.getElementById("accountLogout").style.display = "none";
+    document.getElementById("logoutStatus").textContent = "";
+    document.getElementById("logoutConfirm").style.display = "flex";
+    focusLogoutControl("cancelLogout");
+  };
+  window.cancelAccountLogout = function() {
+    resetLogoutControls();
+    focusLogoutControl("accountLogout");
+  };
+  window.confirmAccountLogout = function() {
+    if (signingOut || !isShown("logoutConfirm")) return;
+    var mac = getStoredMac(), portal = currentPortal;
+    signingOut = true;
+    resetLogoutControls();
+    function finish(err, result) {
+      signingOut = false;
+      resetLogoutControls();
+      if (portal !== currentPortal || mac !== getStoredMac()) return;
+      if (err || result === false) {
+        document.getElementById("logoutStatus").textContent = "Не удалось отвязать телевизор. Проверьте сеть и повторите. Аккаунт сохранён.";
+        focusLogoutControl("accountLogout");
+        return;
+      }
+      clearTerminalBinding(); // SID alone is insufficient: boot logs in by MAC.
+      location.reload(); // discard media tokens, active streams and account UI
+    }
+    // Match SessionStore.signOut in the upstream client: do not lose the MAC
+    // (and strand a terminal slot) if the operator rejects the unbind.
+    if (mac) jsonRpc("unregister_terminal", { macaddr: mac }, true, finish);
+    else finish(null, true);
+  };
+"""
+
 def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL, *, desktop=False):
     """Generate the complete Alem TV Smart TV client JavaScript (compatible with ES5+ engines)."""
     safe_default_portal = json.dumps(str(default_portal or ALEMTV_DEFAULT_PORTAL).rstrip('/'))
@@ -2104,7 +2161,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL, *, desktop=False):
     });
   }
 
-  // Settings Screen
+__TV_SIGN_OUT_JS__  // Settings Screen
   window.showSettings = function() {
     var modal = document.getElementById("settingsModal");
     if (modal) {
@@ -2124,7 +2181,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL, *, desktop=False):
     }
   };
 
-  function populateSettings() {
+  function populateSettings() {__RESET_LOGOUT__
     var sel = document.getElementById("portalSelector");
     if (sel) {
       sel.innerHTML = "";
@@ -2651,6 +2708,8 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL, *, desktop=False):
     # an individual request still has time left. Keep TV timing unchanged.
     rpc_timeout = 15000 if desktop else 5000
     return (template.replace('__DEFAULT_PORTAL__', safe_default_portal).replace('__PORTAL_LIST__', safe_portals_json)
+            .replace('__TV_SIGN_OUT_JS__', '' if desktop else _TV_SIGN_OUT_JS)
+            .replace('__RESET_LOGOUT__', '' if desktop else '\n    resetLogoutControls();')
             .replace('__RPC_TIMEOUT__', str(rpc_timeout))
             .replace('__BOOT_TIMEOUT__', str(3 * rpc_timeout + 2000 if desktop else 7000)))
 
@@ -2840,7 +2899,7 @@ __CSS__
       <div style="display:flex;gap:12px;margin-top:10px;flex-wrap:wrap;">
         <button class="btn btn-primary focusable" onclick="showLoginModal()">Вход по договору</button>
         <button class="btn focusable" onclick="reauthPortal()">Переподключиться</button>
-      </div>
+      </div>__TV_SIGN_OUT_HTML__
     </div>
   </div>
 </div>
@@ -2886,7 +2945,7 @@ __JS__
 </script>
 </body>
 </html>"""
-    return template.replace('__CSS__', css).replace('__JS__', js)
+    return template.replace('__CSS__', css).replace('__JS__', js).replace('__TV_SIGN_OUT_HTML__', '' if desktop else _TV_SIGN_OUT_HTML)
 
 def _ar_member(name, content, mtime=None):
     """Create a BSD/Debian ar archive member header + payload (aligned to 2 bytes)."""
@@ -2907,7 +2966,7 @@ def _ar_member(name, content, mtime=None):
 def build_alemtv_ipk(target_url=ALEMTV_DEFAULT_PORTAL, icon_bytes=None, large_icon_bytes=None, splash_bytes=None):
     """Package the Alem TV application into a standard webOS .ipk package."""
     app_id = ALEMTV_WEBOS_ID
-    version = '1.0.1'
+    version = '1.0.2'
     mtime = int(time.time())
 
     appinfo = {
@@ -3024,7 +3083,7 @@ def build_alemtv_wgt(target_url=ALEMTV_DEFAULT_PORTAL, pkg_id=ALEMTV_PKG_ID, app
         '<widget xmlns="http://www.w3.org/ns/widgets"\n'
         '        xmlns:tizen="http://tizen.org/ns/widgets"\n'
         f'        id="http://yourdomain/{safe_pkg}"\n'
-        '        version="1.0.3"\n'
+        '        version="1.0.4"\n'
         '        viewmodes="fullscreen">\n'
         f'    <tizen:application id="{safe_app_id}"\n'
         f'                       package="{safe_pkg}"\n'
