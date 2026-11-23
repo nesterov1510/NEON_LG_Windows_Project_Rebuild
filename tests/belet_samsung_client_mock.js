@@ -156,8 +156,12 @@ function matchesSimple(node, selector) {
     notHidden = true;
     selector = selector.slice(0, -':not(.hidden)'.length);
   }
+  const attrMatch = selector.match(/^([a-zA-Z0-9_-]*)\[([a-zA-Z0-9_-]+)="([^"]*)"\]$/);
   let matched;
-  if (selector === '*') matched = true;
+  if (attrMatch) {
+    const tagOk = !attrMatch[1] || node.tagName === attrMatch[1].toUpperCase();
+    matched = tagOk && node.getAttribute(attrMatch[2]) === attrMatch[3];
+  } else if (selector === '*') matched = true;
   else if (selector.startsWith('#')) matched = node.attributes.id === selector.slice(1);
   else if (selector.startsWith('.')) matched = node._classes.has(selector.slice(1));
   else matched = node.tagName === selector.toUpperCase();
@@ -1787,6 +1791,278 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
     'QR request goes through ClockProxy once active');
   assert(ids.qrImage.src && ids.qrImage.src.indexOf('data:image/png;base64,') === 0, 'QR image renders via ClockProxy');
   assert(!calls.some(c => c.url.indexOf('https://') === 0), 'zero direct https:// requests across entire 2025 login session');
+})();
+
+/* 22. Forced bypass mode (neon-bypass-mode="always") activates ClockProxy even with 2026+ TV clock + retries broken images */
+(() => {
+  const RealDate = Date;
+  const now2026 = RealDate.UTC(2026, 10, 23, 21, 0, 0);
+  function Fake2026(arg) {
+    if (!(this instanceof Fake2026)) return new RealDate(now2026).toString();
+    return new RealDate(arg === undefined ? now2026 : arg);
+  }
+  Fake2026.now = () => now2026;
+  Fake2026.UTC = RealDate.UTC;
+  Fake2026.parse = RealDate.parse;
+
+  buildDom();
+  const bypassMeta = document.createElement('meta');
+  bypassMeta.setAttribute('name', 'neon-bypass-mode');
+  bypassMeta.setAttribute('content', 'always');
+  document.body.appendChild(bypassMeta);
+
+  store.neon_belet_samsung_session_v2 = JSON.stringify({
+    token: 'tok-22', refresh: 'ref-22', phone: '+99361000022', fingerprint: 'fp-22'
+  });
+  timers.length = 0;
+  calls.length = 0;
+  delete store.neon_belet_pc_bridge_v1;
+
+  let svcLaunches22 = 0;
+  const s22 = Object.assign({}, sandbox, {
+    document,
+    Date: Fake2026,
+    setTimeout: (fn, delay) => {
+      const id = ++timerSeq;
+      timers.push({ id, fn, delay: delay || 0 });
+      return id;
+    },
+    tizen: {
+      systeminfo: { getCapability: () => '10.0' },
+      ApplicationControl: function (op) { this.operation = op; },
+      application: {
+        launchAppControl: (c, id, ok) => { svcLaunches22 += 1; if (ok) ok(); },
+        getCurrentApplication: () => ({ appInfo: { id: 'BeletFilm1.BeletClient' } })
+      },
+      time: { getCurrentDateTime: () => new RealDate(now2026), setDateTimeChangeListener: () => {} }
+    },
+    webapis: { network: { getActiveConnectionType: () => 3 } }
+  });
+  s22.window = s22;
+  s22.global = s22;
+  s22.self = s22;
+  vm.createContext(s22);
+
+  route('http://127.0.0.1:18767/__ping', 200, {
+    ok: true, mode: 'clock-proxy', port: 18767, sslClockYear: 2026, serverTimeMs: now2026
+  });
+  route('http://127.0.0.1:18767/__proxy/beletapis.com/api/v1/users/device', 200, { msg: 'ok' });
+  route('http://127.0.0.1:18767/__proxy/homepage.belet.me/api/v2/home_page', 200, {
+    status: 'ok',
+    result: [{
+      id: 1, title: 'Принудительный обход', source: 'top', items: [
+        { id: 303, type_id: 1, name: 'Bypass Film 303',
+          images: { vertical: { medium: { url: 'http://img.belet.me/303.jpg' } } } }
+      ]
+    }]
+  });
+  route('http://127.0.0.1:18767/__proxy/homepage.belet.me/api/v2/home_page', 200, { status: 'ok', result: [] });
+
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), s22, { filename: 'api.js' });
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), s22, { filename: 'app.js' });
+  runTimers();
+
+  assert(svcLaunches22 >= 1, 'forced bypass launches ClockProxy even when TV date is 2026');
+  assert(!ids.home.classList.contains('hidden'), 'home renders in forced bypass mode');
+  assert(!calls.some(c => c.url.indexOf('https://') === 0), 'API requests go through ClockProxy instead of direct HTTPS');
+
+  const card303 = ids.rows.querySelector('.card');
+  const poster = card303 && card303.querySelector('img');
+  assert(poster, 'poster img created');
+  assert.strictEqual(poster.getAttribute('referrerpolicy'), 'no-referrer', 'poster requests avoid cross-origin referer issues');
+  assert.strictEqual(poster.src, 'http://127.0.0.1:18767/__proxy/img.belet.me/303.jpg',
+    'public http:// poster URL routes via ClockProxy when bypass is active');
+
+  // Verify 2 retries before fallback placeholder on broken poster image
+  let retries = 0;
+  const origRm = poster.removeAttribute.bind(poster);
+  poster.removeAttribute = function (name) {
+    if (name === 'src') retries += 1;
+    return origRm(name);
+  };
+  poster.dispatch('error');
+  runTimers();
+  assert.strictEqual(retries, 1, 'first retry resets and reassigns poster URL');
+  assert.strictEqual(poster.src, 'http://127.0.0.1:18767/__proxy/img.belet.me/303.jpg');
+  poster.dispatch('error');
+  runTimers();
+  assert.strictEqual(retries, 2, 'second retry resets and reassigns poster URL');
+  assert.strictEqual(poster.src, 'http://127.0.0.1:18767/__proxy/img.belet.me/303.jpg');
+  poster.dispatch('error');
+  assert(poster.classList.contains('brand-fallback'), 'third failure shows brand fallback');
+  assert.strictEqual(poster.src, 'belet-logo.png');
+})();
+
+/* 23. Direct mode (neon-bypass-mode="off") skips ClockProxy & PC bridge and calls direct HTTPS */
+(() => {
+  const RealDate = Date;
+  const now2026 = RealDate.UTC(2026, 10, 23, 21, 5, 0);
+  function Fake2026(arg) {
+    if (!(this instanceof Fake2026)) return new RealDate(now2026).toString();
+    return new RealDate(arg === undefined ? now2026 : arg);
+  }
+  Fake2026.now = () => now2026;
+  Fake2026.UTC = RealDate.UTC;
+  Fake2026.parse = RealDate.parse;
+
+  buildDom();
+  const offMeta = document.createElement('meta');
+  offMeta.setAttribute('name', 'neon-bypass-mode');
+  offMeta.setAttribute('content', 'off');
+  document.body.appendChild(offMeta);
+  const staleBridgeMeta = document.createElement('meta');
+  staleBridgeMeta.setAttribute('name', 'neon-pc-bridge');
+  staleBridgeMeta.setAttribute('content', '192.168.1.99');
+  document.body.appendChild(staleBridgeMeta);
+  store.neon_belet_pc_bridge_v1 = '192.168.1.88';
+  store.neon_belet_samsung_session_v2 = JSON.stringify({
+    token: 'tok-23', refresh: 'ref-23', phone: '+99361000023', fingerprint: 'fp-23'
+  });
+  timers.length = 0;
+  calls.length = 0;
+
+  let svcLaunches23 = 0;
+  const s23 = Object.assign({}, sandbox, {
+    document,
+    Date: Fake2026,
+    tizen: {
+      systeminfo: { getCapability: () => '10.0' },
+      ApplicationControl: function (op) { this.operation = op; },
+      application: {
+        launchAppControl: () => { svcLaunches23 += 1; },
+        getCurrentApplication: () => ({ appInfo: { id: 'BeletFilm1.BeletClient' } })
+      }
+    },
+    webapis: { network: { getActiveConnectionType: () => 3 } }
+  });
+  s23.window = s23;
+  s23.global = s23;
+  s23.self = s23;
+  vm.createContext(s23);
+
+  route('https://beletapis.com/api/v1/users/device', 200, { msg: 'ok' });
+  route('https://homepage.belet.me/api/v2/home_page', 200, {
+    status: 'ok',
+    result: [{
+      id: 1, title: 'Прямой HTTPS', source: 'top', items: [
+        { id: 404, type_id: 1, name: 'Direct Film 404',
+          images: { vertical: { medium: { url: 'https://img.belet.me/404.jpg' } } } }
+      ]
+    }]
+  });
+  route('https://homepage.belet.me/api/v2/home_page', 200, { status: 'ok', result: [] });
+
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), s23, { filename: 'api.js' });
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), s23, { filename: 'app.js' });
+  runTimers();
+
+  assert.strictEqual(svcLaunches23, 0, 'direct mode never launches ClockProxy');
+  assert(!calls.some(c => c.url.indexOf(':18767') >= 0), 'direct mode never contacts any port 18767 bridge');
+  assert(!ids.home.classList.contains('hidden'), 'direct mode renders home directly over HTTPS');
+  assert(calls.some(c => c.url.indexOf('https://homepage.belet.me/api/v2/home_page') === 0), 'direct HTTPS request succeeded');
+  const card404 = ids.rows.querySelector('.card');
+  const directPoster = card404 && card404.querySelector('img');
+  assert(directPoster, 'direct poster img created');
+  assert.strictEqual(directPoster.src, 'https://img.belet.me/404.jpg', 'direct mode keeps original https:// poster URL');
+  delete store.neon_belet_pc_bridge_v1;
+})();
+
+/* 24. Forced bypass late ClockProxy readiness upgrades already-mounted home posters and retries via proxy */
+(() => {
+  const RealDate = Date;
+  const now2026 = RealDate.UTC(2026, 10, 23, 21, 10, 0);
+  function Fake2026(arg) {
+    if (!(this instanceof Fake2026)) return new RealDate(now2026).toString();
+    return new RealDate(arg === undefined ? now2026 : arg);
+  }
+  Fake2026.now = () => now2026;
+  Fake2026.UTC = RealDate.UTC;
+  Fake2026.parse = RealDate.parse;
+
+  buildDom();
+  const bypassMeta = document.createElement('meta');
+  bypassMeta.setAttribute('name', 'neon-bypass-mode');
+  bypassMeta.setAttribute('content', 'always');
+  document.body.appendChild(bypassMeta);
+
+  store.neon_belet_samsung_session_v2 = JSON.stringify({
+    token: 'tok-24', refresh: 'ref-24', phone: '+99361000024', fingerprint: 'fp-24'
+  });
+  timers.length = 0;
+  calls.length = 0;
+  delete store.neon_belet_pc_bridge_v1;
+
+  const s24 = Object.assign({}, sandbox, {
+    document,
+    Date: Fake2026,
+    setTimeout: (fn, delay) => {
+      if (delay !== undefined && delay <= 60) { fn(); return 0; }
+      const id = ++timerSeq;
+      timers.push({ id, fn, due: (s24.__nowMs || 0) + (delay || 0), delay: delay || 0 });
+      return id;
+    },
+    tizen: {
+      systeminfo: { getCapability: () => '10.0' },
+      ApplicationControl: function (op) { this.operation = op; },
+      application: {
+        launchAppControl: (c, id, ok) => { if (ok) ok(); },
+        getCurrentApplication: () => ({ appInfo: { id: 'BeletFilm1.BeletClient' } })
+      }
+    },
+    webapis: { network: { getActiveConnectionType: () => 3 } }
+  });
+  s24.__nowMs = 0;
+  s24.window = s24;
+  s24.global = s24;
+  s24.self = s24;
+  vm.createContext(s24);
+
+  // Forced bypass on 2026+ waits up to 8000ms for ClockProxy, then falls back to direct HTTPS so home opens
+  route('https://beletapis.com/api/v1/users/device', 200, { msg: 'ok' });
+  route('https://homepage.belet.me/api/v2/home_page', 200, {
+    status: 'ok',
+    result: [{
+      id: 1, title: 'Поздний обход', source: 'top', items: [
+        { id: 505, type_id: 1, name: 'Late Bypass Film 505',
+          images: { vertical: { medium: { url: 'https://img.belet.me/505.jpg' } } } }
+      ]
+    }]
+  });
+  route('https://homepage.belet.me/api/v2/home_page', 200, { status: 'ok', result: [] });
+
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), s24, { filename: 'api.js' });
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), s24, { filename: 'app.js' });
+
+  let g24 = 0;
+  while (timers.length && g24 < 60 && ids.home.classList.contains('hidden')) {
+    timers.sort((a, b) => a.due - b.due);
+    const next = timers.shift();
+    s24.__nowMs = next.due;
+    if (routes.every(r => String(r.match).indexOf('__ping') < 0)) {
+      route('http://127.0.0.1:18767/__ping', 0, {});
+      route('http://localhost:18767/__ping', 0, {});
+    }
+    next.fn();
+    g24 += 1;
+  }
+  // Consume any leftover __ping routes before testing late ClockProxy recovery
+  for (let i = routes.length - 1; i >= 0; i -= 1) {
+    if (String(routes[i].match).indexOf('__ping') >= 0) routes.splice(i, 1);
+  }
+  assert(!ids.home.classList.contains('hidden'), '2026+ forced bypass enters home via fallback if ClockProxy takes >8s');
+  const card505 = ids.rows.querySelector('.card');
+  const poster505 = card505 && card505.querySelector('img');
+  assert.strictEqual(poster505.src, 'https://img.belet.me/505.jpg', 'initial poster uses direct HTTPS during fallback');
+
+  // Now ClockProxy finishes starting on a background probe -> recovers home posters onto HTTP proxy!
+  route('http://127.0.0.1:18767/__ping', 200, {
+    ok: true, mode: 'clock-proxy', port: 18767, sslClockYear: 2026, serverTimeMs: now2026
+  });
+  runTimers();
+  const updatedCard505 = ids.rows.querySelector('.card');
+  const updatedPoster505 = updatedCard505 && updatedCard505.querySelector('img');
+  assert.strictEqual(updatedPoster505.src, 'http://127.0.0.1:18767/__proxy/img.belet.me/505.jpg',
+    'late ClockProxy readiness refreshes mounted home posters through proxy');
 })();
 
 assert.strictEqual(routes.length, 0, 'all queued responses were consumed: ' + JSON.stringify(routes.map(r => r.match)));

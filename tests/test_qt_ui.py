@@ -164,23 +164,38 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     assert win.btn_sam_sdb_check is not None
     assert win.btn_sam_cert is not None
     assert win.btn_sam_belet_install is not None
+    assert win.btn_sam_belet_direct is not None
     assert win.btn_sam_belet_launch is not None
     assert win.btn_sam_belet_remove is not None
     assert len(win.sam_host_ip_lbl.text()) > 5
 
-    with mock.patch.object(api, 'install_samsung_belet', return_value={
+    with mock.patch.object(api, 'install_samsung_belet_client', return_value={
         'ok': True,
-        'duid': 'DUID_UI_1',
-        'app_id': 'BeletTV001.Belet',
-        'output': '[+] Belet (BeletTV001.Belet) installed successfully!',
+        'pkg_id': 'BeletFilm1',
+        'app_id': 'BeletFilm1.BeletClient',
+        'output': '[+] Belet (BeletFilm1.BeletClient) installed WITH bypass!',
     }) as m_sam_inst:
-        win.install_samsung_belet()
+        win.install_samsung_belet_client()
         deadline = __import__('time').time() + 2.0
         while win.sam_busy and __import__('time').time() < deadline:
             win._pump()
             qt_app.processEvents()
         m_sam_inst.assert_called_once()
-        assert 'BeletTV001.Belet' in win.sam_term.edit.toPlainText()
+        assert 'BeletFilm1.BeletClient' in win.sam_term.edit.toPlainText()
+
+    with mock.patch.object(api, 'install_samsung_belet_direct_client', return_value={
+        'ok': True,
+        'pkg_id': 'BeletFilm1',
+        'app_id': 'BeletFilm1.BeletClient',
+        'output': '[+] Belet (BeletFilm1.BeletClient) installed WITHOUT bypass!',
+    }) as m_sam_dir:
+        win.install_samsung_belet_direct_client()
+        deadline = __import__('time').time() + 2.0
+        while win.sam_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_sam_dir.assert_called_once()
+        assert 'WITHOUT bypass' in win.sam_term.edit.toPlainText()
 
     # LG page: the new native Belet client (tm.belet.neonclient) is installable from the UI
     prev_tv_connected = win.tv_connected
@@ -232,6 +247,8 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
          mock.patch.object(api, 'action', side_effect=AssertionError('must not act')), \
          mock.patch.object(api, 'install_belet_app', side_effect=AssertionError('must not install')), \
          mock.patch.object(api, 'install_samsung_belet', side_effect=AssertionError('must not install samsung')), \
+         mock.patch.object(api, 'install_samsung_belet_client', side_effect=AssertionError('must not install samsung client')), \
+         mock.patch.object(api, 'install_samsung_belet_direct_client', side_effect=AssertionError('must not install samsung direct')), \
          mock.patch.object(api, 'connect_samsung', side_effect=AssertionError('must not connect samsung')), \
          mock.patch.object(api, 'samsung_action', side_effect=AssertionError('must not send samsung action')), \
          mock.patch.object(api, 'connect_vpn', side_effect=AssertionError('must not start conf')), \

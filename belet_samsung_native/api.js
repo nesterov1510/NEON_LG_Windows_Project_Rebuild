@@ -48,13 +48,24 @@
   function proxyUrl(targetUrl) {
     var s;
     var match;
+    var host;
+    var rest;
     if (!clockProxyBase || typeof targetUrl !== 'string') return targetUrl;
     s = targetUrl;
     if (s.indexOf(clockProxyBase + '/__proxy/') === 0) return s;
-    match = /^https:\/\/([^\/?#]+)(.*)$/i.exec(s);
-    if (!match) return s;
+    match = /^https:\/\/([^\/:?#]+)(?::443)?(.*)$/i.exec(s);
+    if (!match) {
+      match = /^http:\/\/([^\/:?#]+)(?::80)?(.*)$/i.exec(s);
+      if (!match) return s;
+      host = match[1].toLowerCase();
+      if (!/(?:^|\.)(belet\.me|belet\.tm|beletapis\.com)$/i.test(host)) return s;
+      rest = match[2] || '';
+      return clockProxyBase + '/__proxy/' + host +
+        (rest && rest.charAt(0) === '/' ? rest : '/' + rest);
+    }
+    rest = match[2] || '';
     return clockProxyBase + '/__proxy/' + match[1].toLowerCase() +
-      (match[2] && match[2].charAt(0) === '/' ? match[2] : '/' + (match[2] || ''));
+      (rest && rest.charAt(0) === '/' ? rest : '/' + rest);
   }
 
   function randomHex(bytes) {

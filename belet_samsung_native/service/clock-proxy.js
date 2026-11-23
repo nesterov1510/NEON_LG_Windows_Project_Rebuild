@@ -197,28 +197,44 @@
     return false;
   }
 
-  function verifyClockSkewSocket(sock, upHost) {
+  function verifyClockSkewSocket(sock, upHost, clockOk) {
     var cert;
     var idErr;
     var authErr;
+    var checkMs;
+    var dateErr;
     if (!sock) return new Error('missing TLS socket');
-    if (sock.__neonVerifiedHost === upHost) return null;
+    if (sock.__neonVerifiedHost === upHost) {
+      if (clockOk) {
+        dateErr = verifyCertWindowAgainstDate(sock, Date.now());
+        if (dateErr) return dateErr;
+      }
+      return null;
+    }
     cert = typeof sock.getPeerCertificate === 'function' ? sock.getPeerCertificate(true) : null;
     if (!cert || !cert.subject) return new Error('missing peer certificate');
     if (tlsMod && typeof tlsMod.checkServerIdentity === 'function') {
       idErr = tlsMod.checkServerIdentity(upHost, cert);
       if (idErr) return idErr;
     }
+    checkMs = clockOk ? Date.now() : estimatedServerTimeMs();
+    if (checkMs) {
+      dateErr = verifyCertWindowAgainstDate(sock, checkMs);
+      if (dateErr) return dateErr;
+    }
     if (sock.authorized) {
       sock.__neonVerifiedHost = upHost;
       return null;
     }
     authErr = String(sock.authorizationError || '');
-    if (authErr === 'CERT_NOT_YET_VALID') {
+    if (!clockOk && authErr === 'CERT_NOT_YET_VALID') {
       sock.__neonVerifiedHost = upHost;
       return null;
     }
-    if (authErr === 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY' && isLegacyTizenNode() && !isSelfSignedCert(cert)) {
+    if ((authErr === 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY' ||
+         authErr === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+         (authErr === 'SELF_SIGNED_CERT_IN_CHAIN' && isLegacyTizenNode())) &&
+        !isSelfSignedCert(cert)) {
       sock.__neonVerifiedHost = upHost;
       return null;
     }
@@ -264,7 +280,7 @@
   }
 
   function scanJsonForHosts(text) {
-    var rx = /https:(?:\\\/|\/){2}([a-z0-9.-]+)(?:[\/"'?\\]|$)/gi;
+    var rx = /https?:(?:\\\/|\/){2}([a-z0-9.-]+)(?:[\/"'?:\\]|$)/gi;
     var match;
     while ((match = rx.exec(text)) !== null) {
       registerDynamicHost(match[1]);
@@ -297,16 +313,29 @@
     return out;
   }
 
-  function rewriteRedirectLocation(loc, proxyOrigin) {
+  function rewriteRedirectLocation(loc, proxyOrigin, upHost) {
     var raw = (Object.prototype.toString.call(loc) === '[object Array]') ? loc[0] : loc;
     var s = String(raw || '');
     var m = s.match(/^https:\/\/([a-z0-9.-]+)(?::443)?(\/.*)?$/i);
+    var mp;
     var h;
-    if (!m) return s;
-    h = m[1].toLowerCase();
-    if (!isSafePublicHost(h)) return s;
-    registerDynamicHost(h);
-    return proxyOrigin + '/__proxy/' + h + (m[2] || '/');
+    if (m) {
+      h = m[1].toLowerCase();
+      if (!isSafePublicHost(h)) return s;
+      registerDynamicHost(h);
+      return proxyOrigin + '/__proxy/' + h + (m[2] || '/');
+    }
+    mp = s.match(/^\/\/([a-z0-9.-]+)(\/.*)?$/);
+    if (mp) {
+      h = mp[1].toLowerCase();
+      if (!isSafePublicHost(h)) return s;
+      registerDynamicHost(h);
+      return proxyOrigin + '/__proxy/' + h + (mp[2] || '/');
+    }
+    if (s.charAt(0) === '/' && upHost && isSafePublicHost(upHost)) {
+      return proxyOrigin + '/__proxy/' + upHost + s;
+    }
+    return s;
   }
 
   function parseProxyRoute(rawUrl) {
@@ -351,11 +380,9 @@
     var k;
     var lk;
     var reqMethod;
-    var reqOpts;
-    var upReq;
     var aborted = false;
-    var startedUpstream = false;
     var reqPaused = false;
+    var canRetry = false;
 
     if (!fromThisTv(req)) {
       res.writeHead(403, { 'Content-Type': 'text/plain' });
@@ -408,6 +435,7 @@
     inH = req.headers || {};
     outH = {};
     reqMethod = String(req.method || 'GET').toUpperCase();
+    canRetry = (reqMethod === 'GET' || reqMethod === 'HEAD');
     for (k in inH) {
       if (!Object.prototype.hasOwnProperty.call(inH, k)) continue;
       lk = k.toLowerCase();
@@ -423,179 +451,227 @@
     if (zlib) outH['accept-encoding'] = 'gzip, deflate';
     else outH['accept-encoding'] = 'identity';
 
-    reqOpts = {
-      hostname: upHost,
-      port: 443,
-      path: upPath,
-      method: reqMethod,
-      headers: outH,
-      servername: upHost,
-      rejectUnauthorized: clockOk
-    };
-    if (clockOk && strictAgent) reqOpts.agent = strictAgent;
-    else if (!clockOk && skewAgent) reqOpts.agent = skewAgent;
-    else reqOpts.agent = false;
-
-    function flushBodyToUpstream() {
-      if (startedUpstream || aborted) return;
-      startedUpstream = true;
-      if (reqMethod === 'GET' || reqMethod === 'HEAD') {
-        upReq.end();
-        return;
-      }
-      if (reqPaused && typeof req.resume === 'function') req.resume();
-      req.pipe(upReq);
-    }
-
-    upReq = https.request(reqOpts, function (upRes) {
-      var upH = upRes.headers || {};
-      var status = upRes.statusCode || 200;
-      var serverMs = recordServerDate(upH.date);
-      var dateErr;
-      var respH = {};
-      var hk;
-      var lhk;
-      var ctype;
-      var isM3u8;
-      var isJsonScan;
-      var chunks;
-      var total;
-      var overflow;
-
-      if (!clockOk) {
-        dateErr = verifyCertWindowAgainstDate(upRes.socket, serverMs);
-        if (dateErr) {
-          upRes.resume();
-          sendJsonError(res, 502, dateErr.message);
-          return;
-        }
-      }
-
-      for (hk in upH) {
-        if (!Object.prototype.hasOwnProperty.call(upH, hk)) continue;
-        lhk = hk.toLowerCase();
-        if (lhk === 'transfer-encoding' || lhk === 'connection' || lhk === 'keep-alive' ||
-            lhk === 'proxy-connection' || lhk === 'upgrade' || lhk === 'te' || lhk === 'trailer' ||
-            lhk === 'strict-transport-security' || lhk === 'content-security-policy' ||
-            lhk === 'content-security-policy-report-only' || lhk === 'cross-origin-resource-policy') {
-          continue;
-        }
-        if (lhk === 'location') {
-          respH[lhk] = rewriteRedirectLocation(upH[hk], proxyOrigin);
-          continue;
-        }
-        respH[lhk] = upH[hk];
-      }
-
-      ctype = String(respH['content-type'] || '').toLowerCase();
-      isM3u8 = /\.m3u8(?:$|\?)/i.test(upPathname) || ctype.indexOf('mpegurl') >= 0;
-      isJsonScan = !!API_SCAN_HOSTS[upHost] && (ctype.indexOf('application/json') >= 0 || ctype.indexOf('text/plain') >= 0);
-
-      if ((isM3u8 || isJsonScan) && reqMethod !== 'HEAD' && status >= 200 && status < 300) {
-        chunks = [];
-        total = 0;
-        overflow = false;
-        upRes.on('data', function (ch) {
-          total += ch.length;
-          if (total > 4 * 1024 * 1024) {
-            if (!overflow) {
-              overflow = true;
-              if (!aborted && !res.headersSent) {
-                res.writeHead(status, respH);
-                for (var ci = 0; ci < chunks.length; ci += 1) res.write(chunks[ci]);
-              }
-              chunks = null;
-            }
-            if (!aborted && res.headersSent) res.write(ch);
-            return;
-          }
-          chunks.push(ch);
-        });
-        upRes.on('end', function () {
-          var rawBuf;
-          if (aborted) return;
-          if (overflow) {
-            if (res.headersSent) res.end();
-            return;
-          }
-          rawBuf = Buffer.concat(chunks);
-          decodeBody(rawBuf, respH['content-encoding'], function (plainBuf) {
-            var text = plainBuf.toString('utf8');
-            var outBuf;
-            if (isJsonScan) {
-              scanJsonForHosts(text);
-              outBuf = rawBuf;
-            } else {
-              text = rewriteM3u8(text, proxyOrigin, upHost);
-              outBuf = bufFrom(text, 'utf8');
-              delete respH['content-encoding'];
-            }
-            respH['content-length'] = outBuf.length;
-            if (!res.headersSent) {
-              res.writeHead(status, respH);
-              res.end(outBuf);
-            }
-          });
-        });
-        return;
-      }
-
-      if (!aborted && !res.headersSent) res.writeHead(status, respH);
-      if (reqMethod === 'HEAD' || status === 204 || status === 304) {
-        upRes.resume();
-        res.end();
-        return;
-      }
-      upRes.pipe(res);
-    });
-
-    if (reqMethod !== 'GET' && reqMethod !== 'HEAD' && typeof req.pause === 'function') {
+    if (!canRetry && typeof req.pause === 'function') {
       req.pause();
       reqPaused = true;
     }
 
-    upReq.on('socket', function (sock) {
-      if (clockOk) {
-        flushBodyToUpstream();
-        return;
-      }
-      if (sock && sock.__neonVerifiedHost === upHost) {
-        flushBodyToUpstream();
-        return;
-      }
-      if (sock && typeof sock.once === 'function') {
-        sock.once('secureConnect', function () {
-          var tlsErr = verifyClockSkewSocket(sock, upHost);
-          if (tlsErr) {
-            aborted = true;
-            try { upReq.destroy(tlsErr); } catch (e) {}
-            sendJsonError(res, 502, tlsErr.message);
-            return;
-          }
-          flushBodyToUpstream();
-        });
-      } else {
-        flushBodyToUpstream();
-      }
-    });
-
-    upReq.setTimeout(/\.m3u8|\.(?:ts|m4s|mp4)(?:$|\?)/i.test(upPathname) ? 45000 : 20000, function () {
-      try { upReq.abort(); } catch (e) {}
-    });
-
-    upReq.on('error', function (err) {
-      if (aborted && res.headersSent) return;
-      sendJsonError(res, 502, (err && err.message) ? err.message : 'Upstream network error');
-    });
+    var activeUpReq = null;
 
     res.on('close', function () {
       if (!res.finished && !res.writableFinished) {
         aborted = true;
-        try { upReq.abort(); } catch (e) {}
+        if (activeUpReq) {
+          try { activeUpReq.abort(); } catch (e) {}
+        }
       }
     });
 
-    if (clockOk) flushBodyToUpstream();
+    function startAttempt(useFreshSocket, retried) {
+      var reqOpts;
+      var upReq;
+      var startedUpstream = false;
+      var tlsRejected = false;
+
+      if (aborted) return;
+
+      reqOpts = {
+        hostname: upHost,
+        port: 443,
+        path: upPath,
+        method: reqMethod,
+        headers: outH,
+        servername: upHost,
+        rejectUnauthorized: false
+      };
+      if (!useFreshSocket && skewAgent) reqOpts.agent = skewAgent;
+      else reqOpts.agent = false;
+
+      function flushBodyToUpstream() {
+        if (startedUpstream || aborted || tlsRejected) return;
+        startedUpstream = true;
+        if (canRetry) {
+          upReq.end();
+          return;
+        }
+        if (reqPaused && typeof req.resume === 'function') req.resume();
+        req.pipe(upReq);
+      }
+
+      upReq = https.request(reqOpts, function (upRes) {
+        var upH = upRes.headers || {};
+        var status = upRes.statusCode || 200;
+        var serverMs = recordServerDate(upH.date);
+        var dateErr;
+        var respH = {};
+        var hk;
+        var lhk;
+        var ctype;
+        var isM3u8;
+        var isJsonScan;
+        var chunks;
+        var total;
+        var overflow;
+
+        dateErr = verifyCertWindowAgainstDate(upRes.socket, serverMs || (clockOk ? Date.now() : 0));
+        if (dateErr) {
+          tlsRejected = true;
+          upRes.resume();
+          sendJsonError(res, 502, dateErr.message);
+          return;
+        }
+
+        for (hk in upH) {
+          if (!Object.prototype.hasOwnProperty.call(upH, hk)) continue;
+          lhk = hk.toLowerCase();
+          if (lhk === 'transfer-encoding' || lhk === 'connection' || lhk === 'keep-alive' ||
+              lhk === 'proxy-connection' || lhk === 'upgrade' || lhk === 'te' || lhk === 'trailer' ||
+              lhk === 'strict-transport-security' || lhk === 'content-security-policy' ||
+              lhk === 'content-security-policy-report-only' || lhk === 'cross-origin-resource-policy') {
+            continue;
+          }
+          if (lhk === 'location') {
+            respH[lhk] = rewriteRedirectLocation(upH[hk], proxyOrigin, upHost);
+            continue;
+          }
+          respH[lhk] = upH[hk];
+        }
+
+        ctype = String(respH['content-type'] || '').toLowerCase();
+        isM3u8 = /\.m3u8(?:$|\?)/i.test(upPathname) || ctype.indexOf('mpegurl') >= 0;
+        isJsonScan = !!API_SCAN_HOSTS[upHost] && (ctype.indexOf('json') >= 0 || ctype.indexOf('text/plain') >= 0);
+
+        upRes.on('error', function (uErr) {
+          if (!aborted && !res.headersSent) {
+            sendJsonError(res, 502, (uErr && uErr.message) ? uErr.message : 'Upstream stream error');
+          } else {
+            try { res.destroy(); } catch (e) {}
+          }
+        });
+
+        if ((isM3u8 || isJsonScan) && reqMethod !== 'HEAD' && status >= 200 && status < 300) {
+          chunks = [];
+          total = 0;
+          overflow = false;
+          upRes.on('data', function (ch) {
+            total += ch.length;
+            if (total > 4 * 1024 * 1024) {
+              if (!overflow) {
+                overflow = true;
+                if (!aborted && !res.headersSent) {
+                  res.writeHead(status, respH);
+                  for (var ci = 0; ci < chunks.length; ci += 1) res.write(chunks[ci]);
+                }
+                chunks = null;
+              }
+              if (!aborted && res.headersSent) res.write(ch);
+              return;
+            }
+            chunks.push(ch);
+          });
+          upRes.on('end', function () {
+            var rawBuf;
+            if (aborted) return;
+            if (overflow) {
+              if (res.headersSent) res.end();
+              return;
+            }
+            rawBuf = Buffer.concat(chunks);
+            decodeBody(rawBuf, respH['content-encoding'], function (plainBuf) {
+              var text = plainBuf.toString('utf8');
+              var outBuf;
+              if (isJsonScan) {
+                scanJsonForHosts(text);
+                outBuf = rawBuf;
+              } else {
+                text = rewriteM3u8(text, proxyOrigin, upHost);
+                outBuf = bufFrom(text, 'utf8');
+                delete respH['content-encoding'];
+              }
+              respH['content-length'] = outBuf.length;
+              if (!res.headersSent) {
+                res.writeHead(status, respH);
+                res.end(outBuf);
+              }
+            });
+          });
+          return;
+        }
+
+        if (!aborted && !res.headersSent) res.writeHead(status, respH);
+        if (reqMethod === 'HEAD' || status === 204 || status === 304) {
+          upRes.resume();
+          res.end();
+          return;
+        }
+        upRes.pipe(res);
+      });
+
+      activeUpReq = upReq;
+
+      upReq.on('socket', function (sock) {
+        if (!sock) {
+          flushBodyToUpstream();
+          return;
+        }
+        if (sock.__neonVerifiedHost === upHost) {
+          if (clockOk) {
+            var cachedDateErr = verifyClockSkewSocket(sock, upHost, clockOk);
+            if (cachedDateErr) {
+              tlsRejected = true;
+              try { upReq.destroy(cachedDateErr); } catch (e) {}
+              sendJsonError(res, 502, cachedDateErr.message);
+              return;
+            }
+          }
+          flushBodyToUpstream();
+          return;
+        }
+        if (sock.encrypted && !sock.connecting && !sock.pending) {
+          var syncErr = verifyClockSkewSocket(sock, upHost, clockOk);
+          if (syncErr) {
+            tlsRejected = true;
+            try { upReq.destroy(syncErr); } catch (e) {}
+            sendJsonError(res, 502, syncErr.message);
+            return;
+          }
+          flushBodyToUpstream();
+          return;
+        }
+        if (typeof sock.once === 'function') {
+          sock.once('secureConnect', function () {
+            var tlsErr = verifyClockSkewSocket(sock, upHost, clockOk);
+            if (tlsErr) {
+              tlsRejected = true;
+              try { upReq.destroy(tlsErr); } catch (e) {}
+              sendJsonError(res, 502, tlsErr.message);
+              return;
+            }
+            flushBodyToUpstream();
+          });
+        } else {
+          flushBodyToUpstream();
+        }
+      });
+
+      upReq.setTimeout(/\.m3u8|\.(?:ts|m4s|mp4)(?:$|\?)/i.test(upPathname) ? 45000 : 20000, function () {
+        try { upReq.abort(); } catch (e) {}
+      });
+
+      upReq.on('error', function (err) {
+        var code = err && err.code ? String(err.code) : '';
+        if (aborted || res.headersSent) return;
+        if (!retried && !tlsRejected && canRetry &&
+            (code === 'ECONNRESET' || code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' ||
+             /socket hang up/i.test(String(err && err.message || '')))) {
+          startAttempt(true, true);
+          return;
+        }
+        sendJsonError(res, 502, (err && err.message) ? err.message : 'Upstream network error');
+      });
+    }
+
+    startAttempt(false, false);
   }
 
   var server = http.createServer(handleRequest);

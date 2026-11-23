@@ -13,9 +13,17 @@ def test_only_normal_belet_buttons_remain_in_interfaces():
                         'УСТАНОВИТЬ BELET TEST', 'ДИАГНОСТИКА DIRECT TEST'):
             assert removed not in text
     assert 'onclick="installBelet()"' in html
-    assert 'onclick="installSamBelet()"' in html
+    assert 'onclick="installSamBelet()"' not in html
+    assert 'onclick="installSamBeletClient()"' in html
+    assert 'onclick="installSamBeletDirectClient()"' in html
+    assert 'onclick="launchSamBeletClient()"' in html
+    assert 'onclick="removeSamBeletClient()"' in html
+    assert not (root / 'samsung-belet/BeletTV001-unsigned.wgt').exists()
     assert 'self.btn_belet_install.clicked.connect(self.install_belet)' in legacy
-    assert 'self.btn_sam_belet_install.clicked.connect(self.install_samsung_belet)' in legacy
+    assert 'self.btn_sam_belet_install.clicked.connect(self.install_samsung_belet_client)' in legacy
+    assert 'self.btn_sam_belet_direct.clicked.connect(self.install_samsung_belet_direct_client)' in legacy
+    assert 'self.btn_sam_belet_launch.clicked.connect(self.launch_samsung_belet_client)' in legacy
+    assert 'self.btn_sam_belet_remove.clicked.connect(self.remove_samsung_belet_client)' in legacy
     assert BELET_PKG_ID == 'BeletTV001' and BELET_APP_ID == 'BeletTV001.Belet'
     for method in ('install_samsung_belet_direct', 'install_samsung_belet_browser', 'debug_samsung_belet_direct'):
         assert not hasattr(Api, method)

@@ -120,8 +120,13 @@ def test_client_targets_belet_api_hosts_and_ships_csp():
     connect = csp[csp.index('connect-src'):csp.index(';', csp.index('connect-src'))]
     assert 'https://*.belet.me' in connect
     assert 'https://*.belet.tm' in connect
-    assert "img-src 'self' https: data:" in csp
-    assert 'media-src https: blob:' in csp
+    assert 'http:' in connect
+    img_src = csp[csp.index('img-src'):csp.index(';', csp.index('img-src'))]
+    media_src = csp[csp.index('media-src'):csp.index(';', csp.index('media-src'))]
+    for src_tok in ("'self'", 'https:', 'http:', 'data:', 'blob:'):
+        assert src_tok in img_src
+    for src_tok in ('https:', 'http:', 'blob:'):
+        assert src_tok in media_src
     assert 'http://developer.samsung.com/privilege/avplay' in config, 'AVPlay needs its Tizen privilege'
     api = _client_source('api.js')
     for path in ('/api/v1/auth/sign-in', '/api/v1/auth/check-code-mobile', '/api/v1/auth/get-qrcode',
@@ -231,10 +236,87 @@ def test_client_packaged_resource_resolution_and_ui(monkeypatch, tmp_path):
         return {'ok': True}
     monkeypatch.setattr(api, 'install_local_samsung_wgt', install)
     assert api.install_samsung_belet_client('192.168.1.3')['ok']
+    assert api.install_samsung_belet_direct_client('192.168.1.3')['ok']
     assert calls[0][0] == '192.168.1.3'
     assert calls[0][2] == {'_expected_pkg': 'BeletFilm1', '_launch': True}
-    for name in ('app_legacy.py', 'ui.html'):
-        assert 'УСТАНОВИТЬ BELET SAMSUNG · НОВЫЙ КЛИЕНТ' in (root / name).read_text(encoding='utf-8')
+    assert calls[1][2] == {'_expected_pkg': 'BeletFilm1', '_launch': True, '_bypass_mode': 'direct'}
+    assert 'BELET TV · С ОБХОДОМ' in (root / 'ui.html').read_text(encoding='utf-8')
+    assert 'BELET TV · БЕЗ ОБХОДА' in (root / 'ui.html').read_text(encoding='utf-8')
+    ui_qt_txt = (root / 'ui_qt.py').read_text(encoding='utf-8')
+    assert 'Belet TV · С обходом' in ui_qt_txt
+    assert 'Belet TV · Без обхода' in ui_qt_txt
+
+
+def test_direct_client_strips_clock_proxy_and_sets_bypass_off(monkeypatch):
+    from core import Api
+    uploaded = []
+
+    class Sdb:
+        def __init__(self, *args, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def capability(self): return {}
+        def get_duid(self, **kwargs): return 'mock-device'
+        def resolve_sdk_toolpath(self, caps): return '/tmp/sdk_tools'
+        def push_bytes(self, payload, path): uploaded.append(payload)
+        def install_wgt(self, pkg, path, timeout): return 'install completed'
+        def launch_app(self, app): return 'launched'
+
+    class Cert:
+        def find_saved_samsung_certs(self, duid):
+            return {'author_key': 'a', 'author_certs': ['a'], 'dist_key': 'd', 'dist_certs': ['d']}
+
+    api = Api()
+    monkeypatch.setattr('core.SdbClient', Sdb)
+    monkeypatch.setattr('core._tizen_local_ip', lambda *a: '192.168.1.50')
+    monkeypatch.setattr(api, '_samsung_cert_manager', lambda: Cert())
+    monkeypatch.setattr('core.sign_wgt_bytes', lambda data, *args: data)
+    monkeypatch.setattr('core.verify_wgt_signatures', lambda data: None)
+
+    r_bypass = api.install_samsung_belet_client('192.168.1.3')
+    r_direct = api.install_samsung_belet_direct_client('192.168.1.3')
+    assert r_bypass['ok'] and r_direct['ok'] and len(uploaded) == 2
+
+    with zipfile.ZipFile(__import__('io').BytesIO(uploaded[0])) as zb:
+        assert 'service/clock-proxy.js' in zb.namelist()
+        assert '<tizen:service' in zb.read('config.xml').decode('utf-8')
+        html_b = zb.read('index.html').decode('utf-8')
+        assert '<meta name="neon-bypass-mode" content="always">' in html_b
+        assert '<meta name="neon-pc-bridge" content="192.168.1.50">' in html_b
+
+    with zipfile.ZipFile(__import__('io').BytesIO(uploaded[1])) as zd:
+        assert 'service/clock-proxy.js' not in zd.namelist()
+        assert 'wrt-service.js' not in zd.namelist()
+        cfg_d = zd.read('config.xml').decode('utf-8')
+        assert '<tizen:service' not in cfg_d
+        assert 'background-support="disable"' in cfg_d
+        html_d = zd.read('index.html').decode('utf-8')
+        assert '<meta name="neon-bypass-mode" content="off">' in html_d
+        assert 'neon-pc-bridge' not in html_d
+
+
+def test_launch_and_remove_samsung_belet_client(monkeypatch):
+    from core import Api
+    calls = []
+
+    class Sdb:
+        def __init__(self, *args, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def launch_app(self, app):
+            calls.append(('launch', app))
+            return 'successfully launched'
+        def uninstall_app(self, pkg):
+            calls.append(('uninstall', pkg))
+            return 'uninstall completed'
+
+    api = Api()
+    monkeypatch.setattr('core.SdbClient', Sdb)
+    r1 = api.launch_samsung_belet_client('192.168.1.3')
+    r2 = api.remove_samsung_belet_client('192.168.1.3')
+    assert r1['ok'] and r1['app_id'] == 'BeletFilm1.BeletClient'
+    assert r2['ok'] and r2['pkg_id'] == 'BeletFilm1'
+    assert calls == [('launch', 'BeletFilm1.BeletClient'), ('uninstall', 'BeletFilm1')]
 
 
 def test_bundled_client_strips_service_on_manifest_error(monkeypatch):
@@ -358,6 +440,16 @@ const srvOk = https.createServer({ key: fs.readFileSync(td + '/ok.key'), cert: f
       res.end(JSON.stringify({ url: 'https://cdn-media.example.org/hls/1/master.m3u8', got: body }));
       return;
     }
+    if (req.url === '/redir-rel') {
+      res.writeHead(302, { Location: '/v2/next?x=1', Date: serverDateHdr });
+      res.end();
+      return;
+    }
+    if (req.url === '/redir-proto') {
+      res.writeHead(302, { Location: '//cdn-media.example.org/hls/1/master.m3u8', Date: serverDateHdr });
+      res.end();
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json', Date: serverDateHdr });
     res.end(JSON.stringify({ ok: true }));
   });
@@ -418,6 +510,12 @@ Promise.all([
     const r1 = await get('/__proxy/beletapis.com/api/v3/files/1', 'POST', '{"x":1}', { Authorization: 'tok123' });
     assert.strictEqual(r1.status, 200);
     assert.strictEqual(JSON.parse(r1.body).got, '{"x":1}');
+    const rRedirRel = await get('/__proxy/beletapis.com/redir-rel');
+    assert.strictEqual(rRedirRel.status, 302);
+    assert.strictEqual(rRedirRel.headers.location, 'http://127.0.0.1:' + p + '/__proxy/beletapis.com/v2/next?x=1');
+    const rRedirProto = await get('/__proxy/beletapis.com/redir-proto');
+    assert.strictEqual(rRedirProto.status, 302);
+    assert.strictEqual(rRedirProto.headers.location, 'http://127.0.0.1:' + p + '/__proxy/cdn-media.example.org/hls/1/master.m3u8');
     const p2 = await get('/__ping');
     assert(JSON.parse(p2.body).serverTimeMs > 1704067200000);
 
@@ -572,6 +670,15 @@ def test_pc_bridge_server_proxies_https_and_rewrites_m3u8(tmp_path, monkeypatch)
         with pytest.raises(urllib.error.HTTPError) as e403:
             urllib.request.urlopen(f'http://127.0.0.1:{port}/__proxy/evil-untrusted.com/x', timeout=5)
         assert e403.value.code == 403
+
+        assert bridge.rewrite_location('/v2/next?a=1', f'http://127.0.0.1:{port}', 'beletapis.com') == (
+            f'http://127.0.0.1:{port}/__proxy/beletapis.com/v2/next?a=1'
+        )
+        assert bridge.rewrite_location('//cdn-pc.example.org/hls/9/a.m3u8', f'http://127.0.0.1:{port}', 'beletapis.com') == (
+            f'http://127.0.0.1:{port}/__proxy/cdn-pc.example.org/hls/9/a.m3u8'
+        )
+        bridge.scan_json_for_hosts('{"poster":"http://cdn-pc2.example.org/poster.jpg"}')
+        assert bridge.is_allowed_host('cdn-pc2.example.org') is True
     finally:
         bridge.stop()
         up.shutdown()

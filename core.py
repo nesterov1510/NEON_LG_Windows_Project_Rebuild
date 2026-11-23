@@ -1232,7 +1232,42 @@ class Api:
             except Exception:
                 pass
 
-    def install_local_samsung_wgt(self, ip, path, _expected_pkg=None, _launch=False):
+    @staticmethod
+    def _customize_belet_client_wgt(data, bypass_mode='bypass', pc_ip='', strip_service=False):
+        import zipfile
+        out_buf = io.BytesIO()
+        valid_pc = bool(
+            bypass_mode != 'direct'
+            and re.fullmatch(r'(?:\d{1,3}\.){3}\d{1,3}', str(pc_ip or ''))
+            and not str(pc_ip or '').startswith('127.')
+        )
+        mode_val = 'off' if bypass_mode == 'direct' else 'always'
+        with zipfile.ZipFile(io.BytesIO(data), 'r') as zin, zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                if strip_service and item.filename in ('service/clock-proxy.js', 'wrt-service.js'):
+                    continue
+                payload = zin.read(item.filename)
+                if strip_service and item.filename == 'config.xml':
+                    cfg = payload.decode('utf-8')
+                    cfg = re.sub(r'\s*<feature\s+name="http://tizen\.org/feature/web\.service"[^>]*/?>', '', cfg)
+                    cfg = re.sub(r'\s*<tizen:service\b[^>]*>.*?</tizen:service>', '', cfg, flags=re.S)
+                    cfg = cfg.replace('background-support="enable"', 'background-support="disable"')
+                    payload = cfg.encode('utf-8')
+                elif item.filename == 'index.html':
+                    html_txt = payload.decode('utf-8')
+                    html_txt = re.sub(r'\s*<meta\s+name="neon-bypass-mode"[^>]*>', '', html_txt)
+                    if bypass_mode == 'direct':
+                        html_txt = re.sub(r'\s*<meta\s+name="neon-pc-bridge"[^>]*>', '', html_txt)
+                    injected = [f'<meta name="neon-bypass-mode" content="{mode_val}">']
+                    if valid_pc and 'name="neon-pc-bridge"' not in html_txt:
+                        injected.append(f'<meta name="neon-pc-bridge" content="{pc_ip}">')
+                    if '</head>' in html_txt:
+                        html_txt = html_txt.replace('</head>', '\n' + '\n'.join(injected) + '\n</head>', 1)
+                        payload = html_txt.encode('utf-8')
+                zout.writestr(item.filename, payload)
+        return out_buf.getvalue()
+
+    def install_local_samsung_wgt(self, ip, path, _expected_pkg=None, _launch=False, _bypass_mode='auto'):
         try:
             clean_ip = self._resolve_samsung_ip(ip)
             data = read_package(path, '.wgt')
@@ -1241,7 +1276,12 @@ class Api:
                 raise ValueError('Bundled application has an unexpected package ID.')
         except (ValueError, OSError) as exc:
             return {'ok': False, 'error': str(exc)}
-        lines = ['[+] Installing selected WGT: ' + pkg_id + '. Existing signatures will be replaced.']
+        if _expected_pkg == 'BeletFilm1' and _bypass_mode == 'direct':
+            lines = ['[+] Installing Belet TV (BeletFilm1) WITHOUT bypass (direct new client)...']
+        elif _expected_pkg == 'BeletFilm1':
+            lines = ['[+] Installing Belet TV (BeletFilm1) WITH bypass (ClockProxy + PC bridge)...']
+        else:
+            lines = ['[+] Installing selected WGT: ' + pkg_id + '. Existing signatures will be replaced.']
         self._samsung_auth_stop.clear()
         try:
             with SdbClient(clean_ip, timeout=10.0) as sdb:
@@ -1263,20 +1303,12 @@ class Api:
                         pc_ip = str(_tizen_local_ip(clean_ip) or '').strip()
                     except Exception:
                         pc_ip = ''
-                    if re.fullmatch(r'(?:\d{1,3}\.){3}\d{1,3}', pc_ip) and not pc_ip.startswith('127.'):
-                        import zipfile
-                        meta_buf = io.BytesIO()
-                        with zipfile.ZipFile(io.BytesIO(data), 'r') as zin, zipfile.ZipFile(meta_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
-                            for item in zin.infolist():
-                                payload = zin.read(item.filename)
-                                if item.filename == 'index.html':
-                                    html_txt = payload.decode('utf-8')
-                                    meta_tag = f'<meta name="neon-pc-bridge" content="{pc_ip}">\n</head>'
-                                    if 'name="neon-pc-bridge"' not in html_txt and '</head>' in html_txt:
-                                        html_txt = html_txt.replace('</head>', meta_tag, 1)
-                                        payload = html_txt.encode('utf-8')
-                                zout.writestr(item.filename, payload)
-                        wgt_payload = meta_buf.getvalue()
+                    wgt_payload = self._customize_belet_client_wgt(
+                        data,
+                        bypass_mode=_bypass_mode,
+                        pc_ip=pc_ip,
+                        strip_service=(_bypass_mode == 'direct'),
+                    )
                 signed = sign_wgt_bytes(wgt_payload, bundle['author_key'], bundle['author_certs'], bundle['dist_key'], bundle['dist_certs'])
                 verify_wgt_signatures(signed)
                 remote = sdk_path + '/' + pkg_id + '.wgt'
@@ -1295,23 +1327,15 @@ class Api:
                     if result.strip():
                         lines.extend(result.strip().splitlines())
                     diag = diagnose_install_output(result, pkg_id)
-                if _expected_pkg == 'BeletFilm1' and diag.get('status') in ('manifest_error', 'api_mismatch'):
-                    import zipfile
+                if _expected_pkg == 'BeletFilm1' and _bypass_mode != 'direct' and diag.get('status') in ('manifest_error', 'api_mismatch'):
                     lines.append('[!] ТВ отклонил манифест фонового сервиса ClockProxy; ставим облегчённый пакет без встроенного сервиса (при часах 1970 используйте «Мост Belet» в Neon на ПК).')
-                    buf = io.BytesIO()
-                    with zipfile.ZipFile(io.BytesIO(wgt_payload), 'r') as zin, zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
-                        for item in zin.infolist():
-                            if item.filename in ('service/clock-proxy.js', 'wrt-service.js'):
-                                continue
-                            payload = zin.read(item.filename)
-                            if item.filename == 'config.xml':
-                                cfg = payload.decode('utf-8')
-                                cfg = re.sub(r'\s*<feature\s+name="http://tizen\.org/feature/web\.service"[^>]*/?>', '', cfg)
-                                cfg = re.sub(r'\s*<tizen:service\b[^>]*>.*?</tizen:service>', '', cfg, flags=re.S)
-                                cfg = cfg.replace('background-support="enable"', 'background-support="disable"')
-                                payload = cfg.encode('utf-8')
-                            zout.writestr(item.filename, payload)
-                    signed = sign_wgt_bytes(buf.getvalue(), bundle['author_key'], bundle['author_certs'], bundle['dist_key'], bundle['dist_certs'])
+                    stripped_payload = self._customize_belet_client_wgt(
+                        wgt_payload,
+                        bypass_mode=_bypass_mode,
+                        pc_ip=pc_ip,
+                        strip_service=True,
+                    )
+                    signed = sign_wgt_bytes(stripped_payload, bundle['author_key'], bundle['author_certs'], bundle['dist_key'], bundle['dist_certs'])
                     verify_wgt_signatures(signed)
                     sdb.push_bytes(signed, remote)
                     result = sdb.install_wgt(pkg_id, remote, timeout=120.0)
@@ -1342,10 +1366,50 @@ class Api:
             return {'ok': False, 'error': str(exc), 'output': '\n'.join(lines)}
 
     def install_samsung_belet_client(self, ip=None):
-        """Sign and install the separate experimental client, never the ordinary Belet."""
+        """Sign and install Belet Samsung (BeletFilm1) WITH bypass enabled from startup."""
         return self.install_local_samsung_wgt(
             ip, resource('samsung-belet/BeletSamsungClient-unsigned.wgt'),
             _expected_pkg='BeletFilm1', _launch=True)
+
+    def install_samsung_belet_direct_client(self, ip=None):
+        """Sign and install Belet Samsung (BeletFilm1) WITHOUT bypass (direct new client)."""
+        return self.install_local_samsung_wgt(
+            ip, resource('samsung-belet/BeletSamsungClient-unsigned.wgt'),
+            _expected_pkg='BeletFilm1', _launch=True, _bypass_mode='direct')
+
+    def launch_samsung_belet_client(self, ip=None):
+        try:
+            clean_ip = self._resolve_samsung_ip(ip)
+        except ValueError as exc:
+            return {'ok': False, 'error': str(exc)}
+        app_id = 'BeletFilm1.BeletClient'
+        try:
+            with SdbClient(clean_ip, timeout=10.0) as sdb:
+                reply = sdb.launch_app(app_id)
+            return {
+                'ok': True,
+                'app_id': app_id,
+                'output': f'[+] Launched Belet ({app_id}): {reply}',
+            }
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Launch failed: {exc}'}
+
+    def remove_samsung_belet_client(self, ip=None):
+        try:
+            clean_ip = self._resolve_samsung_ip(ip)
+        except ValueError as exc:
+            return {'ok': False, 'error': str(exc)}
+        pkg_id = 'BeletFilm1'
+        try:
+            with SdbClient(clean_ip, timeout=10.0) as sdb:
+                reply = sdb.uninstall_app(pkg_id)
+            return {
+                'ok': True,
+                'pkg_id': pkg_id,
+                'output': f'[+] Removed Belet ({pkg_id}): {reply.strip() or "done"}',
+            }
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Uninstall failed: {exc}'}
 
     def browse_profile(self):
         if not self.window:
@@ -4409,17 +4473,24 @@ class _BeletTvBridge:
         self.requested_port = int(port)
         self.port = int(port)
         self._upstream_opener = upstream_opener
+        self._custom_ssl_ctx = ssl_context is not None
+        self._os_ssl_ctx = None
         if ssl_context is not None:
             self._ssl_ctx = ssl_context
         else:
             import ssl
             try:
+                self._os_ssl_ctx = ssl.create_default_context()
+            except Exception:
+                self._os_ssl_ctx = None
+            try:
                 import certifi
                 self._ssl_ctx = ssl.create_default_context(cafile=certifi.where())
             except Exception:
-                self._ssl_ctx = ssl.create_default_context()
+                self._ssl_ctx = self._os_ssl_ctx or ssl.create_default_context()
         self._dyn_lock = threading.Lock()
         self._dynamic_hosts = []
+        self._dns_cache = {}
         self._server = None
         self._thread = None
         self.running = False
@@ -4471,6 +4542,11 @@ class _BeletTvBridge:
     def resolves_globally(self, host):
         if self._upstream_opener is not None:
             return True
+        now = time.monotonic()
+        with self._dyn_lock:
+            cached = self._dns_cache.get(host)
+            if cached and cached[1] > now:
+                return cached[0]
         try:
             infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
         except Exception:
@@ -4482,13 +4558,17 @@ class _BeletTvBridge:
             try:
                 ip_obj = ipaddress.ip_address(ip_str)
                 if not ip_obj.is_global:
+                    with self._dyn_lock:
+                        self._dns_cache[host] = (False, now + 60.0)
                     return False
             except ValueError:
                 return False
+        with self._dyn_lock:
+            self._dns_cache[host] = (True, now + 60.0)
         return True
 
     def scan_json_for_hosts(self, text):
-        for match in re.finditer(r'https:(?:\\/|/){2}([a-z0-9.-]+)(?:[/\"\'?\\]|$)', text, re.I):
+        for match in re.finditer(r'https?:(?:\\/|/){2}([a-z0-9.-]+)(?:[/\"\'?:\\]|$)', text, re.I):
             self.register_dynamic_host(match.group(1))
 
     def rewrite_m3u8(self, text, proxy_origin, up_host):
@@ -4518,15 +4598,25 @@ class _BeletTvBridge:
             out = re.sub(r'(^|\r?\n)(/(?!/)[^\r\n]*)', lambda m: f'{m.group(1)}{proxy_origin}/__proxy/{up_host}{m.group(2)}', out)
         return out
 
-    def rewrite_location(self, loc, proxy_origin):
-        m = re.match(r'^https://([a-z0-9.-]+)(?::443)?(/.*)?$', str(loc or ''), re.I)
-        if not m:
-            return loc
-        h = m.group(1).lower()
-        if not self.is_safe_public_host(h):
-            return loc
-        self.register_dynamic_host(h)
-        return f'{proxy_origin}/__proxy/{h}{m.group(2) or "/"}'
+    def rewrite_location(self, loc, proxy_origin, up_host=''):
+        s = str(loc or '')
+        m = re.match(r'^https://([a-z0-9.-]+)(?::443)?(/.*)?$', s, re.I)
+        if m:
+            h = m.group(1).lower()
+            if not self.is_safe_public_host(h):
+                return loc
+            self.register_dynamic_host(h)
+            return f'{proxy_origin}/__proxy/{h}{m.group(2) or "/"}'
+        mp = re.match(r'^//([a-z0-9.-]+)(/.*)?$', s)
+        if mp:
+            h = mp.group(1).lower()
+            if not self.is_safe_public_host(h):
+                return loc
+            self.register_dynamic_host(h)
+            return f'{proxy_origin}/__proxy/{h}{mp.group(2) or "/"}'
+        if s.startswith('/') and up_host and self.is_safe_public_host(up_host):
+            return f'{proxy_origin}/__proxy/{up_host}{s}'
+        return loc
 
     def start(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -4657,11 +4747,28 @@ class _BeletTvBridge:
                 timeout = 45.0 if is_media else 20.0
                 conn = None
                 try:
+                    import ssl as _ssl
                     if bridge._upstream_opener is not None:
                         conn = bridge._upstream_opener(up_host, 443, bridge._ssl_ctx, timeout)
+                        conn.request(self.command, up_path, body=req_body, headers=out_h)
                     else:
                         conn = http.client.HTTPSConnection(up_host, 443, context=bridge._ssl_ctx, timeout=timeout)
-                    conn.request(self.command, up_path, body=req_body, headers=out_h)
+                        try:
+                            conn.request(self.command, up_path, body=req_body, headers=out_h)
+                        except _ssl.SSLCertVerificationError as ssl_exc:
+                            if (
+                                not bridge._custom_ssl_ctx
+                                and bridge._os_ssl_ctx is not None
+                                and 'local issuer' in str(ssl_exc).lower()
+                            ):
+                                try:
+                                    conn.close()
+                                except Exception:
+                                    pass
+                                conn = http.client.HTTPSConnection(up_host, 443, context=bridge._os_ssl_ctx, timeout=timeout)
+                                conn.request(self.command, up_path, body=req_body, headers=out_h)
+                            else:
+                                raise
                     up_res = conn.getresponse()
                     status = up_res.status
                     skip_resp = {
@@ -4678,7 +4785,7 @@ class _BeletTvBridge:
                         if lhk in skip_resp:
                             continue
                         if lhk == 'location':
-                            resp_h.append((hk, bridge.rewrite_location(hv, proxy_origin)))
+                            resp_h.append((hk, bridge.rewrite_location(hv, proxy_origin, up_host)))
                             continue
                         if lhk == 'content-type':
                             ctype = hv.lower()
@@ -4688,7 +4795,7 @@ class _BeletTvBridge:
 
                     is_m3u8 = bool(re.search(r'\.m3u8(?:$|\?)', up_pathname, re.I)) or ('mpegurl' in ctype)
                     is_json_scan = (up_host in bridge.API_SCAN_HOSTS) and (
-                        'application/json' in ctype or 'text/plain' in ctype
+                        'json' in ctype or 'text/plain' in ctype
                     )
 
                     if (is_m3u8 or is_json_scan) and self.command != 'HEAD' and 200 <= status < 300:

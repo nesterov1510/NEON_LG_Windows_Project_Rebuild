@@ -889,14 +889,15 @@ class NeonWindow(QMainWindow):
         self.btn_sam_belet_install = QPushButton()
         self.btn_sam_belet_install.setObjectName('PrimaryBtn')
         self.btn_sam_belet_install.setCursor(Qt.PointingHandCursor)
-        self.btn_sam_belet_install.clicked.connect(self.install_samsung_belet)
+        self.btn_sam_belet_install.setToolTip('Новый клиент Belet (BeletFilm1) с автообходом сброшенных часов 1970 и HTTPS (ClockProxy + мост ПК).')
+        self.btn_sam_belet_install.clicked.connect(self.install_samsung_belet_client)
         sbl.addWidget(self.btn_sam_belet_install)
-        btn_belet_client = QPushButton('УСТАНОВИТЬ BELET SAMSUNG · НОВЫЙ КЛИЕНТ')
-        btn_belet_client.setObjectName('NormalBtn')
-        btn_belet_client.setCursor(Qt.PointingHandCursor)
-        btn_belet_client.setToolTip('Клиент Belet для Tizen: вход, каталог, поиск, сезоны, плеер и прогресс. Обычный Belet не изменяется.')
-        btn_belet_client.clicked.connect(self.install_samsung_belet_client)
-        sbl.addWidget(btn_belet_client)
+        self.btn_sam_belet_direct = QPushButton()
+        self.btn_sam_belet_direct.setObjectName('NormalBtn')
+        self.btn_sam_belet_direct.setCursor(Qt.PointingHandCursor)
+        self.btn_sam_belet_direct.setToolTip('Новый клиент Belet (BeletFilm1) без обхода: прямой HTTPS без ClockProxy и моста ПК (для ТВ с точным временем).')
+        self.btn_sam_belet_direct.clicked.connect(self.install_samsung_belet_direct_client)
+        sbl.addWidget(self.btn_sam_belet_direct)
         self.btn_sam_belet_bridge = QPushButton('МОСТ BELET НА ПК (ЕСЛИ 1970 НА ТВ)')
         self.btn_sam_belet_bridge.setObjectName('NormalBtn')
         self.btn_sam_belet_bridge.setCursor(Qt.PointingHandCursor)
@@ -908,11 +909,11 @@ class NeonWindow(QMainWindow):
         self.btn_sam_belet_launch = QPushButton()
         self.btn_sam_belet_launch.setObjectName('NormalBtn')
         self.btn_sam_belet_launch.setCursor(Qt.PointingHandCursor)
-        self.btn_sam_belet_launch.clicked.connect(self.launch_samsung_belet)
+        self.btn_sam_belet_launch.clicked.connect(self.launch_samsung_belet_client)
         self.btn_sam_belet_remove = QPushButton()
         self.btn_sam_belet_remove.setObjectName('DangerBtn')
         self.btn_sam_belet_remove.setCursor(Qt.PointingHandCursor)
-        self.btn_sam_belet_remove.clicked.connect(self.remove_samsung_belet)
+        self.btn_sam_belet_remove.clicked.connect(self.remove_samsung_belet_client)
         sbl_row.addWidget(self.btn_sam_belet_launch, 1)
         sbl_row.addWidget(self.btn_sam_belet_remove, 1)
         sbl.addLayout(sbl_row)
@@ -1733,6 +1734,7 @@ class NeonWindow(QMainWindow):
         self.btn_sam_sdb_check.setText(self.t('sam_btn_sdb_check'))
         self.btn_sam_cert.setText(self.t('sam_btn_cert'))
         self.btn_sam_belet_install.setText(self.t('sam_btn_belet_install'))
+        self.btn_sam_belet_direct.setText(self.t('sam_btn_belet_direct'))
         self.btn_sam_belet_launch.setText(self.t('sam_btn_belet_launch'))
         self.btn_sam_belet_remove.setText(self.t('sam_btn_belet_remove'))
 
@@ -2936,11 +2938,42 @@ class NeonWindow(QMainWindow):
     def install_samsung_belet_client(self):
         ip = self.sam_ip.text().strip()
         if not ip:
-            self.toast.show_toast('Введите IP Samsung', 'warn')
+            self.toast.show_toast(
+                'Введите IP-адрес Samsung ТВ.' if self.lang == 'ru' else 'Enter Samsung TV IP address.',
+                'warn',
+            )
             return
-        self.log('[+] Подписываем и устанавливаем отдельный Belet Samsung (BeletFilm1).')
-        self._run_async('sam', lambda: self.api.install_samsung_belet_client(ip),
-                        lambda r: self.toast.show_toast('Belet Samsung установлен; проверьте запуск на ТВ', 'info') if r.get('ok') else None)
+        self.log(f'$ sdb {ip}:26101 install BeletFilm1.wgt (with bypass)')
+        self._run_async(
+            'sam',
+            lambda: self.api.install_samsung_belet_client(ip),
+            lambda r: self.toast.show_toast(
+                'Belet TV (с обходом) установлен на Samsung ТВ!'
+                if self.lang == 'ru'
+                else 'Belet TV (with bypass) installed on Samsung TV!',
+                'info',
+            ) if r.get('ok') else None,
+        )
+
+    def install_samsung_belet_direct_client(self):
+        ip = self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast(
+                'Введите IP-адрес Samsung ТВ.' if self.lang == 'ru' else 'Enter Samsung TV IP address.',
+                'warn',
+            )
+            return
+        self.log(f'$ sdb {ip}:26101 install BeletFilm1.wgt (direct, without bypass)')
+        self._run_async(
+            'sam',
+            lambda: self.api.install_samsung_belet_direct_client(ip),
+            lambda r: self.toast.show_toast(
+                'Belet TV (без обхода) установлен на Samsung ТВ!'
+                if self.lang == 'ru'
+                else 'Belet TV (without bypass) installed on Samsung TV!',
+                'info',
+            ) if r.get('ok') else None,
+        )
 
     def toggle_samsung_belet_bridge(self):
         ip = self.sam_ip.text().strip() or None
@@ -2961,7 +2994,7 @@ class NeonWindow(QMainWindow):
         else:
             self.toast.show_toast(r.get('error') or 'Ошибка запуска моста', 'warn')
 
-    def install_samsung_belet(self):
+    def launch_samsung_belet_client(self):
         ip = self.sam_ip.text().strip()
         if not ip:
             self.toast.show_toast(
@@ -2969,28 +3002,7 @@ class NeonWindow(QMainWindow):
                 'warn',
             )
             return
-        self.log(f'$ sdb {ip}:26101 install BeletTV001.wgt (belet.tm)')
-
-        def done(r):
-            if r.get('ok'):
-                self.toast.show_toast(
-                    'Belet установлен на Samsung ТВ и запущен!'
-                    if self.lang == 'ru'
-                    else 'Belet installed on Samsung TV & launched!',
-                    'info',
-                )
-
-        self._run_async('sam', lambda: self.api.install_samsung_belet(ip), done)
-
-    def launch_samsung_belet(self):
-        ip = self.sam_ip.text().strip()
-        if not ip:
-            self.toast.show_toast(
-                'Введите IP-адрес Samsung ТВ.' if self.lang == 'ru' else 'Enter Samsung TV IP address.',
-                'warn',
-            )
-            return
-        self.log(f'$ sdb {ip}:26101 0 was_execute BeletTV001.Belet')
+        self.log(f'$ sdb {ip}:26101 0 was_execute BeletFilm1.BeletClient')
 
         def done(r):
             if r.get('ok'):
@@ -3001,9 +3013,9 @@ class NeonWindow(QMainWindow):
                     'info',
                 )
 
-        self._run_async('sam', lambda: self.api.launch_samsung_belet(ip), done)
+        self._run_async('sam', lambda: self.api.launch_samsung_belet_client(ip), done)
 
-    def remove_samsung_belet(self):
+    def remove_samsung_belet_client(self):
         ip = self.sam_ip.text().strip()
         if not ip:
             self.toast.show_toast(
@@ -3012,9 +3024,9 @@ class NeonWindow(QMainWindow):
             )
             return
         body = (
-            'Удалить приложение Belet (BeletTV001) с Samsung ТВ?'
+            'Удалить приложение Belet (BeletFilm1) с Samsung ТВ?'
             if self.lang == 'ru'
-            else 'Uninstall Belet (BeletTV001) from Samsung TV?'
+            else 'Uninstall Belet (BeletFilm1) from Samsung TV?'
         )
         dlg = ConfirmDialog(
             self,
@@ -3026,7 +3038,7 @@ class NeonWindow(QMainWindow):
         )
         if dlg.exec_() != ConfirmDialog.Accepted:
             return
-        self.log(f'$ sdb {ip}:26101 0 vd_appuninstall BeletTV001')
+        self.log(f'$ sdb {ip}:26101 0 vd_appuninstall BeletFilm1')
 
         def done(r):
             if r.get('ok'):
@@ -3035,7 +3047,7 @@ class NeonWindow(QMainWindow):
                     'info',
                 )
 
-        self._run_async('sam', lambda: self.api.remove_samsung_belet(ip), done)
+        self._run_async('sam', lambda: self.api.remove_samsung_belet_client(ip), done)
 
     def install_samsung_alemtv(self):
         ip = self.sam_ip.text().strip()
