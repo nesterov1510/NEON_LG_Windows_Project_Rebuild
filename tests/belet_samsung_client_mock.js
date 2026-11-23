@@ -1320,9 +1320,16 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
 
   buildDom();
   timers.length = 0;
+  let tzDateObj = new RealDate(2026, 10, 23, 15, 42, 0);
   const clockSandbox = Object.assign({}, sandbox, {
     document,
     Date: FakeDate,
+    tizen: {
+      time: {
+        getCurrentDateTime: () => tzDateObj,
+        setDateTimeChangeListener: () => {}
+      }
+    },
     webapis: { network: { getActiveConnectionType: () => 3 } }
   });
   clockSandbox.window = clockSandbox;
@@ -1355,7 +1362,10 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   route('https://film.beletapis.com/api/v3/movie/1', 0, {});
   click(ids.homeHelp);
   assert(!ids.about.classList.contains('hidden'));
-  assert(!ids.aboutClockAlert.classList.contains('hidden'), 'about shows clock alert when year < 2024');
+  assert.strictEqual(ids.clock.textContent, '15:42', 'topbar uses Tizen UI clock when manual time is set');
+  assert(!ids.aboutClockAlert.classList.contains('hidden'), 'about shows clock alert when browser SSL clock < 2024');
+  assert(ids.aboutStatus.textContent.indexOf('Время Tizen') >= 0, 'about highlights mismatch between Tizen manual clock and browser SSL clock');
+  assert(ids.aboutClockAlert.textContent.indexOf('23.11.2026') >= 0, 'alert explains manual Tizen time vs browser SSL 1970 clock');
 
   // Back to home, then simulate TV NTP syncing clock from 1970 to 2026
   click(ids.aboutBack);

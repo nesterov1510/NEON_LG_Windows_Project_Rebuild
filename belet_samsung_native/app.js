@@ -437,19 +437,41 @@
     }
   }
 
+  function readTizenClock() {
+    try {
+      if (window.tizen && window.tizen.time && window.tizen.time.getCurrentDateTime) {
+        return window.tizen.time.getCurrentDateTime();
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function formatDateObj(d) {
+    if (!d) return '';
+    return pad2(d.getDate()) + '.' + pad2(d.getMonth() + 1) + '.' + d.getFullYear() + ' ' +
+      pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+
   function isClockInvalid() {
     return new Date().getFullYear() < 2024;
   }
 
   function clockDateText() {
-    var d = new Date();
-    return pad2(d.getDate()) + '.' + pad2(d.getMonth() + 1) + '.' + d.getFullYear() + ' ' +
-      pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    return formatDateObj(new Date());
   }
 
   function clockHelpText() {
+    var tz = readTizenClock();
+    var tzValid = !!(tz && tz.getFullYear && tz.getFullYear() >= 2024);
+    if (tzValid) {
+      return 'В настройках ТВ время задано (' + formatDateObj(tz) + '), но системное время браузера осталось ' +
+        clockDateText() + ' — из-за этого HTTPS блокируется (HTTP 0). ' +
+        'Включите Настройки ТВ → Общие → Диспетчер системы → Время → Часы → «Авто» (через интернет/NTP или антенну) ' +
+        'и полностью перезапустите приложение или ТВ (удерживайте POWER 5 сек).';
+    }
     return 'Время на ТВ сброшено (' + clockDateText() + ') — браузер блокирует HTTPS (HTTP 0). ' +
-      'Откройте Настройки ТВ → Общие → Диспетчер системы → Время → Часы → Авто (или задайте текущую дату вручную).';
+      'Откройте Настройки ТВ → Общие → Диспетчер системы → Время → Часы → «Авто» ' +
+      '(если выставляли вручную — полностью закройте приложение через удержание RETURN и откройте снова или перезагрузите ТВ).';
   }
 
   var deviceRegistration = { state: 'не отправлена', model: '' };
@@ -2431,8 +2453,10 @@
       var now = new Date();
       var year = now.getFullYear();
       var timeValid = year >= 2024;
-      var timeText = pad2(now.getDate()) + '.' + pad2(now.getMonth() + 1) + '.' + year + ' ' +
-        pad2(now.getHours()) + ':' + pad2(now.getMinutes()) +
+      var tz = readTizenClock();
+      var tzYear = (tz && tz.getFullYear) ? tz.getFullYear() : 0;
+      var tzValid = tzYear >= 2024;
+      var timeText = formatDateObj(now) +
         (timeValid ? '' : ' (не синхронизировано — HTTPS блокируется)');
       var netOk = isNetworkReady();
       if (alertBox) {
@@ -2458,9 +2482,16 @@
       netRow.appendChild(el('span', netOk ? 'ok' : 'bad', networkLabel()));
       host.appendChild(netRow);
       var timeRow = el('div', 'about-row');
-      timeRow.appendChild(el('span', '', 'Время на телевизоре'));
+      timeRow.appendChild(el('span', '', 'Время браузера (SSL)'));
       timeRow.appendChild(el('span', timeValid ? 'ok' : 'bad', timeText));
       host.appendChild(timeRow);
+      if (tz && tzYear !== year) {
+        var tzRow = el('div', 'about-row');
+        tzRow.appendChild(el('span', '', 'Время Tizen (настройки ТВ)'));
+        tzRow.appendChild(el('span', tzValid ? 'ok' : 'bad',
+          formatDateObj(tz) + (tzValid && !timeValid ? ' (задано вручную — браузер ещё на ' + year + ')' : '')));
+        host.appendChild(tzRow);
+      }
       var modelRow = el('div', 'about-row');
       modelRow.appendChild(el('span', '', 'Модель телевизора'));
       modelRow.appendChild(el('span', '', Belet.model()));
@@ -2767,7 +2798,10 @@
     on(window, 'online', recoverNetworkScreens);
     on(doc, 'visibilitychange', function () {
       if (doc.hidden) reportProgress();
-      else recoverNetworkScreens();
+      else {
+        tickClock();
+        recoverNetworkScreens();
+      }
     });
   }
 
@@ -2844,7 +2878,13 @@
     var node = $('clock');
     var date = new Date();
     var nowSynced = date.getFullYear() >= 2024;
-    if (node) node.textContent = pad2(date.getHours()) + ':' + pad2(date.getMinutes());
+    var displayDate = date;
+    var tz;
+    if (!nowSynced) {
+      tz = readTizenClock();
+      if (tz && tz.getFullYear && tz.getFullYear() >= 2024) displayDate = tz;
+    }
+    if (node) node.textContent = pad2(displayDate.getHours()) + ':' + pad2(displayDate.getMinutes());
     if (!state.clockSynced && nowSynced) {
       state.clockSynced = true;
       clearClockSyncTimer();
@@ -2890,6 +2930,11 @@
   function boot() {
     registerTvKeys();
     wire();
+    try {
+      if (window.tizen && window.tizen.time && window.tizen.time.setDateTimeChangeListener) {
+        window.tizen.time.setDateTimeChangeListener(function () { tickClock(); });
+      }
+    } catch (e) {}
     state.clockSynced = !isClockInvalid();
     tickClock();
     setInterval(tickClock, 30000);
