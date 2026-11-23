@@ -1542,7 +1542,7 @@ class NeonWindow(QMainWindow):
         heading = QLabel('MSB  /  CALLBACK')
         heading.setStyleSheet('color:#8fffb3;font-size:30px;font-weight:700;letter-spacing:2px;')
         layout.addWidget(heading)
-        subtitle = QLabel('TV Repair by Meryosab · Ремонт телевизоров и электроники в Ашхабаде')
+        subtitle = QLabel('Meryosab Callback · По всем вопросам обращайтесь по номеру телефона или на сайт (Ашхабад) · Показывает LAN и Wi-Fi IP на ТВ')
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet('color:#9fb7aa;font-size:15px;margin-bottom:10px;')
         layout.addWidget(subtitle)
@@ -1571,7 +1571,7 @@ class NeonWindow(QMainWindow):
             dl.addWidget(text)
         dl.addStretch(1)
         panels.addWidget(details, 1)
-        for caption, image, helper in [('САЙТ TV REPAIR', 'msb_website_qr.png', 'Открыть сайт'), ('КОНТАКТНАЯ КАРТОЧКА', 'msb_contact_qr.png', 'Сканируйте и подтвердите сохранение контакта')]:
+        for caption, image, helper in [('ОФИЦИАЛЬНЫЙ САЙТ', 'msb_website_qr.png', 'Открыть сайт'), ('КОНТАКТНАЯ КАРТОЧКА', 'msb_contact_qr.png', 'Сканируйте и подтвердите сохранение контакта')]:
             card = QFrame()
             card.setObjectName('GlassCard')
             cl = QVBoxLayout(card)
@@ -1592,7 +1592,7 @@ class NeonWindow(QMainWindow):
             cl.addStretch(1)
             panels.addWidget(card)
         layout.addLayout(panels)
-        footer = QLabel('Приём техники — по предварительному контакту. Данные с tvrepair.meryosab.com.')
+        footer = QLabel('По всем вопросам обращайтесь по номеру телефона, в мессенджеры или на сайт tvrepair.meryosab.com. После установки на ТВ отображаются LAN и Wi-Fi IP-адреса.')
         footer.setWordWrap(True)
         footer.setStyleSheet('color:#819a89;font-size:12px;padding-top:14px;')
         layout.addWidget(footer)
@@ -1848,7 +1848,7 @@ class NeonWindow(QMainWindow):
         ]
         if self.current_tab == 4:
             self.page_title.setText('MSB CALLBACK')
-            self.page_sub.setText('TV Repair by Meryosab · Ашхабад')
+            self.page_sub.setText('Meryosab Callback · Ашхабад')
             return
         tk, sk = titles[self.current_tab]
         self.page_title.setText(self.t(tk))
