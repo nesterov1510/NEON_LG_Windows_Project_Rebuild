@@ -2998,7 +2998,7 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "    headers:outHeaders\n"
         "  };\n"
         "  if(BASE_PROTOCOL==='https:'){\n"
-        "    reqOpts.rejectUnauthorized=(upHost==='homepage.belet.me');\n"
+        "    reqOpts.rejectUnauthorized=(upHost==='homepage.belet.me')&&(new Date().getFullYear()>=2024);\n"
         "    reqOpts.servername=upHost;\n"
         "    if(httpsAgent)reqOpts.agent=httpsAgent;\n"
         "  }else if(httpAgent){\n"

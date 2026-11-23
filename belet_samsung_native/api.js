@@ -39,6 +39,23 @@
   var refreshQueue = [];
   var generation = 0;
   var qrAuthHost = HOSTS.auth;
+  var clockProxyBase = '';
+
+  function setClockProxy(baseUrl) {
+    clockProxyBase = baseUrl ? String(baseUrl).replace(/\/+$/, '') : '';
+  }
+
+  function proxyUrl(targetUrl) {
+    var s;
+    var match;
+    if (!clockProxyBase || typeof targetUrl !== 'string') return targetUrl;
+    s = targetUrl;
+    if (s.indexOf(clockProxyBase + '/__proxy/') === 0) return s;
+    match = /^https:\/\/([^\/?#]+)(.*)$/i.exec(s);
+    if (!match) return s;
+    return clockProxyBase + '/__proxy/' + match[1].toLowerCase() +
+      (match[2] && match[2].charAt(0) === '/' ? match[2] : '/' + (match[2] || ''));
+  }
 
   function randomHex(bytes) {
     var out = '';
@@ -148,7 +165,7 @@
     }
 
     try {
-      xhr.open(options.method || 'GET', options.url, true);
+      xhr.open(options.method || 'GET', proxyUrl(options.url), true);
       xhr.timeout = options.timeout || REQUEST_TIMEOUT;
       try { xhr.withCredentials = false; } catch (e) {}
       if (!hasOverrideHeader(headers, 'Accept')) xhr.setRequestHeader('Accept', 'application/json');
@@ -1009,6 +1026,9 @@
     nextMediaScheme: nextMediaScheme,
     newPlayerSession: newPlayerSession,
     healthCheck: healthCheck,
+    setClockProxy: setClockProxy,
+    clockProxy: function () { return clockProxyBase; },
+    proxyUrl: proxyUrl,
     listFrom: listFrom,
     sourcesFrom: sourcesFrom,
     statusOk: statusOk,

@@ -1383,5 +1383,134 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
 })();
 
+/* 18. Stuck 1970 clock bypassed automatically by BeletFilm1.ClockProxy local TLS service */
+(() => {
+  const RealDate = Date;
+  const fakeNow = RealDate.UTC(1970, 0, 1, 1, 2, 0);
+  function FakeDate(arg) {
+    if (!(this instanceof FakeDate)) return new RealDate(fakeNow).toString();
+    return new RealDate(arg === undefined ? fakeNow : arg);
+  }
+  FakeDate.now = () => fakeNow;
+  FakeDate.UTC = RealDate.UTC;
+  FakeDate.parse = RealDate.parse;
+
+  buildDom();
+  timers.length = 0;
+  calls.length = 0;
+  const avplayOpened = [];
+  let launchedSvc = null;
+  const proxySandbox = Object.assign({}, sandbox, {
+    document,
+    Date: FakeDate,
+    tizen: {
+      ApplicationControl: function (operation) { this.operation = operation; },
+      application: {
+        launchAppControl: (ctrl, id, onOk) => { launchedSvc = { ctrl, id }; if (onOk) onOk(); },
+        getCurrentApplication: () => ({ appInfo: { id: 'BeletFilm1.BeletClient' } })
+      },
+      time: {
+        getCurrentDateTime: () => new RealDate(RealDate.UTC(2026, 10, 23, 15, 45, 0)),
+        setDateTimeChangeListener: () => {}
+      }
+    },
+    webapis: {
+      network: { getActiveConnectionType: () => 3 },
+      avplay: {
+        open: (u) => { avplayOpened.push(u); },
+        setListener: () => {},
+        setDisplayRect: () => {},
+        setStreamingProperty: () => {},
+        prepareAsync: (ok) => { if (ok) ok(); },
+        play: () => {},
+        pause: () => {},
+        close: () => {},
+        stop: () => {},
+        getCurrentTime: () => 0,
+        getDuration: () => 100000
+      }
+    }
+  });
+  proxySandbox.tizen.time.getCurrentDateTime = () => new RealDate(fakeNow);
+  proxySandbox.window = proxySandbox;
+  proxySandbox.global = proxySandbox;
+  proxySandbox.self = proxySandbox;
+  vm.createContext(proxySandbox);
+
+  route('http://127.0.0.1:18767/__ping', 0, {});
+  route('http://localhost:18767/__ping', 0, {});
+  route('http://127.0.0.1:18767/__ping', 200, {
+    ok: true,
+    service: 'BeletFilm1.ClockProxy',
+    port: 18767,
+    sslClockYear: 1970,
+    serverTimeMs: new RealDate(2026, 10, 23, 15, 45, 0).getTime()
+  });
+  route('http://127.0.0.1:18767/__proxy/beletapis.com/api/v1/users/device', 200, { msg: 'ok' });
+  route('http://127.0.0.1:18767/__proxy/homepage.belet.me/api/v2/home_page', 200, {
+    status: 'ok',
+    result: [{
+      id: 1, title: 'Работа через локальный мост', source: 'top', items: [
+        { id: 99, type_id: 1, name: 'Proxy Film 99',
+          images: { vertical: { medium: { url: 'https://img.belet.me/99.jpg' } } } }
+      ]
+    }]
+  });
+  route('http://127.0.0.1:18767/__proxy/homepage.belet.me/api/v2/home_page', 200, {
+    status: 'ok',
+    result: []
+  });
+
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), proxySandbox, { filename: 'api.js' });
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), proxySandbox, { filename: 'app.js' });
+  let steps18 = 0;
+  while (timers.length && steps18 < 6 && ids.home.classList.contains('hidden')) {
+    runTimers();
+    steps18 += 1;
+  }
+
+  assert.strictEqual(launchedSvc.id, 'BeletFilm1.ClockProxy', 'launches ClockProxy Tizen service when clock < 2024');
+  assert(!ids.home.classList.contains('hidden'), 'home opens automatically via ClockProxy while TV clock stays 1970');
+  assert(ids.homeEmpty.classList.contains('hidden'), 'no 1970 error banner when ClockProxy serves home');
+  assert.strictEqual(ids.clock.textContent, '15:45', 'topbar displays serverTimeMs clock even with 1970 OS time');
+
+  const card99 = ids.rows.querySelector('.card');
+  const poster = card99 && card99.querySelector('img');
+  assert(poster && poster.src.indexOf('http://127.0.0.1:18767/__proxy/img.belet.me/99.jpg') === 0,
+    'poster images route through ClockProxy when TV clock is 1970: ' + (poster && poster.src));
+
+  // Verify movie detail + playback URL also route through ClockProxy
+  route('http://127.0.0.1:18767/__proxy/film.beletapis.com/api/v3/movie/99', 200, {
+    movie: {
+      id: 99, type_id: 1, name: 'Proxy Film 99',
+      files: {
+        '720p': { url: 'https://videofilm.belet.me/hls/99/720.m3u8' },
+        hls: 'https://videofilm.belet.me/hls/99/master.m3u8'
+      }
+    }
+  });
+  route('http://127.0.0.1:18767/__proxy/film.beletapis.com/api/v3/files/99?type=1', 200, {
+    sources: [{ filename: 'https://videofilm.belet.me/hls/99/master.m3u8', quality: '1080p' }]
+  });
+  click(ids.rows.querySelector('.card'));
+  assert(!ids.detail.classList.contains('hidden'), 'detail view loads through ClockProxy');
+  click(ids.detailPlay);
+  assert(avplayOpened.some(u => u.indexOf('http://127.0.0.1:18767/__proxy/videofilm.belet.me/hls/99/') === 0),
+    'playback URL routes through ClockProxy: ' + JSON.stringify(avplayOpened));
+  fireKey(10009); // exit player to detail
+  fireKey(10009); // exit detail to home
+
+  // Diagnostics show ClockProxy active and hide #aboutClockAlert
+  route('http://127.0.0.1:18767/__proxy/beletapis.com/api/v1/auth/available-otp', 200, { ok: true });
+  route('http://127.0.0.1:18767/__proxy/homepage.belet.me/api/v1/categories', 200, { ok: true });
+  route('http://127.0.0.1:18767/__proxy/film.beletapis.com/api/v3/movie/1', 200, { ok: true });
+  click(ids.homeHelp);
+  runTimers();
+  assert(!ids.about.classList.contains('hidden'));
+  assert(ids.aboutClockAlert.classList.contains('hidden'), 'clock alert hidden once ClockProxy is active');
+  assert(ids.aboutStatus.textContent.indexOf('Обход часов ТВ (SSL)') >= 0, 'about shows ClockProxy status');
+  assert(ids.aboutStatus.textContent.indexOf('активен') >= 0, 'ClockProxy marked active');
+})();
+
 assert.strictEqual(routes.length, 0, 'all queued responses were consumed: ' + JSON.stringify(routes.map(r => r.match)));
 console.log('belet_samsung_client_mock: ok');

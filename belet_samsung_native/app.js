@@ -456,8 +456,261 @@
     return new Date().getFullYear() < 2024;
   }
 
+  function isClockBypassed() {
+    return !!(window.Belet && Belet.clockProxy && Belet.clockProxy());
+  }
+
+  function isClockBlockingHttps() {
+    return isClockInvalid() && !isClockBypassed();
+  }
+
   function clockDateText() {
     return formatDateObj(new Date());
+  }
+
+  var CLOCK_PROXY_PORT = 18767;
+  var CLOCK_PROXY_SVC = 'BeletFilm1.ClockProxy';
+  var clockProxyState = {
+    launched: false,
+    probing: false,
+    wrtTried: false,
+    tvIp: '',
+    base: '',
+    diag: 'не требуется',
+    launchDiag: '',
+    serverOffsetMs: 0,
+    serverSynced: false
+  };
+
+  function hasTizenServiceApi() {
+    return !!(window.tizen && (window.tizen.application || window.tizen.ApplicationControl));
+  }
+
+  function tizenPlatformMajor() {
+    try {
+      if (window.tizen && window.tizen.systeminfo && window.tizen.systeminfo.getCapability) {
+        return parseInt(window.tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version'), 10) || 0;
+      }
+    } catch (e) {}
+    return 0;
+  }
+
+  function probeTvIp() {
+    var props, i;
+    try {
+      if (window.webapis && window.webapis.network && window.webapis.network.getIp) {
+        var wip = window.webapis.network.getIp();
+        if (wip && typeof wip === 'string' && wip !== '0.0.0.0' && wip.indexOf('127.') !== 0) {
+          clockProxyState.tvIp = wip.replace(/^\s+|\s+$/g, '');
+        }
+      }
+    } catch (e) {}
+    try {
+      if (window.tizen && window.tizen.systeminfo && window.tizen.systeminfo.getPropertyValue) {
+        props = ['ETHERNET_NETWORK', 'WIFI_NETWORK', 'NETWORK'];
+        for (i = 0; i < props.length; i += 1) {
+          try {
+            window.tizen.systeminfo.getPropertyValue(props[i], function (val) {
+              var ip = val && (val.ipAddress || val.ip);
+              if (ip && ip !== '0.0.0.0' && String(ip).indexOf('127.') !== 0) {
+                clockProxyState.tvIp = String(ip).replace(/^\s+|\s+$/g, '');
+              }
+            }, function () {});
+          } catch (e) {}
+        }
+      }
+    } catch (e) {}
+  }
+
+  function getClockProxyCandidates() {
+    var raw = ['http://127.0.0.1:' + CLOCK_PROXY_PORT];
+    var out = [];
+    var i;
+    if (clockProxyState.tvIp) raw.push('http://' + clockProxyState.tvIp + ':' + CLOCK_PROXY_PORT);
+    raw.push('http://localhost:' + CLOCK_PROXY_PORT);
+    for (i = 0; i < raw.length; i += 1) {
+      if (out.indexOf(raw[i]) < 0) out.push(raw[i]);
+    }
+    return out;
+  }
+
+  function withWrtService(cb) {
+    var done = false;
+    var s;
+    function finish() {
+      if (done) return;
+      done = true;
+      cb();
+    }
+    if (tizenPlatformMajor() < 9 || window.__neonWrtService || clockProxyState.wrtTried) {
+      cb();
+      return;
+    }
+    clockProxyState.wrtTried = true;
+    try { on(window, 'neon-wrt-ready', finish); } catch (e) {}
+    setTimeout(finish, 1200);
+    try {
+      if (doc && doc.createElement && (doc.head || doc.body)) {
+        s = doc.createElement('script');
+        s.type = 'module';
+        s.src = 'wrt-service.js';
+        s.onerror = finish;
+        (doc.head || doc.body).appendChild(s);
+        return;
+      }
+    } catch (e) {}
+    finish();
+  }
+
+  function launchClockProxyLegacy() {
+    var AppCtrl;
+    if (!hasTizenServiceApi()) {
+      clockProxyState.launchDiag = 'no_tizen_app';
+      return;
+    }
+    AppCtrl = window.tizen.ApplicationControl || (window.tizen.application && window.tizen.application.ApplicationControl);
+    if (AppCtrl && window.tizen.application && window.tizen.application.launchAppControl) {
+      try {
+        window.tizen.application.launchAppControl(
+          new AppCtrl('http://tizen.org/appcontrol/operation/service'),
+          CLOCK_PROXY_SVC,
+          function () { clockProxyState.launchDiag = 'appctl_ok'; },
+          function (err) {
+            clockProxyState.launchDiag = 'appctl_err_' + ((err && (err.name || err.message)) || 'fail');
+            try {
+              if (window.tizen.application.launch) {
+                window.tizen.application.launch(
+                  CLOCK_PROXY_SVC,
+                  function () { clockProxyState.launchDiag = 'launch_ok'; },
+                  function (e2) { clockProxyState.launchDiag = 'launch_err_' + ((e2 && (e2.name || e2.message)) || 'fail'); }
+                );
+              }
+            } catch (e) {}
+          }
+        );
+        return;
+      } catch (e) { clockProxyState.launchDiag = 'appctl_exc'; }
+    }
+    try {
+      if (window.tizen.application && window.tizen.application.launch) {
+        window.tizen.application.launch(
+          CLOCK_PROXY_SVC,
+          function () { clockProxyState.launchDiag = 'launch_ok'; },
+          function (e3) { clockProxyState.launchDiag = 'launch_err_' + ((e3 && (e3.name || e3.message)) || 'fail'); }
+        );
+      }
+    } catch (e) { clockProxyState.launchDiag = 'launch_exc'; }
+  }
+
+  function launchClockProxyService() {
+    if (!isClockInvalid() || !hasTizenServiceApi()) return;
+    if (clockProxyState.launched) return;
+    clockProxyState.launched = true;
+    clockProxyState.diag = 'запуск локального прокси…';
+    probeTvIp();
+    withWrtService(function () {
+      var WrtSvc = window.__neonWrtService;
+      if (typeof WrtSvc === 'function') {
+        try {
+          var p = new WrtSvc(CLOCK_PROXY_SVC).start();
+          if (p && typeof p.then === 'function') {
+            p.then(
+              function () { clockProxyState.launchDiag = 'wrt_ok'; },
+              function (e) {
+                clockProxyState.launchDiag = 'wrt_err_' + ((e && (e.message || e.name)) || 'fail');
+                launchClockProxyLegacy();
+              }
+            );
+          } else {
+            clockProxyState.launchDiag = 'wrt_sync';
+          }
+          return;
+        } catch (e) {
+          clockProxyState.launchDiag = 'wrt_exc';
+        }
+      }
+      launchClockProxyLegacy();
+    });
+  }
+
+  function pingClockProxyCandidate(baseUrl, cb) {
+    var xhr = new XMLHttpRequest();
+    var done = false;
+    function finish(ok, data) {
+      if (done) return;
+      done = true;
+      cb(ok, data || null);
+    }
+    try {
+      xhr.open('GET', baseUrl + '/__ping', true);
+      xhr.timeout = 700;
+      xhr.onreadystatechange = function () {
+        var parsed;
+        if (xhr.readyState !== 4) return;
+        if (xhr.status === 200) {
+          try { parsed = JSON.parse(xhr.responseText); } catch (e) { parsed = null; }
+          if (parsed && parsed.ok) return finish(true, parsed);
+        }
+        finish(false, null);
+      };
+      xhr.onerror = function () { finish(false, null); };
+      xhr.ontimeout = function () { finish(false, null); };
+      xhr.send();
+    } catch (e) {
+      finish(false, null);
+    }
+  }
+
+  function probeClockProxy(callback) {
+    var doneCb = typeof callback === 'function' ? callback : function () {};
+    var candidates;
+    var index = 0;
+    if (!isClockInvalid()) {
+      if (window.Belet && Belet.setClockProxy) Belet.setClockProxy('');
+      clockProxyState.base = '';
+      clockProxyState.diag = 'не требуется (часы ТВ в норме)';
+      doneCb(false);
+      return;
+    }
+    if (!hasTizenServiceApi()) {
+      clockProxyState.diag = 'недоступен вне Tizen service';
+      doneCb(false);
+      return;
+    }
+    if (clockProxyState.probing) {
+      doneCb(isClockBypassed());
+      return;
+    }
+    launchClockProxyService();
+    probeTvIp();
+    clockProxyState.probing = true;
+    candidates = getClockProxyCandidates();
+    function tryNext() {
+      var candidate;
+      if (index >= candidates.length) {
+        clockProxyState.probing = false;
+        clockProxyState.diag = 'не отвечает' + (clockProxyState.launchDiag ? ' (' + clockProxyState.launchDiag + ')' : '');
+        doneCb(false);
+        return;
+      }
+      candidate = candidates[index];
+      index += 1;
+      pingClockProxyCandidate(candidate, function (ok, data) {
+        var wasBypassed = isClockBypassed();
+        if (!ok) return tryNext();
+        clockProxyState.probing = false;
+        clockProxyState.base = candidate;
+        clockProxyState.diag = 'активен (' + candidate + ')';
+        if (window.Belet && Belet.setClockProxy) Belet.setClockProxy(candidate);
+        if (data && data.serverTimeMs && data.serverTimeMs >= 1704067200000) {
+          clockProxyState.serverOffsetMs = data.serverTimeMs - Date.now();
+          clockProxyState.serverSynced = true;
+        }
+        tickClock();
+        doneCb(true, !wasBypassed);
+      });
+    }
+    tryNext();
   }
 
   function clockHelpText() {
@@ -481,7 +734,7 @@
     Belet.registerDevice(function (err) {
       deviceRegistration.model = Belet.model();
       if (err) {
-        if (err.kind === 'network' && isClockInvalid()) {
+        if (err.kind === 'network' && isClockBlockingHttps()) {
           deviceRegistration.state = 'ожидает синхронизации времени (HTTP 0)';
         } else if (err.kind === 'network') {
           deviceRegistration.state = 'нет ответа от сервера (HTTP 0)';
@@ -497,7 +750,7 @@
   function describeError(err) {
     if (!err) return 'Неизвестная ошибка.';
     if (err.kind === 'network') {
-      if (isClockInvalid()) return clockHelpText();
+      if (isClockBlockingHttps()) return clockHelpText();
       return 'Нет ответа от серверов Belet (HTTP 0). Проверьте подключение к сети и время на телевизоре. ' +
         'Если сеть работает, встроенный браузер ТВ мог заблокировать запрос политикой CORS.';
     }
@@ -545,7 +798,7 @@
 
   function scheduleClockWatch() {
     clearClockSyncTimer();
-    if (!isClockInvalid()) {
+    if (!isClockInvalid() || isClockBypassed()) {
       state.clockSynced = true;
       return;
     }
@@ -553,7 +806,17 @@
     state.clockSyncTimer = setTimeout(function () {
       state.clockSyncTimer = null;
       tickClock();
-      if (!state.clockSynced) scheduleClockWatch();
+      if (!state.clockSynced && !isClockBypassed()) {
+        probeClockProxy(function (ok, newlyActivated) {
+          if (ok && newlyActivated) {
+            state.clockSynced = true;
+            toast('Запущен встроенный обход часов ТВ — подключаемся к Belet…', 3000);
+            recoverNetworkScreens(true);
+            return;
+          }
+          if (!state.clockSynced && !isClockBypassed()) scheduleClockWatch();
+        });
+      }
     }, 2000);
   }
 
@@ -693,7 +956,7 @@
         isNetwork = err.kind === 'network';
         maxRetries = isNetwork ? 3 : 1;
         delays = [1200, 2500, 5000];
-        if (isClockInvalid()) scheduleClockWatch();
+        if (isClockBlockingHttps()) scheduleClockWatch();
         if (retryAttempt === 0 && !Belet.hasSession() && Belet.resetDevice) Belet.resetDevice();
         state.login.methods = fallbackOtpMethods();
         state.login.otpFallback = true;
@@ -876,11 +1139,11 @@
         maxRetries = isNetwork ? 3 : 1;
         delays = [1200, 2500, 5000];
         if (retryAttempt === 0 && !Belet.hasSession() && Belet.resetDevice) Belet.resetDevice();
-        if (isClockInvalid()) scheduleClockWatch();
+        if (isClockBlockingHttps()) scheduleClockWatch();
         if (retryAttempt < maxRetries) {
           delay = isNetwork ? delays[retryAttempt] : 900;
           $('qrStatus').textContent = isNetwork
-            ? (isClockInvalid()
+            ? (isClockBlockingHttps()
               ? 'Время ТВ сброшено (' + clockDateText() + ') — HTTPS блокируется. Повторяем запрос…'
               : 'Нет связи с сервером (HTTP 0). Повторяем запрос QR-кода…')
             : 'Повторяем запрос QR-кода…';
@@ -890,7 +1153,7 @@
           }, delay);
           return;
         }
-        $('qrStatus').textContent = (isNetwork && isClockInvalid())
+        $('qrStatus').textContent = (isNetwork && isClockBlockingHttps())
           ? clockHelpText()
           : ('Не удалось получить QR-код' +
             (err && err.http ? ' (HTTP ' + err.http + ')' : (isNetwork ? ' (HTTP 0)' : '')) +
@@ -943,13 +1206,18 @@
 
   function imageUrl(value) {
     var url;
+    var resolved;
     if (typeof value !== 'string') return null;
     url = value.replace(/^\s+|\s+$/g, '');
     if (!url) return null;
-    if (/^(https?:|data:|file:)/i.test(url)) return url;
-    if (url.indexOf('//') === 0) return 'https:' + url;
-    if (/^img\.belet\.me\//i.test(url)) return 'https://' + url;
-    return IMAGE_BASE + (url.charAt(0) === '/' ? url.slice(1) : url);
+    if (/^(https?:|data:|file:)/i.test(url)) resolved = url;
+    else if (url.indexOf('//') === 0) resolved = 'https:' + url;
+    else if (/^img\.belet\.me\//i.test(url)) resolved = 'https://' + url;
+    else resolved = IMAGE_BASE + (url.charAt(0) === '/' ? url.slice(1) : url);
+    if (window.Belet && Belet.proxyUrl && /^https:/i.test(resolved)) {
+      return Belet.proxyUrl(resolved);
+    }
+    return resolved;
   }
 
   function setContentImage(img, source) {
@@ -1140,10 +1408,10 @@
           if (!collected.length) {
             delays = [1500, 3000, 5000, 7000];
             $('homeEmpty').classList.remove('hidden');
-            if (isClockInvalid()) scheduleClockWatch();
+            if (isClockBlockingHttps()) scheduleClockWatch();
             if (err.kind === 'network' && retryAttempt < delays.length) {
               delay = delays[retryAttempt];
-              $('homeEmpty').querySelector('h2').textContent = isClockInvalid()
+              $('homeEmpty').querySelector('h2').textContent = isClockBlockingHttps()
                 ? 'Сбиты дата и время на телевизоре'
                 : 'Подключение к серверам Belet…';
               $('homeEmpty').querySelector('p').textContent = describeError(err) +
@@ -1157,7 +1425,7 @@
               }, delay);
               return;
             }
-            $('homeEmpty').querySelector('h2').textContent = isClockInvalid()
+            $('homeEmpty').querySelector('h2').textContent = isClockBlockingHttps()
               ? 'Сбиты дата и время на телевизоре'
               : 'Каталог не загрузился';
             $('homeEmpty').querySelector('p').textContent = describeError(err);
@@ -1791,7 +2059,11 @@
 
   function startSources(sources, options, meta) {
     var player = state.player;
-    sources = (sources || []).filter(function (source) { return source && source.url; });
+    sources = (sources || []).filter(function (source) { return source && source.url; }).map(function (source) {
+      var proxied = (window.Belet && window.Belet.proxyUrl) ? window.Belet.proxyUrl(source.url) : source.url;
+      if (proxied === source.url) return source;
+      return { url: proxied, filename: source.filename, quality: source.quality, type: source.type };
+    });
     if (!sources.length) {
       playerError('Сервис не предоставил видеопоток для этого фильма.');
       return;
@@ -1817,6 +2089,8 @@
   }
 
   function hostOf(url) {
+    var proxied = String(url || '').match(/^https?:\/\/[^\/]+\/__proxy\/([^\/?#]+)/i);
+    if (proxied) return proxied[1];
     var match = String(url || '').match(/^https?:\/\/([^\/]+)/i);
     return match ? match[1] : '—';
   }
@@ -1936,8 +2210,10 @@
   }
 
   function mediaRequestSetup(xhr, url) {
+    var target;
     if (!xhr || !window.Belet || !window.Belet.mediaHeaders) return;
-    try { if (xhr.readyState === 0) xhr.open('GET', url, true); } catch (e) {}
+    target = window.Belet.proxyUrl ? window.Belet.proxyUrl(url) : url;
+    try { if (xhr.readyState === 0) xhr.open('GET', target, true); } catch (e) {}
     var headers = window.Belet.mediaHeaders(state.player.beletSessionId, false, null);
     for (var key in headers) {
       if (!Object.prototype.hasOwnProperty.call(headers, key)) continue;
@@ -1960,6 +2236,9 @@
         var chunkLength = isFragment && state.player.chunkLengths ? state.player.chunkLengths[level] : null;
         var headers;
         if (self.cancelled || !state.player.active || (hls && state.player.hls !== hls)) return;
+        if (window.Belet && window.Belet.proxyUrl && context && context.url) {
+          context.url = window.Belet.proxyUrl(context.url);
+        }
         context.headers = context.headers || {};
         headers = window.Belet.mediaHeaders(state.player.beletSessionId, isFragment, chunkLength);
         Object.keys(headers).forEach(function (key) { context.headers[key] = headers[key]; });
@@ -2434,7 +2713,7 @@
     var host = $('aboutStatus');
     var alertBox = $('aboutClockAlert');
     host.innerHTML = '<div class="about-row"><span>Проверка…</span><span></span></div>';
-    if (isClockInvalid()) {
+    if (isClockBlockingHttps()) {
       scheduleClockWatch();
       if (alertBox) {
         alertBox.textContent = clockHelpText();
@@ -2443,76 +2722,96 @@
     } else if (alertBox) {
       setHidden(alertBox, true);
     }
-    Belet.healthCheck(function (results) {
-      var labels = {
-        auth: 'Авторизация (beletapis.com)',
-        home: 'Каталог (homepage.belet.me)',
-        film: 'Видеосервис (film.beletapis.com)'
-      };
-      var order = ['auth', 'home', 'film'];
-      var now = new Date();
-      var year = now.getFullYear();
-      var timeValid = year >= 2024;
-      var tz = readTizenClock();
-      var tzYear = (tz && tz.getFullYear) ? tz.getFullYear() : 0;
-      var tzValid = tzYear >= 2024;
-      var timeText = formatDateObj(now) +
-        (timeValid ? '' : ' (не синхронизировано — HTTPS блокируется)');
-      var netOk = isNetworkReady();
-      if (alertBox) {
-        if (!timeValid) {
-          alertBox.textContent = clockHelpText();
-          setHidden(alertBox, false);
-        } else {
-          setHidden(alertBox, true);
+    function runProbeAndCheck() {
+      Belet.healthCheck(function (results) {
+        var labels = {
+          auth: 'Авторизация (beletapis.com)',
+          home: 'Каталог (homepage.belet.me)',
+          film: 'Видеосервис (film.beletapis.com)'
+        };
+        var order = ['auth', 'home', 'film'];
+        var now = new Date();
+        var year = now.getFullYear();
+        var timeValid = year >= 2024;
+        var bypassed = isClockBypassed();
+        var tz = readTizenClock();
+        var tzYear = (tz && tz.getFullYear) ? tz.getFullYear() : 0;
+        var tzValid = tzYear >= 2024;
+        var timeText = formatDateObj(now) +
+          (timeValid ? '' : (bypassed ? ' (обход через локальный прокси ТВ)' : ' (не синхронизировано — HTTPS блокируется)'));
+        var netOk = isNetworkReady();
+        if (alertBox) {
+          if (!timeValid && !bypassed) {
+            alertBox.textContent = clockHelpText();
+            setHidden(alertBox, false);
+          } else {
+            setHidden(alertBox, true);
+          }
         }
-      }
-      host.innerHTML = '';
-      order.forEach(function (key) {
-        var value = results[key] || 'нет ответа';
-        var row = el('div', 'about-row');
-        var name = el('span', '', labels[key]);
-        var status = el('span', value === 'ok' ? 'ok' : 'bad', value === 'ok' ? 'доступен' : value);
-        row.appendChild(name);
-        row.appendChild(status);
-        host.appendChild(row);
+        host.innerHTML = '';
+        order.forEach(function (key) {
+          var value = results[key] || 'нет ответа';
+          var row = el('div', 'about-row');
+          var name = el('span', '', labels[key]);
+          var status = el('span', value === 'ok' ? 'ok' : 'bad', value === 'ok' ? 'доступен' : value);
+          row.appendChild(name);
+          row.appendChild(status);
+          host.appendChild(row);
+        });
+        var netRow = el('div', 'about-row');
+        netRow.appendChild(el('span', '', 'Сеть телевизора'));
+        netRow.appendChild(el('span', netOk ? 'ok' : 'bad', networkLabel()));
+        host.appendChild(netRow);
+        var timeRow = el('div', 'about-row');
+        timeRow.appendChild(el('span', '', 'Время браузера (SSL)'));
+        timeRow.appendChild(el('span', (timeValid || bypassed) ? 'ok' : 'bad', timeText));
+        host.appendChild(timeRow);
+        if (tz && tzYear !== year) {
+          var tzRow = el('div', 'about-row');
+          tzRow.appendChild(el('span', '', 'Время Tizen (настройки ТВ)'));
+          tzRow.appendChild(el('span', tzValid ? 'ok' : 'bad',
+            formatDateObj(tz) + (tzValid && !timeValid ? ' (задано вручную — браузер ещё на ' + year + ')' : '')));
+          host.appendChild(tzRow);
+        }
+        if (!timeValid && clockProxyState.serverSynced) {
+          var srvTimeRow = el('div', 'about-row');
+          srvTimeRow.appendChild(el('span', '', 'Время с сервера Belet'));
+          srvTimeRow.appendChild(el('span', 'ok', formatDateObj(new Date(Date.now() + clockProxyState.serverOffsetMs))));
+          host.appendChild(srvTimeRow);
+        }
+        if (!timeValid || bypassed) {
+          var proxyRow = el('div', 'about-row');
+          proxyRow.appendChild(el('span', '', 'Обход часов ТВ (SSL)'));
+          proxyRow.appendChild(el('span', bypassed ? 'ok' : 'bad', clockProxyState.diag));
+          host.appendChild(proxyRow);
+        }
+        var modelRow = el('div', 'about-row');
+        modelRow.appendChild(el('span', '', 'Модель телевизора'));
+        modelRow.appendChild(el('span', '', Belet.model()));
+        host.appendChild(modelRow);
+        var deviceRow = el('div', 'about-row');
+        deviceRow.appendChild(el('span', '', 'Идентификатор устройства'));
+        deviceRow.appendChild(el('span', '', Belet.device() || '—'));
+        host.appendChild(deviceRow);
+        var listRow = el('div', 'about-row');
+        listRow.appendChild(el('span', '', 'Список устройств Belet'));
+        listRow.appendChild(el('span', '', deviceRegistration.state));
+        host.appendChild(listRow);
+        var playRow = el('div', 'about-row');
+        playRow.appendChild(el('span', '', 'Последнее воспроизведение'));
+        playRow.appendChild(el('span', '', state.playbackInfo));
+        host.appendChild(playRow);
+        var sessionRow = el('div', 'about-row');
+        sessionRow.appendChild(el('span', '', 'Сессия'));
+        sessionRow.appendChild(el('span', '', Belet.hasSession() ? 'активна' : 'не выполнен вход'));
+        host.appendChild(sessionRow);
       });
-      var netRow = el('div', 'about-row');
-      netRow.appendChild(el('span', '', 'Сеть телевизора'));
-      netRow.appendChild(el('span', netOk ? 'ok' : 'bad', networkLabel()));
-      host.appendChild(netRow);
-      var timeRow = el('div', 'about-row');
-      timeRow.appendChild(el('span', '', 'Время браузера (SSL)'));
-      timeRow.appendChild(el('span', timeValid ? 'ok' : 'bad', timeText));
-      host.appendChild(timeRow);
-      if (tz && tzYear !== year) {
-        var tzRow = el('div', 'about-row');
-        tzRow.appendChild(el('span', '', 'Время Tizen (настройки ТВ)'));
-        tzRow.appendChild(el('span', tzValid ? 'ok' : 'bad',
-          formatDateObj(tz) + (tzValid && !timeValid ? ' (задано вручную — браузер ещё на ' + year + ')' : '')));
-        host.appendChild(tzRow);
-      }
-      var modelRow = el('div', 'about-row');
-      modelRow.appendChild(el('span', '', 'Модель телевизора'));
-      modelRow.appendChild(el('span', '', Belet.model()));
-      host.appendChild(modelRow);
-      var deviceRow = el('div', 'about-row');
-      deviceRow.appendChild(el('span', '', 'Идентификатор устройства'));
-      deviceRow.appendChild(el('span', '', Belet.device() || '—'));
-      host.appendChild(deviceRow);
-      var listRow = el('div', 'about-row');
-      listRow.appendChild(el('span', '', 'Список устройств Belet'));
-      listRow.appendChild(el('span', '', deviceRegistration.state));
-      host.appendChild(listRow);
-      var playRow = el('div', 'about-row');
-      playRow.appendChild(el('span', '', 'Последнее воспроизведение'));
-      playRow.appendChild(el('span', '', state.playbackInfo));
-      host.appendChild(playRow);
-      var sessionRow = el('div', 'about-row');
-      sessionRow.appendChild(el('span', '', 'Сессия'));
-      sessionRow.appendChild(el('span', '', Belet.hasSession() ? 'активна' : 'не выполнен вход'));
-      host.appendChild(sessionRow);
-    });
+    }
+    if (isClockBlockingHttps() && hasTizenServiceApi()) {
+      probeClockProxy(function () { runProbeAndCheck(); });
+      return;
+    }
+    runProbeAndCheck();
   }
 
   function logout() {
@@ -2880,9 +3179,15 @@
     var nowSynced = date.getFullYear() >= 2024;
     var displayDate = date;
     var tz;
+    if (nowSynced && isClockBypassed()) {
+      if (window.Belet && Belet.setClockProxy) Belet.setClockProxy('');
+      clockProxyState.base = '';
+      clockProxyState.diag = 'не требуется (часы ТВ синхронизировались)';
+    }
     if (!nowSynced) {
       tz = readTizenClock();
       if (tz && tz.getFullYear && tz.getFullYear() >= 2024) displayDate = tz;
+      else if (clockProxyState.serverSynced) displayDate = new Date(Date.now() + clockProxyState.serverOffsetMs);
     }
     if (node) node.textContent = pad2(displayDate.getHours()) + ':' + pad2(displayDate.getMinutes());
     if (!state.clockSynced && nowSynced) {
@@ -2898,7 +3203,7 @@
     if (state.bootDone) return;
     state.bootDone = true;
     clearBootTimer();
-    if (isClockInvalid()) scheduleClockWatch();
+    if (isClockBlockingHttps()) scheduleClockWatch();
     session = state.bootSession;
     if (session) {
       $('bootStatus').textContent = 'Восстанавливаем сессию…';
@@ -2912,14 +3217,21 @@
 
   function waitForNetworkAtBoot(waited) {
     var netOk = isNetworkReady();
-    var clockOk = !isClockInvalid();
+    var clockOk = !isClockBlockingHttps();
     if (state.bootDone) return;
     if ((netOk && clockOk) || (!netOk && waited >= 8000) || (netOk && !clockOk && waited >= 4000)) {
       startBootSession();
       return;
     }
     if (netOk && !clockOk) {
-      $('bootStatus').textContent = 'Ожидаем синхронизацию времени телевизора…';
+      $('bootStatus').textContent = hasTizenServiceApi()
+        ? 'Время ТВ сброшено — запускаем встроенный обход SSL…'
+        : 'Ожидаем синхронизацию времени телевизора…';
+      if (hasTizenServiceApi() && waited > 0 && waited % 1000 === 0) {
+        probeClockProxy(function (ok) {
+          if (ok && isNetworkReady() && !state.bootDone) startBootSession();
+        });
+      }
     }
     state.bootTimer = setTimeout(function () {
       state.bootTimer = null;
@@ -2943,9 +3255,16 @@
       startBootSession();
       return;
     }
-    $('bootStatus').textContent = isNetworkReady()
-      ? 'Ожидаем синхронизацию времени телевизора…'
-      : 'Ожидаем подключение телевизора к сети…';
+    if (isClockInvalid() && hasTizenServiceApi()) {
+      $('bootStatus').textContent = 'Время ТВ сброшено — запускаем встроенный обход SSL…';
+      probeClockProxy(function (ok) {
+        if (ok && isNetworkReady() && !state.bootDone) startBootSession();
+      });
+    } else {
+      $('bootStatus').textContent = isNetworkReady()
+        ? 'Ожидаем синхронизацию времени телевизора…'
+        : 'Ожидаем подключение телевизора к сети…';
+    }
     waitForNetworkAtBoot(0);
   }
 

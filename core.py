@@ -1263,6 +1263,39 @@ class Api:
                 if result.strip():
                     lines.extend(result.strip().splitlines())
                 diag = diagnose_install_output(result, pkg_id)
+                if _expected_pkg == 'BeletFilm1' and diag.get('status') in ('manifest_error', 'api_mismatch'):
+                    import zipfile
+                    lines.append('[i] TV rejected background service manifest; retrying service-free client WGT...')
+                    buf = io.BytesIO()
+                    with zipfile.ZipFile(io.BytesIO(data), 'r') as zin, zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+                        for item in zin.infolist():
+                            if item.filename in ('service/clock-proxy.js', 'wrt-service.js'):
+                                continue
+                            payload = zin.read(item.filename)
+                            if item.filename == 'config.xml':
+                                cfg = payload.decode('utf-8')
+                                cfg = re.sub(r'\s*<feature\s+name="http://tizen\.org/feature/web\.service"[^>]*/?>', '', cfg)
+                                cfg = re.sub(r'\s*<tizen:service\b[^>]*>.*?</tizen:service>', '', cfg, flags=re.S)
+                                cfg = cfg.replace('background-support="enable"', 'background-support="disable"')
+                                payload = cfg.encode('utf-8')
+                            zout.writestr(item.filename, payload)
+                    signed = sign_wgt_bytes(buf.getvalue(), bundle['author_key'], bundle['author_certs'], bundle['dist_key'], bundle['dist_certs'])
+                    verify_wgt_signatures(signed)
+                    sdb.push_bytes(signed, remote)
+                    result = sdb.install_wgt(pkg_id, remote, timeout=120.0)
+                    if result.strip():
+                        lines.extend(result.strip().splitlines())
+                    diag = diagnose_install_output(result, pkg_id)
+                if diag.get('status') == 'cert_mismatch':
+                    lines.append(f'[i] Removing previous {pkg_id} (certificate mismatch) and retrying...')
+                    try:
+                        sdb.uninstall_app(pkg_id)
+                    except Exception:
+                        pass
+                    result = sdb.install_wgt(pkg_id, remote, timeout=120.0)
+                    if result.strip():
+                        lines.extend(result.strip().splitlines())
+                    diag = diagnose_install_output(result, pkg_id)
                 if diag.get('status') != 'ok':
                     return {'ok': False, 'error': diag.get('reason') or 'TV did not confirm WGT installation; see log.', 'output': '\n'.join(lines)}
                 lines.append('[+] Samsung reported installation complete. Open the app on the TV.')
