@@ -38,6 +38,7 @@
   var refreshing = false;
   var refreshQueue = [];
   var generation = 0;
+  var qrAuthHost = HOSTS.auth;
 
   function randomHex(bytes) {
     var out = '';
@@ -72,6 +73,12 @@
     var created = randomHex(16);
     storageSet(DEVICE_KEY, created);
     return created;
+  }
+
+  function rotateDevice() {
+    device = randomHex(16);
+    storageSet(DEVICE_KEY, device);
+    return device;
   }
 
   function loadSession() {
@@ -130,13 +137,17 @@
     try {
       xhr.open(options.method || 'GET', options.url, true);
       xhr.timeout = options.timeout || REQUEST_TIMEOUT;
+      try { xhr.withCredentials = false; } catch (e) {}
       xhr.setRequestHeader('Accept', 'application/json');
       xhr.setRequestHeader('Lang', CLIENT.lang);
       xhr.setRequestHeader('X-Platform', CLIENT.platform);
       xhr.setRequestHeader('X-VersionCode', CLIENT.versionCode);
       xhr.setRequestHeader('X-App-Version', CLIENT.appVersion);
       xhr.setRequestHeader('app-version', CLIENT.versionCode);
-      if (device) xhr.setRequestHeader('fingerprint', device);
+      if (device && !(Object.prototype.hasOwnProperty.call(headers, 'fingerprint') &&
+          headers.fingerprint !== null && headers.fingerprint !== undefined)) {
+        xhr.setRequestHeader('fingerprint', device);
+      }
       for (key in headers) {
         if (Object.prototype.hasOwnProperty.call(headers, key) && headers[key] !== null && headers[key] !== undefined) {
           xhr.setRequestHeader(key, String(headers[key]));
@@ -281,74 +292,131 @@
 
   /* ── Auth ───────────────────────────────────────────────────────────── */
 
+  function otpListFrom(data) {
+    if (!data || typeof data !== 'object') return [];
+    if (Array.isArray(data.otp)) return data.otp;
+    if (data.result && Array.isArray(data.result.otp)) return data.result.otp;
+    if (Array.isArray(data.result)) return data.result;
+    if (Array.isArray(data.data)) return data.data;
+    return [];
+  }
+
   function otpMethods(callback) {
-    rawRequest({ method: 'GET', url: HOSTS.auth + '/api/v1/auth/available-otp' }, function (err, data) {
-      var list;
+    rawRequest({ method: 'GET', url: HOSTS.auth + '/api/v1/auth/available-otp', timeout: 8000 }, function (err, data) {
       if (err) {
         // The web host answers the same route; used only when the mobile host is unreachable.
-        return rawRequest({ method: 'GET', url: HOSTS.authAlt + '/api/v1/auth/available-otp' }, function (altErr, altData) {
+        return rawRequest({ method: 'GET', url: HOSTS.authAlt + '/api/v1/auth/available-otp', timeout: 8000 }, function (altErr, altData) {
           if (altErr) return callback(err, null);
-          list = altData && altData.otp;
-          callback(null, Array.isArray(list) ? list : []);
+          callback(null, otpListFrom(altData));
         });
       }
-      list = data && data.otp;
-      callback(null, Array.isArray(list) ? list : []);
+      callback(null, otpListFrom(data));
     });
   }
 
   function signIn(phone, signInType, callback) {
+    var path = '/api/v1/auth/sign-in?sign_in_type=' + encodeURIComponent(signInType);
+    var body = { phone: Number(phone) };
+    var headers = { 'X-Code-Sending-Type': String(signInType) };
     rawRequest({
       method: 'POST',
-      url: HOSTS.auth + '/api/v1/auth/sign-in?sign_in_type=' + encodeURIComponent(signInType),
-      body: { phone: Number(phone) },
-      headers: { 'X-Code-Sending-Type': String(signInType) }
+      url: HOSTS.auth + path,
+      body: body,
+      headers: headers,
+      timeout: 12000
     }, function (err, data) {
-      if (err) return callback(err, null);
-      if (!data || typeof data.token !== 'string' || !data.token) return callback(apiError('format', 200), null);
-      callback(null, data);
+      if (!err) {
+        if (!data || typeof data.token !== 'string' || !data.token) return callback(apiError('format', 200), null);
+        return callback(null, data);
+      }
+      if (err.kind === 'network' || err.http === 404 || err.http === 405 || err.http >= 500) {
+        return rawRequest({
+          method: 'POST',
+          url: HOSTS.authAlt + path,
+          body: body,
+          headers: headers,
+          timeout: 12000
+        }, function (altErr, altData) {
+          if (altErr) return callback(err, null);
+          if (!altData || typeof altData.token !== 'string' || !altData.token) return callback(apiError('format', 200), null);
+          callback(null, altData);
+        });
+      }
+      callback(err, null);
     });
   }
 
   function checkCode(code, tempToken, callback) {
-    rawRequest({
-      method: 'POST',
-      url: HOSTS.auth + '/api/v1/auth/check-code-mobile',
-      body: { code: code, fingerprint: device, token: tempToken }
-    }, function (err, data) {
-      if (err) return callback(err, null);
+    var payload = { code: code, fingerprint: device, token: tempToken };
+    function accept(data) {
       if (!data || typeof data.token !== 'string' || !data.token) return callback(apiError('format', 200), null);
       generation += 1;
       persist({ token: data.token, refresh_token: String(data.refresh_token || ''), fingerprint: device, saved_at: Date.now() });
       callback(null, data);
+    }
+    rawRequest({
+      method: 'POST',
+      url: HOSTS.auth + '/api/v1/auth/check-code-mobile',
+      body: payload,
+      timeout: 12000
+    }, function (err, data) {
+      if (!err) return accept(data);
+      if (err.kind === 'network' || err.http === 404 || err.http === 405 || err.http >= 500) {
+        return rawRequest({
+          method: 'POST',
+          url: HOSTS.authAlt + '/api/v1/auth/check-code-mobile',
+          body: payload,
+          timeout: 12000
+        }, function (altErr, altData) {
+          if (altErr) return callback(err, null);
+          accept(altData);
+        });
+      }
+      callback(err, null);
     });
   }
 
+  function parseQrPayload(data) {
+    var rawCode, match, token, png;
+    if (!data || typeof data.code !== 'string' || typeof data.qr_png !== 'string') return null;
+    rawCode = data.code.replace(/^\s+|\s+$/g, '');
+    match = /^https?:\/\/[^\/]+\/register\/([A-Za-z0-9_-]+)\/?$/.exec(rawCode);
+    if (match) token = match[1];
+    else if (/^[A-Za-z0-9_-]{6,256}$/.test(rawCode)) token = rawCode;
+    else return null;
+    png = data.qr_png.replace(/\s+/g, '').replace(/^data:image\/png;base64,/i, '');
+    if (!/^iVBORw0KGgo[A-Za-z0-9+/=]+$/.test(png) || png.length > 600000) return null;
+    return {
+      code: token,
+      image: 'data:image/png;base64,' + png
+    };
+  }
+
   function qrCode(callback) {
-    rawRequest({ method: 'GET', url: HOSTS.auth + '/api/v1/auth/get-qrcode' }, function (err, data) {
-      if (err) return callback(err, null);
-      if (!data || typeof data.code !== 'string' || !/^https:\/\/film\.belet\.me\/register\/[A-Za-z0-9_-]+$/.test(data.code)) {
-        return callback(apiError('format', 200), null);
-      }
-      if (typeof data.qr_png !== 'string' || !/^iVBORw0KGgo[A-Za-z0-9+/=]+$/.test(data.qr_png) || data.qr_png.length > 400000) {
-        return callback(apiError('format', 200), null);
-      }
-      callback(null, {
-        code: data.code.substring('https://film.belet.me/register/'.length),
-        image: 'data:image/png;base64,' + data.qr_png
+    qrAuthHost = HOSTS.auth;
+    rawRequest({ method: 'GET', url: HOSTS.auth + '/api/v1/auth/get-qrcode', timeout: 8000 }, function (err, data) {
+      var parsed = !err && parseQrPayload(data);
+      if (parsed) return callback(null, parsed);
+      rawRequest({ method: 'GET', url: HOSTS.authAlt + '/api/v1/auth/get-qrcode', timeout: 8000 }, function (altErr, altData) {
+        var altParsed = !altErr && parseQrPayload(altData);
+        if (altParsed) {
+          qrAuthHost = HOSTS.authAlt;
+          return callback(null, altParsed);
+        }
+        callback(err || apiError('format', 200), null);
       });
     });
   }
 
-  function qrCheck(code, web, callback) {
+  function qrCheck(code, web, callback, host) {
     function direct() {
       rawRequest({
         method: 'POST',
-        url: HOSTS.auth + '/api/v1/auth/check-qrcode' + (web ? '-web' : ''),
+        url: (host || HOSTS.auth) + '/api/v1/auth/check-qrcode' + (web ? '-web' : ''),
         body: { code: code, fingerprint: device }
       }, callback);
     }
-    if (!global.beletCheckQrNative) return direct();
+    if (!global.beletCheckQrNative || (host && host !== HOSTS.auth)) return direct();
     global.beletCheckQrNative(code, device, web, function (http, data) {
       if (!http) return direct();
       callback(http >= 200 && http < 300 ? null : errorFromStatus(http, null), data, http);
@@ -357,11 +425,29 @@
 
   function logout(callback) {
     var token = session && session.token;
+    var oldDevice = device;
+    var headers;
     generation += 1;
+    playerSession = '';
+    mediaScheme = '';
+    qrAuthHost = HOSTS.auth;
     persist(null);
-    if (!token) return callback(null);
-    rawRequest({ method: 'POST', url: HOSTS.auth + '/api/v1/auth/log-out', headers: { Authorization: token } }, function (err) {
-      callback(err || null);
+    // Rotate the install fingerprint on explicit sign-out so a revoked/logged-out device ID
+    // cannot poison subsequent OTP or QR endpoints on the login screen.
+    rotateDevice();
+    if (!token) {
+      if (callback) callback(null);
+      return;
+    }
+    headers = { Authorization: token };
+    if (oldDevice) headers.fingerprint = oldDevice;
+    rawRequest({
+      method: 'POST',
+      url: HOSTS.auth + '/api/v1/auth/log-out',
+      timeout: 4000,
+      headers: headers
+    }, function (err) {
+      if (callback) callback(err || null);
     });
   }
 
@@ -816,6 +902,7 @@
     hasSession: function () { return !!(session && session.token); },
     session: function () { return session; },
     device: function () { return device; },
+    resetDevice: rotateDevice,
     forget: function () { generation += 1; persist(null); },
     otpMethods: otpMethods,
     signIn: signIn,
@@ -828,8 +915,16 @@
         }
         callback(err, data, http);
       }
-      qrCheck(code, false, function (err, data, http) {
-        if (http === 404 || http === 405) return qrCheck(code, true, result);
+      function checkOnHost(host, onDone) {
+        qrCheck(code, false, function (err, data, http) {
+          if (http === 404 || http === 405) return qrCheck(code, true, onDone, host);
+          onDone(err, data, http);
+        }, host);
+      }
+      checkOnHost(HOSTS.auth, function (err, data, http) {
+        if (qrAuthHost !== HOSTS.auth && err && (err.kind === 'network' || http === 404 || http === 405 || http >= 500)) {
+          return checkOnHost(qrAuthHost, result);
+        }
         result(err, data, http);
       });
     },

@@ -1027,6 +1027,7 @@ click(ids.profileRefresh);
 assert.strictEqual(ids.profilePhone.textContent, '+993 ••• 0726');
 assert(ids.profilePlan.textContent.indexOf('Standard') >= 0);
 
+const deviceBeforeLogout = store.neon_belet_samsung_device_v2;
 click(ids.profileLogout);
 assert(!ids.dialog.classList.contains('hidden'));
 route('/api/v1/auth/log-out', 200, { status: 'ok' });
@@ -1034,6 +1035,13 @@ route('/api/v1/auth/available-otp', 200, { otp: [{ name: 'SMS', type: 2 }] });
 click(ids.dialogActions.querySelectorAll('*')[0]);
 assert(!store.neon_belet_samsung_session_v2, 'session removed');
 assert(!ids.login.classList.contains('hidden'), 'back at login');
+const deviceAfterLogout = store.neon_belet_samsung_device_v2;
+assert(/^[a-f0-9]{32}$/.test(deviceAfterLogout), 'logout rotates install fingerprint to fresh 32-hex id');
+assert.notStrictEqual(deviceAfterLogout, deviceBeforeLogout, 'logout does not reuse the signed-out fingerprint');
+const logoutCall = calls.filter(c => c.url.indexOf('/api/v1/auth/log-out') >= 0).pop();
+assert.strictEqual(logoutCall.headers.fingerprint, deviceBeforeLogout, 'log-out sends the signed-out fingerprint');
+const postLogoutOtp = calls.filter(c => c.url.indexOf('/api/v1/auth/available-otp') >= 0).pop();
+assert.strictEqual(postLogoutOtp.headers.fingerprint, deviceAfterLogout, 'post-logout OTP request uses the rotated fingerprint');
 
 /* 12. QR sign-in flow */
 testQrLogin();
@@ -1065,6 +1073,120 @@ click(ids.rows.querySelector('.card'));
 runTimers();
 assert(!store.neon_belet_samsung_session_v2, 'session cleared after rejected refresh');
 assert(!ids.login.classList.contains('hidden'), 'login shown after rejected refresh');
+
+/* 15. Post-logout resilience: even if log-out returns 500 and OTP/QR initially reject the device,
+ *     phone input stays unlocked via fallback and both OTP and QR recover via device rotation + authAlt */
+route('/api/v2/home_page', 200, {
+  status: 'ok',
+  result: [{ id: 1, title: 'Снова дома', source: 'top', items: [
+    { id: 30, type_id: 1, name: 'Film 30', images: { vertical: { medium: { url: 'https://img.example/30.jpg' } } } }
+  ] }]
+});
+route('/api/v1/auth/get-qrcode', 200, {
+  code: 'https://film.belet.me/register/qr-before-step15',
+  qr_png: 'iVBORw0KGgoAAAANSUhEUg=='
+});
+click(ids.toQr);
+runTimers();
+route('/api/v1/auth/check-qrcode', 200, { token: 'step15-access', refresh_token: 'step15-refresh' });
+route('/api/v1/users/device', 200, { msg: 'ok' });
+runTimers();
+assert(!ids.home.classList.contains('hidden'), 'logged in before step 15 logout');
+
+click(ids.nav.querySelectorAll('.nav-item')[3]);
+assert(!ids.profile.classList.contains('hidden'));
+const step15OldDevice = store.neon_belet_samsung_device_v2;
+click(ids.profileLogout);
+route('/api/v1/auth/log-out', 500, { message: 'server error' });
+route('https://beletapis.com/api/v1/auth/available-otp', 403, { message: 'stale fingerprint' });
+route('https://api.belet.tm/api/v1/auth/available-otp', 403, { message: 'stale fingerprint' });
+click(ids.dialogActions.querySelectorAll('*')[0]);
+assert(!store.neon_belet_samsung_session_v2, 'session deleted even if log-out fails');
+assert(!ids.login.classList.contains('hidden'), 'login opened after failed log-out');
+assert.notStrictEqual(store.neon_belet_samsung_device_v2, step15OldDevice, 'fingerprint rotated on logout and OTP retry');
+assert(ids.methodValue.textContent.indexOf('резерв') >= 0, 'OTP failure uses SMS fallback instead of locking phone entry');
+click(ids.phoneDisplay);
+'99362560726'.split('').forEach(digit => click(byText(ids.numpadKeys, digit)));
+click(ids.numpadDone);
+assert.strictEqual(ids.sendCode.disabled, false, 'sendCode stays enabled with phone + fallback method');
+
+route('https://beletapis.com/api/v1/auth/available-otp', 500, {});
+route('https://api.belet.tm/api/v1/auth/available-otp', 200, { otp: [{ name: 'SMS', type: 2 }] });
+runTimers();
+assert.strictEqual(ids.methodValue.textContent, 'SMS', 'auto-retry recovers OTP methods via authAlt');
+assert.strictEqual(ids.sendCode.disabled, false);
+
+const preQrRetryDevice = store.neon_belet_samsung_device_v2;
+route('https://beletapis.com/api/v1/auth/get-qrcode', 500, { message: 'bad gateway' });
+route('https://api.belet.tm/api/v1/auth/get-qrcode', 500, { message: 'bad gateway' });
+click(ids.toQr);
+assert.notStrictEqual(store.neon_belet_samsung_device_v2, preQrRetryDevice, 'QR error rotates stale fingerprint before retry');
+const qrRotatedDevice = store.neon_belet_samsung_device_v2;
+route('https://beletapis.com/api/v1/auth/get-qrcode', 500, {});
+route('https://api.belet.tm/api/v1/auth/get-qrcode', 200, {
+  code: 'https://belet.tm/register/qr-recovered-1',
+  qr_png: 'data:image/png;base64,iVBORw0KGgo\nAAAANSUhEUg=='
+});
+runTimers();
+assert(ids.qrImage.src.indexOf('data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==') === 0, 'QR recovers via authAlt and retry');
+assert.strictEqual(calls.filter(c => c.url.indexOf('get-qrcode') >= 0).pop().headers.fingerprint, qrRotatedDevice);
+/* Poll falls back to authAlt if primary check-qrcode returns 500 after authAlt QR issuance */
+route('https://beletapis.com/api/v1/auth/check-qrcode', 500, {});
+route('https://api.belet.tm/api/v1/auth/check-qrcode', 400, { message: 'waiting' });
+runTimers();
+assert(ids.qrStatus.textContent.indexOf('Ожидаем подтверждение') >= 0, 'QR polling continues via authAlt');
+
+click(ids.toPhone);
+assert(!ids.loginPhone.classList.contains('hidden'));
+
+/* Even if available-otp fails twice, phone sign-in stays enabled and methodDisplay retries cleanly */
+route('https://beletapis.com/api/v1/auth/get-qrcode', 200, {
+  code: 'https://film.belet.me/register/qr-tmp',
+  qr_png: 'iVBORw0KGgoAAAANSUhEUg=='
+});
+click(ids.toQr);
+click(ids.toPhone);
+route('/api/v1/auth/sign-in?sign_in_type=2', 200, { token: 'tmp-2' });
+route('/api/v1/auth/check-code-mobile', 200, { token: 'tmp-access-2', refresh_token: 'tmp-refresh-2' });
+route('/api/v1/users/device', 200, { msg: 'ok' });
+route('/api/v2/home_page', 200, { status: 'ok', result: [] });
+click(ids.sendCode);
+click(ids.codeDisplay);
+'1234'.split('').forEach(digit => click(byText(ids.numpadKeys, digit)));
+click(ids.numpadDone);
+runTimers();
+click(ids.nav.querySelectorAll('.nav-item')[3]);
+click(ids.profileLogout);
+route('/api/v1/auth/log-out', 200, { status: 'ok' });
+route('https://beletapis.com/api/v1/auth/available-otp', 500, {});
+route('https://api.belet.tm/api/v1/auth/available-otp', 500, {});
+click(ids.dialogActions.querySelectorAll('*')[0]);
+// Now both initial and retry fail; sendCode stays usable for entered phone
+route('https://beletapis.com/api/v1/auth/available-otp', 500, {});
+route('https://api.belet.tm/api/v1/auth/available-otp', 500, {});
+runTimers();
+click(ids.phoneDisplay);
+'99362560726'.split('').forEach(digit => click(byText(ids.numpadKeys, digit)));
+click(ids.numpadDone);
+assert.strictEqual(ids.sendCode.disabled, false, 'sendCode stays enabled after two available-otp failures');
+route('https://beletapis.com/api/v1/auth/sign-in?sign_in_type=2', 500, {});
+route('https://api.belet.tm/api/v1/auth/sign-in?sign_in_type=2', 200, { token: 'fallback-temp' });
+click(ids.sendCode);
+assert(!ids.loginCode.classList.contains('hidden'), 'signIn completes via authAlt even when available-otp failed');
+route('/api/v1/auth/available-otp', 200, { otp: [{ name: 'SMS', type: 2 }] });
+click(ids.backToPhone);
+assert(!ids.loginPhone.classList.contains('hidden'));
+assert.strictEqual(ids.methodValue.textContent, 'SMS', 'backToPhone refreshes OTP methods when fallback was active');
+
+/* Opening diagnostics from login returns to login when logged out */
+route('/api/v1/auth/available-otp', 200, { otp: [] });
+route('/api/v1/categories', 200, { categories: [] });
+route('/api/v3/movie/1', 401, {});
+click(ids.loginHelp);
+assert(!ids.about.classList.contains('hidden'));
+assert(fireKey(10009), 'Back on about is consumed');
+assert(!ids.login.classList.contains('hidden'), 'Back from about while logged out returns to login, not home/profile');
+assert(ids.home.classList.contains('hidden') && ids.profile.classList.contains('hidden'));
 
 assert.strictEqual(routes.length, 0, 'all queued responses were consumed: ' + JSON.stringify(routes.map(r => r.match)));
 console.log('belet_samsung_client_mock: ok');

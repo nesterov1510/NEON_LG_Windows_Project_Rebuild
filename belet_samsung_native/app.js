@@ -54,7 +54,10 @@
       sources: [], sourceIndex: 0, startAt: 0, reported: 0, timer: null, osdTimer: null,
       active: false, ending: false, duration: 0
     },
-    login: { phone: '', code: '', tempToken: '', methods: [], methodIndex: 0, busy: false },
+    login: {
+      phone: '', code: '', tempToken: '', methods: [], methodIndex: 0,
+      busy: false, generation: 0, loggingOut: false, otpTimer: null, otpFallback: false
+    },
     qr: { generation: 0, timer: null, code: null },
     toastTimer: null,
     backArmed: false,
@@ -455,9 +458,30 @@
     return 'Сервис Belet ответил ошибкой' + (err.http ? ' HTTP ' + err.http : '') + (err.message ? ': ' + err.message : '.');
   }
 
+  function clearOtpTimer() {
+    if (state.login.otpTimer) {
+      clearTimeout(state.login.otpTimer);
+      state.login.otpTimer = null;
+    }
+  }
+
+  function resetCatalogueState() {
+    state.homeLoaded = false;
+    state.home = { groups: [], hero: null, items: [] };
+    state.categories = [];
+    state.categoriesLoaded = false;
+    state.browse = { mode: 'category', id: null, title: '', items: [], offset: 0, loading: false, done: false };
+    state.search = { text: '', items: [], page: 1, loading: false, done: false };
+    state.detail = { movie: null, seasons: [], seasonId: null, episodes: [], loadingEpisodes: false };
+    clear($('rows'));
+    clear($('browseGrid'));
+    clear($('searchGrid'));
+  }
+
   function handleAuthError(err) {
     if (!err || err.kind !== 'auth') return false;
-    state.homeLoaded = false;
+    if (state.login.loggingOut || state.screen === 'login') return true;
+    resetCatalogueState();
     showLogin();
     toast('Сессия истекла — войдите снова', 4200);
     return true;
@@ -465,21 +489,48 @@
 
   /* ── login ────────────────────────────────────────────────────────── */
 
+  function focusLoginStep() {
+    var target = $('phoneDisplay');
+    if (!hasClass($('loginQr'), 'hidden')) target = $('qrRefresh');
+    else if (!hasClass($('loginCode'), 'hidden')) target = $('codeDisplay');
+    state.mainFocus = target;
+    setTimeout(function () {
+      if (state.screen === 'login' && !activeOverlay() && target && isVisible(target)) target.focus();
+    }, 40);
+  }
+
   function showLogin() {
     stopQr();
+    clearOtpTimer();
     cancelPlayback(true);
+    state.input = null;
+    state.dialogActions = [];
+    setHidden($('dialog'), true);
+    setHidden($('numpad'), true);
+    setHidden($('keyboard'), true);
+    state.login.phone = '';
+    state.login.code = '';
+    state.login.tempToken = '';
+    state.login.methods = [];
+    state.login.methodIndex = 0;
+    state.login.busy = false;
+    state.login.otpFallback = false;
+    state.login.generation += 1;
     screen('login');
+    state.previous = 'login';
     state.mainFocus = $('phoneDisplay');
     $('loginPhone').classList.remove('hidden');
     $('loginCode').classList.add('hidden');
     $('loginQr').classList.add('hidden');
     $('loginTitle').textContent = 'Вход в Belet';
     $('loginHint').textContent = 'Введите номер телефона, привязанный к аккаунту Belet.';
+    renderCodeValue();
     updatePhoneDisplay();
-    loadOtpMethods();
+    loadOtpMethods(0);
     setTimeout(function () {
-      var target = state.login.phone ? $('phoneDisplay') : $('phoneDisplay');
-      if (target) target.focus();
+      if (state.screen === 'login' && !activeOverlay() && !hasClass($('loginPhone'), 'hidden')) {
+        $('phoneDisplay').focus();
+      }
     }, 40);
   }
 
@@ -493,16 +544,44 @@
       node.textContent = 'Нажмите OK, чтобы ввести номер';
       node.classList.add('placeholder');
     }
-    $('sendCode').disabled = !(value.length >= 8 && state.login.methods.length);
+    $('sendCode').disabled = !(value.length >= 8 && state.login.methods.length && !state.login.busy);
   }
 
-  function loadOtpMethods() {
+  function fallbackOtpMethods() {
+    return [{ name: 'SMS (резерв)', type: 2 }, { name: 'Звонок (резерв)', type: 1 }];
+  }
+
+  function loadOtpMethods(attempt) {
+    var retryAttempt = typeof attempt === 'number' ? attempt : 0;
+    var gen = state.login.generation;
+    var select = $('methodValue');
+    clearOtpTimer();
+    state.login.otpFallback = false;
+    if (!state.login.methods.length) {
+      select.textContent = retryAttempt ? 'Повторяем запрос…' : 'Загружаем способы…';
+    }
     Belet.otpMethods(function (err, methods) {
-      var select = $('methodValue');
+      if (gen !== state.login.generation || state.screen !== 'login') return;
       state.login.methods = [];
       if (err) {
-        select.textContent = 'Способ недоступен';
-        $('sendCode').disabled = true;
+        if (retryAttempt === 0) {
+          if (!Belet.hasSession() && Belet.resetDevice) Belet.resetDevice();
+          state.login.methods = fallbackOtpMethods();
+          state.login.otpFallback = true;
+          state.login.methodIndex = 0;
+          select.textContent = state.login.methods[0].name;
+          updatePhoneDisplay();
+          state.login.otpTimer = setTimeout(function () {
+            state.login.otpTimer = null;
+            if (gen === state.login.generation && state.screen === 'login') loadOtpMethods(1);
+          }, 900);
+          return;
+        }
+        state.login.methods = fallbackOtpMethods();
+        state.login.otpFallback = true;
+        state.login.methodIndex = 0;
+        select.textContent = state.login.methods[0].name;
+        updatePhoneDisplay();
         return;
       }
       methods.forEach(function (item) {
@@ -644,8 +723,10 @@
     state.qr.code = null;
   }
 
-  function startQr() {
+  function startQr(attempt) {
+    var retryAttempt = typeof attempt === 'number' ? attempt : 0;
     stopQr();
+    clearOtpTimer();
     var generation = state.qr.generation;
     var started = Date.now();
     $('loginPhone').classList.add('hidden');
@@ -653,16 +734,30 @@
     $('loginQr').classList.remove('hidden');
     $('loginTitle').textContent = 'Вход по QR-коду';
     $('loginHint').textContent = 'Отсканируйте код телефоном — телевизор войдёт автоматически.';
-    $('qrImage').removeAttribute('src');
-    $('qrStatus').textContent = 'Получаем QR-код…';
+    if (retryAttempt === 0) $('qrImage').removeAttribute('src');
+    $('qrStatus').textContent = retryAttempt ? 'Повторяем запрос QR-кода…' : 'Получаем QR-код…';
     state.mainFocus = $('qrRefresh');
-    setTimeout(function () { $('loginQr').querySelector('.focusable').focus(); }, 30);
+    setTimeout(function () {
+      if (state.screen === 'login' && !activeOverlay() && !hasClass($('loginQr'), 'hidden')) {
+        $('qrRefresh').focus();
+      }
+    }, 30);
 
     Belet.qrCode(function (err, data) {
       var code;
-      if (generation !== state.qr.generation) return;
+      if (generation !== state.qr.generation || state.screen !== 'login') return;
       if (err || !data) {
-        $('qrStatus').textContent = 'Не удалось получить QR-код. Проверьте сеть и обновите.';
+        if (retryAttempt === 0) {
+          if (!Belet.hasSession() && Belet.resetDevice) Belet.resetDevice();
+          $('qrStatus').textContent = 'Повторяем запрос QR-кода…';
+          state.qr.timer = setTimeout(function () {
+            state.qr.timer = null;
+            if (generation === state.qr.generation && state.screen === 'login') startQr(1);
+          }, 900);
+          return;
+        }
+        $('qrStatus').textContent = 'Не удалось получить QR-код' +
+          (err && err.http ? ' (HTTP ' + err.http + ')' : '') + '. Проверьте сеть и обновите.';
         return;
       }
       code = data.code;
@@ -877,6 +972,8 @@
 
   function loadHome(showSpinner) {
     var collected = [];
+    stopQr();
+    clearOtpTimer();
     screen('home');
     setHidden($('hero'), true);
     setHidden($('homeEmpty'), true);
@@ -2139,6 +2236,7 @@
   }
 
   function openAbout() {
+    if (!Belet.hasSession()) state.previous = 'login';
     screen('about');
     state.mainFocus = $('aboutRetest');
     setTimeout(function () { $('aboutRetest').focus(); }, 30);
@@ -2190,14 +2288,21 @@
   }
 
   function logout() {
+    if (state.login.loggingOut) return;
     dialog('Выйти из Belet?', 'Локальная сессия будет удалена с телевизора.', [
       {
         label: 'Выйти',
         primary: true,
         onSelect: function () {
+          if (state.login.loggingOut) return;
+          state.login.loggingOut = true;
+          deviceRegistration.state = 'не отправлена';
+          resetCatalogueState();
+          $('profilePhone').textContent = '';
+          $('profilePlan').textContent = '';
           Belet.logout(function (err) {
+            state.login.loggingOut = false;
             if (err) toast('Локальная сессия удалена; сервер не подтвердил выход', 4000);
-            state.homeLoaded = false;
             showLogin();
           });
         }
@@ -2231,7 +2336,18 @@
       setTimeout(function () { focusScreen(); }, 40);
       return true;
     }
-    if (state.screen === 'browse' || state.screen === 'search' || state.screen === 'profile' || state.screen === 'about') {
+    if (state.screen === 'about') {
+      if (!Belet.hasSession()) {
+        screen('login');
+        focusLoginStep();
+        return true;
+      }
+      if (state.previous && state.previous !== 'about' && state.previous !== 'login') screen(state.previous);
+      else screen('home');
+      setTimeout(function () { focusScreen(); }, 40);
+      return true;
+    }
+    if (state.screen === 'browse' || state.screen === 'search' || state.screen === 'profile') {
       if (state.screen === 'browse' && state.browse.mode === 'favorites') {
         screen('profile');
         setTimeout(function () { state.mainFocus = $('profileFavorites'); $('profileFavorites').focus(); }, 40);
@@ -2317,6 +2433,9 @@
 
     if (!hasClass($('numpad'), 'hidden') || !hasClass($('keyboard'), 'hidden')) {
       if (isBack(key)) { closeInput(); handled = true; }
+      else if (!hasClass($('numpad'), 'hidden') && key >= 48 && key <= 57) { inputAppend(String(key - 48)); handled = true; }
+      else if (!hasClass($('numpad'), 'hidden') && key >= 96 && key <= 105) { inputAppend(String(key - 96)); handled = true; }
+      else if (!hasClass($('numpad'), 'hidden') && key === 8) { inputDelete(); handled = true; }
       else if (key === KEYS.LEFT || key === KEYS.RIGHT || key === KEYS.UP || key === KEYS.DOWN) handled = move({
         37: 'left', 38: 'up', 39: 'right', 40: 'down'
       }[key]);
@@ -2364,9 +2483,13 @@
 
     $('phoneDisplay').onclick = editPhone;
     $('methodPrev').onclick = function () { cycleMethod(-1); };
+    $('methodDisplay').onclick = function () {
+      if (state.login.otpFallback || !state.login.methods.length) loadOtpMethods(0);
+      else cycleMethod(1);
+    };
     $('methodNext').onclick = function () { cycleMethod(1); };
     $('sendCode').onclick = function () { sendCode(); };
-    $('toQr').onclick = startQr;
+    $('toQr').onclick = function () { startQr(0); };
     $('codeDisplay').onclick = editCode;
     $('verifyCode').onclick = verifyCode;
     $('resendCode').onclick = function () { sendCode(true); };
@@ -2377,16 +2500,22 @@
       $('loginPhone').classList.remove('hidden');
       $('loginTitle').textContent = 'Вход в Belet';
       $('loginHint').textContent = 'Введите номер телефона, привязанный к аккаунту Belet.';
+      state.mainFocus = $('phoneDisplay');
       renderCodeValue();
+      updatePhoneDisplay();
+      if (!state.login.methods.length || state.login.otpFallback) loadOtpMethods(0);
       $('phoneDisplay').focus();
     };
-    $('qrRefresh').onclick = startQr;
+    $('qrRefresh').onclick = function () { startQr(0); };
     $('toPhone').onclick = function () {
       stopQr();
       $('loginQr').classList.add('hidden');
       $('loginPhone').classList.remove('hidden');
       $('loginTitle').textContent = 'Вход в Belet';
       $('loginHint').textContent = 'Введите номер телефона, привязанный к аккаунту Belet.';
+      state.mainFocus = $('phoneDisplay');
+      updatePhoneDisplay();
+      if (!state.login.methods.length || state.login.otpFallback) loadOtpMethods(0);
       $('phoneDisplay').focus();
     };
     $('loginHelp').onclick = openAbout;
@@ -2419,7 +2548,12 @@
 
     $('aboutRetest').onclick = runHealthCheck;
     $('aboutBack').onclick = function () {
-      if (state.previous && state.previous !== 'about') screen(state.previous);
+      if (!Belet.hasSession()) {
+        screen('login');
+        focusLoginStep();
+        return;
+      }
+      if (state.previous && state.previous !== 'about' && state.previous !== 'login') screen(state.previous);
       else screen('home');
       setTimeout(function () { focusScreen(); }, 40);
     };
