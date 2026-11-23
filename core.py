@@ -55,6 +55,10 @@ from samsung_tizen import (
 from samsung_time_override import (
     DEFAULT_SOURCE_DOMAINS as SAMSUNG_TIME_DEFAULT_SOURCES,
     SamsungTimeOverrideServer,
+    deploy_samsung_time_remote as deploy_samsung_time_ssh,
+    diagnose_samsung_time_reachability as probe_samsung_time_reachability,
+    generate_router_snippets as make_samsung_router_snippets,
+    generate_standalone_gateway_script as build_samsung_standalone_gateway,
     normalize_time_target as normalize_samsung_time_target,
     parse_source_domains as parse_samsung_source_domains,
     parse_upstream_dns as parse_samsung_upstream_dns,
@@ -179,6 +183,10 @@ class Api:
             'samsung_time_sources': ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES),
             'samsung_time_intercept_check': True,
             'samsung_time_upstream_dns': '',
+            'samsung_time_autostop': False,
+            'samsung_time_remote_host': '',
+            'samsung_time_remote_user': 'root',
+            'samsung_time_remote_port': 22,
         }
         try:
             with open(self._settings_path(), 'r', encoding='utf-8') as f:
@@ -194,7 +202,16 @@ class Api:
             return self.load_settings()
         current = self.load_settings()
         # Never persist secrets in settings.json.
-        forbidden = {'passphrase', 'password', 'tv_pass', 'vpn_pass', 'hotspot_pass'}
+        forbidden = {
+            'passphrase',
+            'password',
+            'tv_pass',
+            'vpn_pass',
+            'hotspot_pass',
+            'samsung_time_remote_pass',
+            'ssh_pass',
+            'remote_pass',
+        }
         for k, v in updates.items():
             if k not in forbidden:
                 current[k] = v
@@ -3435,6 +3452,13 @@ class Api:
         'exit_factory_loop': [
             ('KEY_FACTORY', 0.25, 'Click'),
         ],
+        'hospitality_menu': [
+            ('KEY_MUTE', 0.35, 'Click'),
+            ('KEY_1', 0.35, 'Click'),
+            ('KEY_1', 0.35, 'Click'),
+            ('KEY_9', 0.35, 'Click'),
+            ('KEY_ENTER', 0.25, 'Click'),
+        ],
         'reboot_tv': [
             ('KEY_POWER', 0.25, 'Click'),
         ],
@@ -3661,6 +3685,33 @@ class Api:
                         continue
                 return {'ok': False, 'error': f'Samsung send_key failed ({clean_key}): {exc}'}
         return {'ok': False, 'error': 'Samsung send_key failed'}
+
+    def samsung_send_text(self, text):
+        raw = str(text or '')
+        if not raw:
+            return {'ok': False, 'error': 'Enter text or IP address to send to TV.'}
+        client = self._ensure_samsung_connected()
+        if client is None:
+            return {'ok': False, 'error': 'Samsung TV is not connected'}
+        if not hasattr(client, 'send_text'):
+            return {'ok': False, 'error': 'Text entry is supported on Tizen WebSocket TVs (8001/8002), not legacy 55000.'}
+
+        for attempt in range(2):
+            try:
+                with self._samsung_lock:
+                    if not self.samsung_client:
+                        raise ConnectionError('Samsung TV disconnected')
+                    self.samsung_client.send_text(raw)
+                return {'ok': True, 'text': raw, 'output': f'Sent text to TV input field: {raw}'}
+            except Exception as exc:
+                if attempt == 0 and self.samsung_ip:
+                    ip = self.samsung_ip
+                    port = str(self.samsung_port or 'auto')
+                    res = self.connect_samsung(ip, port=port)
+                    if res.get('ok'):
+                        continue
+                return {'ok': False, 'error': f'Samsung send_text failed: {exc}'}
+        return {'ok': False, 'error': 'Samsung send_text failed'}
 
     def samsung_send_sequence(self, steps):
         if not steps:
@@ -4378,6 +4429,7 @@ class Api:
             st['sources_text'] = str(s.get('samsung_time_sources') or ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES))
             st['intercept_check'] = bool(s.get('samsung_time_intercept_check', True))
             st['upstream_dns_text'] = str(s.get('samsung_time_upstream_dns', '') or '')
+            st['auto_stop_after_sync'] = bool(s.get('samsung_time_autostop', False))
             st['pc_ip'] = _tizen_local_ip(target_tv)
         else:
             st['sources_text'] = ', '.join(
@@ -4394,6 +4446,7 @@ class Api:
         source_domains=None,
         intercept_check=None,
         upstream_dns=None,
+        auto_stop_after_sync=None,
     ):
         s = self.load_settings()
         clean_mode = 'dns_direct' if str(mode or s.get('samsung_time_mode') or 'gateway').strip().lower() == 'dns_direct' else 'gateway'
@@ -4411,12 +4464,14 @@ class Api:
             if d not in ('cdn.samsungcloudsolution.com', 'cdn.samsungcloudsolution.net')
         ) or ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES)
         up_raw = str(s.get('samsung_time_upstream_dns', '') if upstream_dns is None else upstream_dns).strip()
+        autostop = bool(s.get('samsung_time_autostop', False) if auto_stop_after_sync is None else auto_stop_after_sync)
         self.save_settings({
             'samsung_time_mode': clean_mode,
             'samsung_time_target': spec['raw'],
             'samsung_time_sources': user_sources_text,
             'samsung_time_intercept_check': chk,
             'samsung_time_upstream_dns': up_raw,
+            'samsung_time_autostop': autostop,
         })
         return {
             'mode': clean_mode,
@@ -4424,6 +4479,7 @@ class Api:
             'source_domains': user_sources_text,
             'intercept_check': chk,
             'upstream_dns': up_raw,
+            'auto_stop_after_sync': autostop,
         }
 
     def start_samsung_time_override(
@@ -4434,6 +4490,7 @@ class Api:
         intercept_check=True,
         upstream_dns=None,
         tv_ip=None,
+        auto_stop_after_sync=None,
     ):
         try:
             saved = self.save_samsung_time_settings(
@@ -4442,6 +4499,7 @@ class Api:
                 source_domains=source_domains,
                 intercept_check=intercept_check,
                 upstream_dns=upstream_dns,
+                auto_stop_after_sync=auto_stop_after_sync,
             )
             eff_upstreams = self._effective_samsung_time_upstream(saved['upstream_dns'])
             clean_tv_ip = str(tv_ip or '').strip() or self.samsung_ip or str(self.load_settings().get('samsung_ip') or '192.168.1.101')
@@ -4452,6 +4510,7 @@ class Api:
                 intercept_check=saved['intercept_check'],
                 upstream_dns=eff_upstreams,
                 tv_ip=clean_tv_ip,
+                auto_stop_after_sync=saved['auto_stop_after_sync'],
             )
             res['sources_text'] = saved['source_domains']
             res['upstream_dns_text'] = saved['upstream_dns']
@@ -4484,3 +4543,105 @@ class Api:
             return res
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': f'[!] Time sync failed: {exc}'}
+
+    def diagnose_samsung_time_reachability(self, resolvers=None):
+        try:
+            return probe_samsung_time_reachability(resolvers=resolvers)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Diagnostic failed: {exc}'}
+
+    def get_samsung_time_router_snippets(self, gateway_ip='', source_domains=None, intercept_check=None):
+        try:
+            s = self.load_settings()
+            src = source_domains if source_domains is not None else s.get('samsung_time_sources')
+            chk = bool(s.get('samsung_time_intercept_check', True) if intercept_check is None else intercept_check)
+            gw = str(gateway_ip or '').strip() or _tizen_local_ip(s.get('samsung_ip') or '192.168.1.101')
+            snips = make_samsung_router_snippets(gw, source_domains=src, intercept_check=chk)
+            snips['ok'] = True
+            return snips
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def export_samsung_time_gateway(
+        self,
+        save_path='',
+        target=None,
+        source_domains=None,
+        intercept_check=None,
+        upstream_dns=None,
+        advertise_ip='',
+    ):
+        try:
+            s = self.load_settings()
+            tgt = str(target if target is not None else s.get('samsung_time_target') or 'time.cloudflare.com').strip()
+            src = source_domains if source_domains is not None else s.get('samsung_time_sources')
+            chk = bool(s.get('samsung_time_intercept_check', True) if intercept_check is None else intercept_check)
+            up = self._effective_samsung_time_upstream(
+                upstream_dns if upstream_dns is not None else s.get('samsung_time_upstream_dns', '')
+            )
+            script_text = build_samsung_standalone_gateway(
+                target=tgt,
+                source_domains=src,
+                intercept_check=chk,
+                upstream_dns=up,
+                advertise_ip=advertise_ip,
+            )
+            if not save_path:
+                out_dir = self._data_dir()
+                os.makedirs(out_dir, exist_ok=True)
+                save_path = os.path.join(out_dir, 'neon_samsung_time_gateway.py')
+            with open(save_path, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(script_text)
+            return {
+                'ok': True,
+                'path': save_path,
+                'script': script_text,
+                'output': f'[+] Saved standalone 24/7 gateway script: {save_path}',
+            }
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Export failed: {exc}'}
+
+    def deploy_samsung_time_remote(
+        self,
+        host,
+        username='root',
+        password='',
+        port=22,
+        target=None,
+        source_domains=None,
+        intercept_check=None,
+        upstream_dns=None,
+        advertise_ip='',
+        gateway_ip='',
+    ):
+        try:
+            s = self.load_settings()
+            clean_host = str(host or '').strip()
+            clean_user = str(username or 'root').strip() or 'root'
+            clean_port = int(port or 22)
+            tgt = str(target if target is not None else s.get('samsung_time_target') or 'time.cloudflare.com').strip()
+            src = source_domains if source_domains is not None else s.get('samsung_time_sources')
+            chk = bool(s.get('samsung_time_intercept_check', True) if intercept_check is None else intercept_check)
+            up = self._effective_samsung_time_upstream(
+                upstream_dns if upstream_dns is not None else s.get('samsung_time_upstream_dns', '')
+            )
+            # Save only non-secret remote host/user/port; never persist password.
+            self.save_settings({
+                'samsung_time_remote_host': clean_host,
+                'samsung_time_remote_user': clean_user,
+                'samsung_time_remote_port': clean_port,
+            })
+            return deploy_samsung_time_ssh(
+                host=clean_host,
+                username=clean_user,
+                password=password,
+                port=clean_port,
+                target=tgt,
+                source_domains=src,
+                intercept_check=chk,
+                upstream_dns=up,
+                advertise_ip=advertise_ip,
+                gateway_ip=gateway_ip,
+            )
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Remote deploy failed: {exc}'}

@@ -1,7 +1,11 @@
+import ast
+import base64
 import http.server
 import json
 import socket
 import struct
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -10,6 +14,7 @@ import pytest
 
 from core import Api
 import samsung_time_override as sto
+import samsung_tv
 
 
 def _start_mock_upstream_dns(records):
@@ -365,3 +370,366 @@ def test_api_samsung_time_settings_and_close(tmp_path, monkeypatch):
     stopped = api.stop_samsung_time_override()
     assert stopped['running'] is False
     api.close()
+
+
+def _free_port(sock_type=socket.SOCK_DGRAM):
+    for _ in range(12):
+        s = socket.socket(socket.AF_INET, sock_type)
+        s.bind(('127.0.0.1', 0))
+        p = s.getsockname()[1]
+        s.close()
+        # Verify both UDP and TCP bind cleanly for DNS port
+        if sock_type == socket.SOCK_DGRAM:
+            try:
+                t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                t.bind(('127.0.0.1', p))
+                t.close()
+                return p
+            except OSError:
+                continue
+        return p
+    raise RuntimeError('No free port found')
+
+
+def test_auto_stop_after_sync_shuts_down_after_timesync():
+    srv = sto.SamsungTimeOverrideServer()
+    try:
+        st = srv.start(
+            target='local',
+            mode='gateway',
+            source_domains='time.samsungcloudsolution.com',
+            intercept_check=True,
+            dns_bind_ip='127.0.0.1',
+            dns_port=0,
+            http_bind_ip='127.0.0.1',
+            http_port=0,
+            ntp_port=0,
+            manage_firewall=False,
+            auto_stop_after_sync=True,
+        )
+        assert st['running'] is True
+        assert st['auto_stop_after_sync'] is True
+        h_port = st['http_port']
+        with urllib.request.urlopen(f'http://127.0.0.1:{h_port}/openapi/timesync', timeout=3) as resp:
+            assert resp.status == 200
+            assert len(resp.read()) == 16
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            cur = srv.get_status()
+            if not cur['running']:
+                break
+            time.sleep(0.05)
+        cur = srv.get_status()
+        assert cur['running'] is False
+        assert '127.0.0.1' in cur['auto_stopped_reason']
+        assert '127.0.0.1' in cur['synced_clients']
+    finally:
+        srv.stop()
+
+
+def test_standalone_gateway_script_executes_end_to_end(tmp_path):
+    script = sto.generate_standalone_gateway_script(
+        target='local',
+        source_domains='time.samsungcloudsolution.com, time.samsungcloudsolution.net',
+        intercept_check=True,
+        upstream_dns='1.1.1.1',
+        advertise_ip='192.168.1.77',
+    )
+    ast.parse(script)
+    script_path = tmp_path / 'gw.py'
+    script_path.write_text(script, encoding='utf-8')
+
+    dns_p = _free_port(socket.SOCK_DGRAM)
+    http_p = _free_port(socket.SOCK_STREAM)
+    ntp_p = _free_port(socket.SOCK_DGRAM)
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            str(script_path),
+            '--bind', '127.0.0.1',
+            '--dns-port', str(dns_p),
+            '--http-port', str(http_p),
+            '--ntp-port', str(ntp_p),
+            '--advertise-ip', '192.168.1.77',
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        # Wait until HTTP /openapi/timesync is serving
+        payload = b''
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(f'http://127.0.0.1:{http_p}/openapi/timesync', timeout=1) as resp:
+                    payload = resp.read()
+                if len(payload) == 16:
+                    break
+            except Exception:
+                time.sleep(0.1)
+        assert len(payload) == 16
+        ms1, ms2 = struct.unpack('<QQ', payload)
+        assert ms1 == ms2 and ms1 > 1700000000000
+
+        with urllib.request.urlopen(f'http://127.0.0.1:{http_p}/Public/network/files/check.xml', timeout=2) as resp:
+            assert resp.read().strip() == b'ok'
+
+        rcode, ans = _udp_dns_query('127.0.0.1', dns_p, 'time.samsungcloudsolution.com', qtype=1)
+        assert rcode == 0 and ans == [('A', '192.168.1.77', 30)]
+
+        ntp_res = sto.fetch_sntp_time('127.0.0.1', port=ntp_p, upstream_dns=['127.0.0.1'])
+        assert abs(ntp_res['offset_sec']) < 5.0
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def test_router_snippets_and_reachability_diagnostics(monkeypatch):
+    snips = sto.generate_router_snippets('192.168.1.1')
+    assert 'address=/time.samsungcloudsolution.com/192.168.1.1' in snips['openwrt_dnsmasq']
+    assert '/ip dns static add name="time.samsungcloudsolution.com" address=192.168.1.1' in snips['mikrotik_cli']
+    assert '/opt/neon-samsung-time/gateway.py' in snips['linux_systemd']
+
+    def _fake_resolve(domain, upstreams, timeout=2.5, port=53):
+        if '1.1.1.1' in upstreams:
+            return '52.10.20.30'
+        raise OSError('blocked')
+
+    monkeypatch.setattr(sto, 'resolve_ipv4_via_upstream', _fake_resolve)
+    monkeypatch.setattr(sto.socket, 'getaddrinfo', lambda *a, **kw: (_ for _ in ()).throw(OSError('blocked')))
+    monkeypatch.setattr(
+        sto,
+        'probe_samsung_timesync_http',
+        lambda ip, port=80, host_header='time.samsungcloudsolution.com', timeout=2.5: (
+            {'ok': True, 'utc_iso': '2026-11-20T00:00:00Z', 'epoch_ms': 1795132800000}
+            if ip == '52.10.20.30'
+            else {'ok': False, 'error': 'timeout'}
+        ),
+    )
+    diag = sto.diagnose_samsung_time_reachability(resolvers=['system', '1.1.1.1', '8.8.8.8'])
+    assert diag['ok'] is True
+    assert diag['best_public_dns'] == '1.1.1.1'
+    assert '1.1.1.1' in diag['recommendation']
+
+
+def test_deploy_samsung_time_remote_linux_openwrt_mikrotik(monkeypatch):
+    import paramiko
+
+    monkeypatch.setattr(sto, 'probe_samsung_timesync_http', lambda *a, **kw: {'ok': True, 'utc_iso': '2026-11-20T00:00:00Z'})
+    monkeypatch.setattr(sto, 'resolve_ipv4_via_upstream', lambda *a, **kw: '192.168.1.1')
+
+    def _run_deploy_for_platform(platform_kind):
+        commands = []
+        uploaded = {}
+
+        class FakeSftp:
+            def open(self, path, mode):
+                buf = []
+
+                class _F:
+                    def write(self, data):
+                        buf.append(data)
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *a):
+                        uploaded[path] = ''.join(buf)
+
+                return _F()
+
+            def close(self):
+                pass
+
+        class FakeStream:
+            def __init__(self, txt='', rc=0):
+                self._txt = txt.encode('utf-8')
+                self.channel = type('Ch', (), {'recv_exit_status': lambda _s: rc})()
+
+            def read(self):
+                return self._txt
+
+        class FakeSSH:
+            def set_missing_host_key_policy(self, *a):
+                pass
+
+            def connect(self, *a, **kw):
+                pass
+
+            def open_sftp(self):
+                return FakeSftp()
+
+            def exec_command(self, cmd, timeout=30):
+                commands.append(cmd)
+                if 'uname -s' in cmd:
+                    if platform_kind == 'mikrotik':
+                        return None, FakeStream('name: MikroTik'), FakeStream('')
+                    return None, FakeStream('Linux'), FakeStream('')
+                if '/system resource print' in cmd and platform_kind == 'mikrotik':
+                    return None, FakeStream('platform: MikroTik RouterOS'), FakeStream('')
+                if 'openwrt_release' in cmd:
+                    return None, FakeStream('OPENWRT' if platform_kind == 'openwrt' else 'LINUX'), FakeStream('')
+                if 'command -v python3' in cmd:
+                    return None, FakeStream('/usr/bin/python3'), FakeStream('')
+                if 'command -v systemctl' in cmd:
+                    return None, FakeStream('/bin/systemctl' if platform_kind == 'linux' else ''), FakeStream('')
+                if 'netstat -ln' in cmd:
+                    return None, FakeStream(''), FakeStream('')
+                return None, FakeStream('OK'), FakeStream('')
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(paramiko, 'SSHClient', FakeSSH)
+        res = sto.deploy_samsung_time_remote(
+            host='192.168.1.1',
+            username='root',
+            password='secret',
+            port=22,
+            target='time.cloudflare.com',
+            upstream_dns=['1.1.1.1'],
+            gateway_ip='192.168.1.1',
+        )
+        assert res['ok'] is True
+        assert res['tv_dns_ip'] == '192.168.1.1'
+        return res, commands, uploaded
+
+    r_lin, _cmds_lin, up_lin = _run_deploy_for_platform('linux')
+    assert r_lin['platform'] == 'linux-systemd'
+    assert '/tmp/neon_samsung_time_gateway.py' in up_lin
+
+    r_ow, _cmds_ow, up_ow = _run_deploy_for_platform('openwrt')
+    assert r_ow['platform'] == 'openwrt'
+    assert '/etc/dnsmasq.d/neon-samsung-time.conf' in up_ow
+    assert '--dns-port 0' in up_ow['/etc/init.d/neon-samsung-time']
+
+    r_mt, cmds_mt, _up_mt = _run_deploy_for_platform('mikrotik')
+    assert r_mt['platform'] == 'mikrotik'
+    assert any('/ip dns static add' in c for c in cmds_mt)
+
+
+def test_api_export_deploy_and_samsung_send_text(tmp_path, monkeypatch):
+    import paramiko
+
+    monkeypatch.setattr(sto, 'probe_samsung_timesync_http', lambda *a, **kw: {'ok': True, 'utc_iso': '2026-11-20T00:00:00Z'})
+    monkeypatch.setattr(sto, 'resolve_ipv4_via_upstream', lambda *a, **kw: '192.168.1.99')
+
+    monkeypatch.setenv('APPDATA', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path))
+    api = Api()
+
+    out_file = tmp_path / 'my_gw.py'
+    exp = api.export_samsung_time_gateway(save_path=str(out_file), target='time.cloudflare.com')
+    assert exp['ok'] is True
+    assert out_file.exists()
+    ast.parse(out_file.read_text(encoding='utf-8'))
+
+    # Verify deploy_samsung_time_remote never stores password inside settings.json
+    class FakeSftp:
+        def open(self, path, mode):
+            class _F:
+                def write(self, data):
+                    pass
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    pass
+
+            return _F()
+
+        def close(self):
+            pass
+
+    class FakeStream:
+        def __init__(self, txt='', rc=0):
+            self._txt = txt.encode('utf-8')
+            self.channel = type('Ch', (), {'recv_exit_status': lambda _s: rc})()
+
+        def read(self):
+            return self._txt
+
+    class FakeStdin:
+        def write(self, data):
+            pass
+
+        def flush(self):
+            pass
+
+    class FakeSSH:
+        def set_missing_host_key_policy(self, *a):
+            pass
+
+        def connect(self, *a, **kw):
+            pass
+
+        def open_sftp(self):
+            return FakeSftp()
+
+        def exec_command(self, cmd, timeout=30):
+            if 'uname -s' in cmd:
+                return FakeStdin(), FakeStream('Linux'), FakeStream('')
+            if 'openwrt_release' in cmd:
+                return FakeStdin(), FakeStream('LINUX'), FakeStream('')
+            if 'command -v python3' in cmd:
+                return FakeStdin(), FakeStream('/usr/bin/python3'), FakeStream('')
+            if 'command -v systemctl' in cmd:
+                return FakeStdin(), FakeStream('/bin/systemctl'), FakeStream('')
+            return FakeStdin(), FakeStream('OK'), FakeStream('')
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(paramiko, 'SSHClient', FakeSSH)
+    dep = api.deploy_samsung_time_remote(
+        host='192.168.1.99',
+        username='admin',
+        password='SUPER_SECRET_SSH_PASSWORD',
+        port=2222,
+    )
+    assert dep['ok'] is True
+    import os
+    raw_settings = open(os.path.join(api._data_dir(), 'settings.json'), 'r', encoding='utf-8').read()
+    assert 'SUPER_SECRET_SSH_PASSWORD' not in raw_settings
+    assert '192.168.1.99' in raw_settings
+
+    # Verify SamsungWsClient.send_text & Api.samsung_send_text RFC-6455 wire frame formatting
+    srv_sock, cli_sock = socket.socketpair()
+    try:
+        ws_client = samsung_tv.SamsungWsClient('192.168.1.101')
+        ws_client._sock = cli_sock
+        api.samsung_client = ws_client
+        api.samsung_ip = '192.168.1.101'
+
+        res_txt = api.samsung_send_text('1.1.1.1')
+        assert res_txt['ok'] is True
+
+        def _recv_ws_json(s):
+            hdr = s.recv(2)
+            assert (hdr[0] & 0x0F) == 0x1
+            ln = hdr[1] & 0x7F
+            if ln == 126:
+                ln = struct.unpack('!H', s.recv(2))[0]
+            mask = s.recv(4)
+            raw = bytearray(s.recv(ln))
+            for i in range(ln):
+                raw[i] ^= mask[i % 4]
+            return json.loads(bytes(raw).decode('utf-8'))
+
+        f1 = _recv_ws_json(srv_sock)
+        f2 = _recv_ws_json(srv_sock)
+        assert f1['params']['TypeOfRemote'] == 'SendInputString'
+        assert base64.b64decode(f1['params']['Cmd']).decode('utf-8') == '1.1.1.1'
+        assert f2['params']['TypeOfRemote'] == 'SendInputEnd'
+    finally:
+        api.samsung_client = None
+        srv_sock.close()
+        cli_sock.close()
+    api.close()
+

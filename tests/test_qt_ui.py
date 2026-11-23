@@ -427,6 +427,37 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
         m_st_stop.assert_called_once()
         assert win.btn_sam_time_stop.isEnabled() is False
 
+    # One-time PC sync, diagnostic, autonomous 24/7 SSH deploy & TV text entry controls
+    assert win.sam_time_chk_autostop is not None
+    assert win.btn_sam_time_diag is not None
+    assert win.btn_sam_time_deploy is not None
+    assert win.btn_sam_time_export is not None
+    assert win.btn_sam_time_snippets is not None
+    assert win.sam_text_input is not None
+    assert win.btn_sam_send_text is not None
+    assert win.btn_sam_hotel is not None
+
+    with mock.patch.object(api, 'diagnose_samsung_time_reachability', return_value={
+        'ok': True,
+        'best_public_dns': '1.1.1.1',
+        'output': '[+] Direct DNS 1.1.1.1 works without PC!',
+    }) as m_diag:
+        win.diagnose_samsung_time_reachability()
+        deadline = __import__('time').time() + 2.0
+        while win.sam_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_diag.assert_called_once()
+
+    with mock.patch.object(api, 'samsung_send_text', return_value={'ok': True, 'output': 'Sent text'}) as m_txt:
+        win.sam_text_input.setText('1.1.1.1')
+        win.sam_send_text()
+        deadline = __import__('time').time() + 2.0
+        while win.sam_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_txt.assert_called_once_with('1.1.1.1')
+
     win._force_exit = True
     win.close()
     qt_app.processEvents()
