@@ -3261,6 +3261,8 @@ class NeonWindow(QMainWindow):
                     'info',
                 )
 
+        self._run_async('sam', lambda: self.api.sync_samsung_time_now(target=target), done)
+
     def diagnose_samsung_time_reachability(self):
         self.log('$ diagnose time.samsungcloudsolution.com via 1.1.1.1 / 8.8.8.8')
 
@@ -3406,8 +3408,6 @@ class NeonWindow(QMainWindow):
             return
         self.log(f'$ samsung_send_text "{txt}"')
         self._run_async('sam', lambda: self.api.samsung_send_text(txt))
-
-        self._run_async('sam', lambda: self.api.sync_samsung_time_now(target=target), done)
 
     def check_samsung_sdb(self):
         ip = self.sam_ip.text().strip()
