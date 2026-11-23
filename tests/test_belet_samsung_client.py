@@ -268,7 +268,6 @@ def test_direct_client_strips_clock_proxy_and_sets_bypass_off(monkeypatch):
 
     api = Api()
     monkeypatch.setattr('core.SdbClient', Sdb)
-    monkeypatch.setattr('core._tizen_local_ip', lambda *a: '192.168.1.50')
     monkeypatch.setattr(api, '_samsung_cert_manager', lambda: Cert())
     monkeypatch.setattr('core.sign_wgt_bytes', lambda data, *args: data)
     monkeypatch.setattr('core.verify_wgt_signatures', lambda data: None)
@@ -282,7 +281,7 @@ def test_direct_client_strips_clock_proxy_and_sets_bypass_off(monkeypatch):
         assert '<tizen:service' in zb.read('config.xml').decode('utf-8')
         html_b = zb.read('index.html').decode('utf-8')
         assert '<meta name="neon-bypass-mode" content="always">' in html_b
-        assert '<meta name="neon-pc-bridge" content="192.168.1.50">' in html_b
+        assert 'neon-pc-bridge' not in html_b
 
     with zipfile.ZipFile(__import__('io').BytesIO(uploaded[1])) as zd:
         assert 'service/clock-proxy.js' not in zd.namelist()
@@ -343,7 +342,6 @@ def test_bundled_client_strips_service_on_manifest_error(monkeypatch):
 
     api = Api()
     monkeypatch.setattr('core.SdbClient', Sdb)
-    monkeypatch.setattr('core._tizen_local_ip', lambda *a: '192.168.1.50')
     monkeypatch.setattr(api, '_samsung_cert_manager', lambda: Cert())
     monkeypatch.setattr('core.sign_wgt_bytes', lambda data, *args: data)
     monkeypatch.setattr('core.verify_wgt_signatures', lambda data: None)
@@ -354,7 +352,9 @@ def test_bundled_client_strips_service_on_manifest_error(monkeypatch):
         assert 'service/clock-proxy.js' not in zf.namelist()
         assert 'wrt-service.js' not in zf.namelist()
         assert '<tizen:service' not in zf.read('config.xml').decode('utf-8')
-        assert '<meta name="neon-pc-bridge" content="192.168.1.50">' in zf.read('index.html').decode('utf-8')
+        html_txt = zf.read('index.html').decode('utf-8')
+        assert '<meta name="neon-bypass-mode" content="always">' in html_txt
+        assert 'neon-pc-bridge' not in html_txt
 
 
 def test_clock_proxy_handles_1970_clock_tls_and_m3u8_rewriting(tmp_path):
@@ -557,144 +557,4 @@ def test_inline_wrt_module_csp_hash_matches_config():
     assert m, 'WRT_INLINE_CODE constant missing in app.js'
     expected_hash = 'sha256-' + base64.b64encode(hashlib.sha256(m.group(1).encode('utf-8')).digest()).decode('ascii')
     assert expected_hash in config, f'CSP missing exact hash {expected_hash}'
-
-
-def test_pc_bridge_server_proxies_https_and_rewrites_m3u8(tmp_path, monkeypatch):
-    import datetime
-    import http.client
-    import json
-    import ssl
-    import threading
-    import urllib.request
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID
-    from core import Api, _BeletTvBridge
-
-    ca_key = rsa.generate_private_key(65537, 2048)
-    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'TestBridgeCA')])
-    now = datetime.datetime.now(datetime.timezone.utc)
-    ca_cert = (
-        x509.CertificateBuilder()
-        .subject_name(ca_name).issuer_name(ca_name)
-        .public_key(ca_key.public_key()).serial_number(1)
-        .not_valid_before(now - datetime.timedelta(days=10))
-        .not_valid_after(now + datetime.timedelta(days=365))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .sign(ca_key, hashes.SHA256())
-    )
-    leaf_key = rsa.generate_private_key(65537, 2048)
-    leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'beletapis.com')])
-    leaf_cert = (
-        x509.CertificateBuilder()
-        .subject_name(leaf_name).issuer_name(ca_name)
-        .public_key(leaf_key.public_key()).serial_number(2)
-        .not_valid_before(now - datetime.timedelta(days=10))
-        .not_valid_after(now + datetime.timedelta(days=365))
-        .add_extension(x509.SubjectAlternativeName([
-            x509.DNSName('beletapis.com'),
-            x509.DNSName('cdn-pc.example.org'),
-        ]), critical=False)
-        .sign(ca_key, hashes.SHA256())
-    )
-    (tmp_path / 'ca.pem').write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
-    (tmp_path / 'leaf.pem').write_bytes(leaf_cert.public_bytes(serialization.Encoding.PEM))
-    (tmp_path / 'leaf.key').write_bytes(leaf_key.private_bytes(
-        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
-
-    class UpHandler(BaseHTTPRequestHandler):
-        def log_message(self, *a): return
-        def do_POST(self):
-            ln = int(self.headers.get('Content-Length') or 0)
-            body = self.rfile.read(ln).decode('utf-8')
-            out = json.dumps({'url': 'https://cdn-pc.example.org/hls/9/master.m3u8', 'echo': body}).encode('utf-8')
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', str(len(out)))
-            self.end_headers()
-            self.wfile.write(out)
-        def do_GET(self):
-            m3u = b'#EXTM3U\n#EXT-X-MAP:URI="/hls/9/init.mp4"\nhttps://keys.belet.me/k.key\n/hls/9/720.m3u8\n'
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/vnd.apple.mpegurl')
-            self.send_header('Content-Length', str(len(m3u)))
-            self.end_headers()
-            self.wfile.write(m3u)
-
-    srv_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    srv_ctx.load_cert_chain(str(tmp_path / 'leaf.pem'), str(tmp_path / 'leaf.key'))
-    up = HTTPServer(('127.0.0.1', 0), UpHandler)
-    up.socket = srv_ctx.wrap_socket(up.socket, server_side=True)
-    up_t = threading.Thread(target=up.serve_forever, daemon=True)
-    up_t.start()
-
-    cli_ctx = ssl.create_default_context(cafile=str(tmp_path / 'ca.pem'))
-
-    def open_up(h, p, ctx, timeout):
-        import socket as _sock
-
-        class LocalHttps(http.client.HTTPSConnection):
-            def connect(self):
-                raw = _sock.create_connection(('127.0.0.1', up.server_address[1]), timeout)
-                self.sock = ctx.wrap_socket(raw, server_hostname=h)
-
-        return LocalHttps(h, p, context=ctx, timeout=timeout)
-
-    bridge = _BeletTvBridge(
-        host='127.0.0.1',
-        port=0,
-        ssl_context=cli_ctx,
-        upstream_opener=open_up,
-    )
-    port = bridge.start()
-    try:
-        ping = json.loads(urllib.request.urlopen(f'http://127.0.0.1:{port}/__ping', timeout=5).read().decode('utf-8'))
-        assert ping['ok'] and ping['mode'] == 'pc-bridge' and ping['port'] == port
-
-        req = urllib.request.Request(
-            f'http://127.0.0.1:{port}/__proxy/beletapis.com/api/v3/files/9',
-            data=b'{"x":1}',
-            method='POST',
-            headers={'Content-Type': 'application/json'},
-        )
-        r1 = json.loads(urllib.request.urlopen(req, timeout=5).read().decode('utf-8'))
-        assert r1['echo'] == '{"x":1}'
-
-        m3u_out = urllib.request.urlopen(f'http://127.0.0.1:{port}/__proxy/cdn-pc.example.org/hls/9/master.m3u8', timeout=5).read().decode('utf-8')
-        assert f'http://127.0.0.1:{port}/__proxy/keys.belet.me/k.key' in m3u_out
-        assert f'URI="http://127.0.0.1:{port}/__proxy/cdn-pc.example.org/hls/9/init.mp4"' in m3u_out
-        assert f'\nhttp://127.0.0.1:{port}/__proxy/cdn-pc.example.org/hls/9/720.m3u8\n' in m3u_out
-
-        with pytest.raises(urllib.error.HTTPError) as e403:
-            urllib.request.urlopen(f'http://127.0.0.1:{port}/__proxy/evil-untrusted.com/x', timeout=5)
-        assert e403.value.code == 403
-
-        assert bridge.rewrite_location('/v2/next?a=1', f'http://127.0.0.1:{port}', 'beletapis.com') == (
-            f'http://127.0.0.1:{port}/__proxy/beletapis.com/v2/next?a=1'
-        )
-        assert bridge.rewrite_location('//cdn-pc.example.org/hls/9/a.m3u8', f'http://127.0.0.1:{port}', 'beletapis.com') == (
-            f'http://127.0.0.1:{port}/__proxy/cdn-pc.example.org/hls/9/a.m3u8'
-        )
-        bridge.scan_json_for_hosts('{"poster":"http://cdn-pc2.example.org/poster.jpg"}')
-        assert bridge.is_allowed_host('cdn-pc2.example.org') is True
-    finally:
-        bridge.stop()
-        up.shutdown()
-        up.server_close()
-
-    # Verify Api lifecycle + install_local_samsung_wgt baking PC IP meta tag
-    api = Api()
-    monkeypatch.setattr('core._tizen_local_ip', lambda *a: '192.168.1.50')
-    monkeypatch.setattr(api, '_ensure_windows_bridge_firewall', lambda *a: None)
-    st0 = api.start_belet_tv_bridge('192.168.1.101', port=0)
-    assert st0['ok'] and st0['running'] and st0['pc_ip'] == '192.168.1.50' and st0['port'] > 0
-    assert api.get_belet_tv_bridge_status()['running'] is True
-    assert api.stop_belet_tv_bridge()['running'] is False
-    assert api.get_belet_tv_bridge_status()['running'] is False
-
-    root = Path(__file__).resolve().parents[1]
-    for name in ('ui.html', 'app_legacy.py'):
-        assert '18767' in (root / name).read_text(encoding='utf-8')
 

@@ -505,7 +505,6 @@
 
   var CLOCK_PROXY_PORT = 18767;
   var CLOCK_PROXY_SVC = 'BeletFilm1.ClockProxy';
-  var PC_BRIDGE_KEY = 'neon_belet_pc_bridge_v1';
   var WRT_INLINE_CODE = "import { Service } from 'wrt:service'; window.__neonWrtService = Service; window.dispatchEvent(new Event('neon-wrt-ready'));";
   var clockProxyState = {
     launched: false,
@@ -520,54 +519,8 @@
     watchTicks: 0
   };
 
-  function isValidIpv4Host(value) {
-    return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(String(value || '').replace(/^\s+|\s+$/g, ''));
-  }
-
-  function readBundledPcBridge() {
-    var metas, i, name, content;
-    try {
-      metas = doc && doc.querySelectorAll ? doc.querySelectorAll('meta') : [];
-      for (i = 0; i < metas.length; i += 1) {
-        name = metas[i] && metas[i].getAttribute ? metas[i].getAttribute('name') : '';
-        if (name === 'neon-pc-bridge') {
-          content = String(metas[i].getAttribute('content') || '').replace(/^\s+|\s+$/g, '');
-          if (isValidIpv4Host(content)) return content;
-        }
-      }
-    } catch (e) {}
-    return '';
-  }
-
-  function hasManualPcBridgeHost() {
-    var saved = '';
-    try {
-      if (window.localStorage) saved = String(window.localStorage.getItem(PC_BRIDGE_KEY) || '').replace(/^\s+|\s+$/g, '');
-    } catch (e) {}
-    return isValidIpv4Host(saved);
-  }
-
-  function getPcBridgeHost() {
-    var saved = '';
-    try {
-      if (window.localStorage) saved = String(window.localStorage.getItem(PC_BRIDGE_KEY) || '').replace(/^\s+|\s+$/g, '');
-    } catch (e) {}
-    if (isValidIpv4Host(saved)) return saved;
-    return readBundledPcBridge();
-  }
-
-  function savePcBridgeHost(ip) {
-    var clean = String(ip || '').replace(/^\s+|\s+$/g, '');
-    try {
-      if (window.localStorage) {
-        if (clean) window.localStorage.setItem(PC_BRIDGE_KEY, clean);
-        else window.localStorage.removeItem(PC_BRIDGE_KEY);
-      }
-    } catch (e) {}
-  }
-
   function canProbeAnyClockBridge() {
-    return hasTizenServiceApi() || !!getPcBridgeHost();
+    return hasTizenServiceApi();
   }
 
   function hasTizenServiceApi() {
@@ -613,8 +566,6 @@
   function getClockProxyCandidates(opts) {
     var raw = [];
     var out = [];
-    var pcIp = getPcBridgeHost();
-    var includePc = !opts || opts.includePc !== false;
     var i;
     if (hasTizenServiceApi()) {
       raw.push('http://127.0.0.1:' + CLOCK_PROXY_PORT);
@@ -623,7 +574,6 @@
         raw.push('http://' + clockProxyState.tvIp + ':' + CLOCK_PROXY_PORT);
       }
     }
-    if (pcIp && includePc) raw.push('http://' + pcIp + ':' + CLOCK_PROXY_PORT);
     for (i = 0; i < raw.length; i += 1) {
       if (out.indexOf(raw[i]) < 0) out.push(raw[i]);
     }
@@ -793,56 +743,11 @@
     }
   }
 
-  function updateClockBridgeButtons() {
-    var showBtn = shouldUseBypass();
-    var pcIp = getPcBridgeHost();
-    var label = pcIp ? ('Мост ПК: ' + pcIp) : 'Мост через ПК (IP)';
-    if ($('homePcBridge')) {
-      setHidden($('homePcBridge'), !showBtn);
-      $('homePcBridge').textContent = label;
-    }
-    if ($('aboutPcBridge')) {
-      setHidden($('aboutPcBridge'), !showBtn);
-      $('aboutPcBridge').textContent = label;
-    }
-  }
-
-  function openPcBridgePrompt() {
-    var current = getPcBridgeHost() || '192.168.1.';
-    inputOverlay('num', {
-      title: 'IP компьютера с программой NEON (Мост 1970)',
-      value: current,
-      maxLength: 15,
-      allowDot: true,
-      onDone: function (value) {
-        var clean = String(value || '').replace(/^\s+|\s+$/g, '');
-        if (!isValidIpv4Host(clean)) {
-          toast('Введите IPv4 вида 192.168.1.50', 3200);
-          return;
-        }
-        savePcBridgeHost(clean);
-        updateClockBridgeButtons();
-        toast('Проверяем мост на ПК ' + clean + ':18767…', 2500);
-        probeClockProxy(function (ok) {
-          if (ok) {
-            state.clockSynced = true;
-            toast('Мост через ПК подключён — загружаем Belet…', 3000);
-            recoverNetworkScreens(true);
-            return;
-          }
-          toast('ПК ' + clean + ':18767 не ответил — включите «Мост Belet (1970 ТВ)» в Neon на ПК', 4200);
-          if (state.screen === 'about') runHealthCheck();
-        });
-      }
-    });
-  }
-
   function probeClockProxy(callback, options) {
     var doneCb = typeof callback === 'function' ? callback : function () {};
     var opts = options || {};
     var candidates;
     var index = 0;
-    updateClockBridgeButtons();
     if (!shouldUseBypass()) {
       if (window.Belet && Belet.setClockProxy) Belet.setClockProxy('');
       clockProxyState.base = '';
@@ -853,9 +758,7 @@
       return;
     }
     if (!canProbeAnyClockBridge()) {
-      clockProxyState.diag = hasTizenServiceApi()
-        ? 'ожидание сервиса'
-        : 'локальный сервис недоступен — укажите IP ПК-моста в Neon';
+      clockProxyState.diag = 'локальный сервис недоступен';
       doneCb(false);
       return;
     }
@@ -866,8 +769,6 @@
     if (hasTizenServiceApi()) {
       launchClockProxyService(!!opts.forceLaunch);
       probeTvIp();
-    } else {
-      clockProxyState.diag = 'подключение к ПК-мосту…';
     }
     clockProxyState.probing = true;
     candidates = getClockProxyCandidates(opts);
@@ -876,8 +777,7 @@
       if (index >= candidates.length) {
         clockProxyState.probing = false;
         clockProxyState.diag = 'не отвечает' +
-          (clockProxyState.launchDiag ? ' (' + clockProxyState.launchDiag + ')' : '') +
-          (getPcBridgeHost() ? ' · ПК ' + getPcBridgeHost() : '');
+          (clockProxyState.launchDiag ? ' (' + clockProxyState.launchDiag + ')' : '');
         doneCb(false);
         return;
       }
@@ -885,19 +785,16 @@
       index += 1;
       pingClockProxyCandidate(candidate, function (ok, data) {
         var wasBypassed = isClockBypassed();
-        var modeLabel;
         if (!ok) return tryNext();
         clockProxyState.probing = false;
         clockProxyState.base = candidate;
-        modeLabel = (data && data.mode === 'pc-bridge') ? 'ПК-мост ' : '';
-        clockProxyState.diag = 'активен (' + modeLabel + candidate + ')';
+        clockProxyState.diag = 'активен (' + candidate + ')';
         if (window.Belet && Belet.setClockProxy) Belet.setClockProxy(candidate);
         if (data && data.serverTimeMs && data.serverTimeMs >= 1704067200000) {
           clockProxyState.serverOffsetMs = data.serverTimeMs - Date.now();
           clockProxyState.serverSynced = true;
         }
         tickClock();
-        updateClockBridgeButtons();
         doneCb(true, !wasBypassed);
       });
     }
@@ -908,7 +805,7 @@
     var tz = readTizenClock();
     var tzValid = !!(tz && tz.getFullYear && tz.getFullYear() >= 2026);
     if (!isClockInvalid() && isBypassModeForced()) {
-      return 'Включён режим обхода SSL — ожидаем запуск локального прокси Belet или ПК-моста.';
+      return 'Включён режим обхода SSL — ожидаем запуск локального прокси Belet.';
     }
     if (tzValid) {
       return 'В настройках ТВ время задано (' + formatDateObj(tz) + '), но системное время браузера осталось ' +
@@ -1620,7 +1517,6 @@
     });
     renderHero(heroItem || (groups.length ? itemsOf(groups[0])[0] : null));
     $('homeEmpty').classList.toggle('hidden', !!rows.children.length);
-    updateClockBridgeButtons();
   }
 
   function renderHero(item) {
@@ -1671,7 +1567,6 @@
 
     if (isClockBlockingHttps()) {
       $('homeEmpty').classList.remove('hidden');
-      updateClockBridgeButtons();
       $('homeEmpty').querySelector('h2').textContent = 'Сбиты дата и время на телевизоре';
       $('homeEmpty').querySelector('p').textContent = canProbeAnyClockBridge()
         ? ('Время ТВ (' + clockDateText() + ') не настроено — прямые HTTPS не отправляются, запускаем локальный обход SSL…')
@@ -1691,7 +1586,6 @@
           if (!collected.length) {
             delays = [1500, 3000, 5000, 7000];
             $('homeEmpty').classList.remove('hidden');
-            updateClockBridgeButtons();
             if (isClockBlockingHttps()) scheduleClockWatch();
             if (err.kind === 'network' && retryAttempt < delays.length) {
               delay = delays[retryAttempt];
@@ -3089,7 +2983,6 @@
         sessionRow.appendChild(el('span', '', 'Сессия'));
         sessionRow.appendChild(el('span', '', Belet.hasSession() ? 'активна' : 'не выполнен вход'));
         host.appendChild(sessionRow);
-        updateClockBridgeButtons();
       }
       if (isClockBlockingHttps()) {
         scheduleClockWatch();
@@ -3102,7 +2995,6 @@
       }
       Belet.healthCheck(renderDiag);
     }
-    updateClockBridgeButtons();
     if (isClockBlockingHttps() && canProbeAnyClockBridge()) {
       probeClockProxy(function () { runProbeAndCheck(); });
       return;
@@ -3357,7 +3249,6 @@
     };
     $('heroInfo').onclick = function () { if (state.home.hero) openDetail(state.home.hero); };
     $('homeReload').onclick = function () { state.homeLoaded = false; loadHome(true); };
-    if ($('homePcBridge')) $('homePcBridge').onclick = openPcBridgePrompt;
     $('homeHelp').onclick = openAbout;
 
     $('browseMoreBtn').onclick = function () { loadCategory(state.browse.id, false); };
@@ -3372,7 +3263,6 @@
     $('profileLogout').onclick = logout;
 
     $('aboutRetest').onclick = runHealthCheck;
-    if ($('aboutPcBridge')) $('aboutPcBridge').onclick = openPcBridgePrompt;
     $('aboutBack').onclick = function () {
       if (!Belet.hasSession()) {
         screen('login');
@@ -3530,7 +3420,7 @@
     var pollMs = (hasSvc && !clockOk) ? 350 : 500;
     var clockBudget = hasSvc
       ? (isClockInvalid() ? 18000 : 8000)
-      : (canProbeAnyClockBridge() ? (isClockInvalid() ? 7000 : 2500) : (isClockInvalid() ? 4000 : 0));
+      : (isClockInvalid() ? 4000 : 0);
     var shouldRetryLaunch = hasSvc && waited > 0 && (waited % 2800 < pollMs);
     if (state.bootDone) return;
     if ((netOk && clockOk) || (!netOk && waited >= 8000) || (netOk && !clockOk && waited >= clockBudget)) {
@@ -3550,7 +3440,6 @@
         probeClockProxy(function (ok) {
           if (ok && isNetworkReady() && !state.bootDone) startBootSession();
         }, {
-          includePc: hasManualPcBridgeHost() || waited >= (isClockInvalid() ? 5600 : 3500),
           includeTvIp: waited >= 4200 && (waited % 2100 < pollMs),
           forceLaunch: shouldRetryLaunch
         });
@@ -3573,7 +3462,6 @@
     state.clockSynced = !shouldUseBypass();
     tickClock();
     setInterval(tickClock, 30000);
-    updateClockBridgeButtons();
     state.bootSession = Belet.init();
     if (isNetworkReady() && !shouldUseBypass()) {
       startBootSession();
@@ -3586,7 +3474,6 @@
       probeClockProxy(function (ok) {
         if (ok && isNetworkReady() && !state.bootDone) startBootSession();
       }, {
-        includePc: hasManualPcBridgeHost(),
         includeTvIp: false
       });
     } else {

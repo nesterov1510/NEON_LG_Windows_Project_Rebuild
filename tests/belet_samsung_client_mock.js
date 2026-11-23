@@ -279,7 +279,6 @@ function buildDom() {
   add(homeEmpty, 'h2');
   add(homeEmpty, 'p');
   add(homeEmpty, 'button', 'homeReload', 'ghost focusable');
-  add(homeEmpty, 'button', 'homePcBridge', 'ghost focusable hidden');
   add(homeEmpty, 'button', 'homeHelp', 'ghost focusable');
 
   const browse = add(main, 'section', 'browse', 'screen hidden');
@@ -355,7 +354,6 @@ function buildDom() {
   add(about, 'div', 'aboutStatus', 'about-card');
   add(about, 'div', 'aboutClockAlert', 'about-alert hidden');
   add(about, 'button', 'aboutRetest', 'primary focusable');
-  add(about, 'button', 'aboutPcBridge', 'ghost focusable hidden');
   add(about, 'button', 'aboutBack', 'ghost focusable');
 
   const numpad = add(app, 'div', 'numpad', 'overlay hidden');
@@ -387,14 +385,14 @@ function buildDom() {
     'phoneDisplay', 'phoneValue', 'methodPrev', 'methodDisplay', 'methodValue', 'methodNext', 'sendCode', 'toQr',
     'loginCode', 'codeDisplay', 'codeValue', 'verifyCode', 'resendCode', 'backToPhone', 'loginQr', 'qrImage',
     'qrStatus', 'qrRefresh', 'toPhone', 'loginHelp', 'home', 'hero', 'heroImage', 'heroTitle', 'heroMeta',
-    'heroText', 'heroPlay', 'heroInfo', 'rows', 'homeEmpty', 'homeReload', 'homePcBridge', 'homeHelp', 'browse', 'browseTitle', 'browseChips',
+    'heroText', 'heroPlay', 'heroInfo', 'rows', 'homeEmpty', 'homeReload', 'homeHelp', 'browse', 'browseTitle', 'browseChips',
     'browseGrid', 'browseMore', 'browseMoreBtn', 'browseEmpty', 'search', 'searchField', 'searchValue',
     'searchGrid', 'searchEmpty', 'detail', 'detailBackdrop', 'detailPoster', 'detailTitle', 'detailMeta',
     'detailGenres', 'detailText', 'detailPlay', 'detailFav', 'detailTrailer', 'episodesSection', 'seasonChips',
     'episodeList', 'player', 'video', 'playerOsd', 'playerTitle', 'playerSubtitle', 'playerBadge', 'progress',
     'progressBuffer', 'progressFill', 'progressKnob', 'timeNow', 'timeTotal', 'playerStatus', 'playerSpinner',
     'profile', 'profilePhone', 'profilePlan', 'profileRefresh', 'profileFavorites', 'profileHelp',
-    'profileLogout', 'about', 'aboutStatus', 'aboutClockAlert', 'aboutRetest', 'aboutPcBridge', 'aboutBack', 'numpad', 'numpadTitle', 'numpadValue',
+    'profileLogout', 'about', 'aboutStatus', 'aboutClockAlert', 'aboutRetest', 'aboutBack', 'numpad', 'numpadTitle', 'numpadValue',
     'numpadKeys', 'numpadDelete', 'numpadClear', 'numpadDone', 'keyboard', 'keyboardTitle', 'keyboardValue',
     'keyboardKeys', 'kbDelete', 'kbClear', 'kbDone', 'dialog', 'dialogTitle', 'dialogText', 'dialogActions',
     'toast', 'avPlayer'].forEach(id => { ids[id] = document.getElementById(id); });
@@ -1515,7 +1513,7 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   assert(ids.aboutStatus.textContent.indexOf('активен') >= 0, 'ClockProxy marked active');
 })();
 
-/* 19. PC Bridge fallback via TV numpad when ClockProxy service is blocked/stripped on Tizen 10 */
+/* 19. Inline WRT module injection on Tizen 10 & service-free 1970 TV never leaks direct https:// requests */
 (() => {
   const RealDate = Date;
   const fakeNow = RealDate.UTC(1970, 0, 1, 1, 2, 0);
@@ -1530,7 +1528,6 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   buildDom();
   timers.length = 0;
   calls.length = 0;
-  delete store.neon_belet_pc_bridge_v1;
 
   // Test inline WRT module injection on Tizen 10 first with tizen.application present
   const t10Sandbox = Object.assign({}, sandbox, {
@@ -1555,22 +1552,22 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   assert(injectedModules.some(s => (s.text || '').indexOf("from 'wrt:service'") >= 0),
     'Tizen 10 injects inline wrt:service module to avoid file:// CORS');
 
-  // Now simulate service-free Tizen TV where user configures PC Bridge IP on TV remote
+  // Verify service-free 1970 TV enters homeEmpty safely without firing direct https:// requests
   buildDom();
   timers.length = 0;
   calls.length = 0;
-  const pcSandbox = Object.assign({}, sandbox, {
+  const noSvcSandbox = Object.assign({}, sandbox, {
     document,
     Date: FakeDate,
     tizen: { systeminfo: { getCapability: () => '10.0' } },
     webapis: { network: { getActiveConnectionType: () => 3 } }
   });
-  pcSandbox.window = pcSandbox;
-  pcSandbox.global = pcSandbox;
-  pcSandbox.self = pcSandbox;
-  vm.createContext(pcSandbox);
-  vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), pcSandbox, { filename: 'api.js' });
-  vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), pcSandbox, { filename: 'app.js' });
+  noSvcSandbox.window = noSvcSandbox;
+  noSvcSandbox.global = noSvcSandbox;
+  noSvcSandbox.self = noSvcSandbox;
+  vm.createContext(noSvcSandbox);
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), noSvcSandbox, { filename: 'api.js' });
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), noSvcSandbox, { filename: 'app.js' });
   let s19 = 0;
   while (timers.length && s19 < 10 && ids.home.classList.contains('hidden')) {
     const batch = timers.splice(0, timers.length);
@@ -1580,42 +1577,9 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   assert(!ids.home.classList.contains('hidden'));
   assert(!ids.homeEmpty.classList.contains('hidden'));
   assert(!calls.some(c => c.url.indexOf('https://') === 0), 'service-free 1970 TV never sends direct https:// requests');
-  assert(!ids.homePcBridge.classList.contains('hidden'), 'PC Bridge button visible when clock is 1970');
-
-  click(ids.homePcBridge);
-  assert(!ids.numpad.classList.contains('hidden'), 'PC Bridge opens numpad IP prompt');
-  assert(ids.numpadKeys.querySelectorAll('.key').some(k => k.textContent === '.'), 'IP numpad includes dot key');
-  click(ids.numpadClear);
-  '192.168.1.50'.split('').forEach(ch => click(byText(ids.numpadKeys, ch)));
-
-  route('http://192.168.1.50:18767/__ping', 200, {
-    ok: true,
-    mode: 'pc-bridge',
-    port: 18767,
-    sslClockYear: 2026,
-    serverTimeMs: new RealDate(2026, 10, 23, 18, 30, 0).getTime()
-  });
-  route('http://192.168.1.50:18767/__proxy/beletapis.com/api/v1/users/device', 200, { msg: 'ok' });
-  route('http://192.168.1.50:18767/__proxy/homepage.belet.me/api/v2/home_page', 200, {
-    status: 'ok',
-    result: [{
-      id: 1, title: 'Через ПК-мост', source: 'top', items: [
-        { id: 101, type_id: 1, name: 'PC Bridge Film 101',
-          images: { vertical: { medium: { url: 'https://img.belet.me/101.jpg' } } } }
-      ]
-    }]
-  });
-  route('http://192.168.1.50:18767/__proxy/homepage.belet.me/api/v2/home_page', 200, { status: 'ok', result: [] });
-  click(ids.numpadDone);
-
-  assert.strictEqual(store.neon_belet_pc_bridge_v1, '192.168.1.50', 'PC bridge IP saved to localStorage');
-  assert(ids.homeEmpty.classList.contains('hidden'), 'home loads via PC bridge after IP entry');
-  assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
-  assert.strictEqual(ids.clock.textContent, '18:30', 'topbar shows real server clock from PC bridge');
-  delete store.neon_belet_pc_bridge_v1;
 })();
 
-/* 20. Cold ClockProxy start > 4s (QA55Q8FAAKXXT Launch #1): no early 1970 abort, retries service, skips offline auto-baked PC bridge */
+/* 20. Cold ClockProxy start > 4s (QA55Q8FAAKXXT Launch #1): no early 1970 abort, retries service cleanly */
 (() => {
   const RealDate = Date;
   const fakeNow = RealDate.UTC(1970, 0, 1, 1, 2, 0);
@@ -1628,11 +1592,6 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   FakeDate.parse = RealDate.parse;
 
   buildDom();
-  const autoMeta = document.createElement('meta');
-  autoMeta.setAttribute('name', 'neon-pc-bridge');
-  autoMeta.setAttribute('content', '192.168.1.99');
-  document.body.appendChild(autoMeta);
-  delete store.neon_belet_pc_bridge_v1;
   timers.length = 0;
   calls.length = 0;
 
@@ -1712,7 +1671,6 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   assert(launchCount >= 2, 'ClockProxy service launch retried during cold wait (launches=' + launchCount + ')');
   assert(!calls.some(c => c.url.indexOf('https://') === 0), 'never sent direct https:// request while ClockProxy was starting');
-  assert(!calls.some(c => c.url.indexOf('192.168.1.99') >= 0), 'skipped unreachable auto-baked PC bridge during cold boot');
 })();
 
 /* 21. Unconfigured 2025 factory clock without session launches ClockProxy immediately and skips https:// OTP/QR calls */
@@ -1816,7 +1774,6 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   });
   timers.length = 0;
   calls.length = 0;
-  delete store.neon_belet_pc_bridge_v1;
 
   let svcLaunches22 = 0;
   const s22 = Object.assign({}, sandbox, {
@@ -1893,7 +1850,7 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   assert.strictEqual(poster.src, 'belet-logo.png');
 })();
 
-/* 23. Direct mode (neon-bypass-mode="off") skips ClockProxy & PC bridge and calls direct HTTPS */
+/* 23. Direct mode (neon-bypass-mode="off") skips ClockProxy and calls direct HTTPS */
 (() => {
   const RealDate = Date;
   const now2026 = RealDate.UTC(2026, 10, 23, 21, 5, 0);
@@ -1910,11 +1867,6 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   offMeta.setAttribute('name', 'neon-bypass-mode');
   offMeta.setAttribute('content', 'off');
   document.body.appendChild(offMeta);
-  const staleBridgeMeta = document.createElement('meta');
-  staleBridgeMeta.setAttribute('name', 'neon-pc-bridge');
-  staleBridgeMeta.setAttribute('content', '192.168.1.99');
-  document.body.appendChild(staleBridgeMeta);
-  store.neon_belet_pc_bridge_v1 = '192.168.1.88';
   store.neon_belet_samsung_session_v2 = JSON.stringify({
     token: 'tok-23', refresh: 'ref-23', phone: '+99361000023', fingerprint: 'fp-23'
   });
@@ -1964,7 +1916,6 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   const directPoster = card404 && card404.querySelector('img');
   assert(directPoster, 'direct poster img created');
   assert.strictEqual(directPoster.src, 'https://img.belet.me/404.jpg', 'direct mode keeps original https:// poster URL');
-  delete store.neon_belet_pc_bridge_v1;
 })();
 
 /* 24. Forced bypass late ClockProxy readiness upgrades already-mounted home posters and retries via proxy */
@@ -1990,7 +1941,6 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   });
   timers.length = 0;
   calls.length = 0;
-  delete store.neon_belet_pc_bridge_v1;
 
   const s24 = Object.assign({}, sandbox, {
     document,
