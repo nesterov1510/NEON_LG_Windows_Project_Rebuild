@@ -398,7 +398,7 @@ def test_clock_proxy_handles_1970_clock_tls_and_m3u8_rewriting(tmp_path):
         )
         return k, c
 
-    k_ok, c_ok = make_leaf('beletapis.com')
+    k_ok, c_ok = make_leaf('beletapis.com', extra_hosts=('img.belet.me', 'film-search.belet.me'))
     k_cdn, c_cdn = make_leaf('cdn-media.example.org', extra_hosts=('poster-cdn.example.org',))
     k_bad, c_bad = make_leaf('evil.example')
     k_exp, c_exp = make_leaf('api.belet.tm', offset_days=-400, span_days=100)
@@ -434,8 +434,49 @@ const td = __TD__;
 const caPem = fs.readFileSync(td + '/ca.pem');
 const serverDateHdr = new Date().toUTCString();
 
+let poster403Hits = 0;
+let poster503Hits = 0;
+let searchHits = 0;
 const srvOk = https.createServer({ key: fs.readFileSync(td + '/ok.key'), cert: fs.readFileSync(td + '/ok.pem') }, (req, res) => {
+  if (req.url === '/api/v2/search' && searchHits === 0) {
+    searchHits += 1;
+    req.socket.destroy();
+    return;
+  }
   let body = ''; req.on('data', d => body += d); req.on('end', () => {
+    if (req.url === '/poster-ua.jpg') {
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', Date: serverDateHdr });
+      res.end(String(req.headers['user-agent'] || ''));
+      return;
+    }
+    if (req.url === '/poster-403.jpg') {
+      poster403Hits += 1;
+      if (req.headers.referer !== 'https://belet.tm/') {
+        res.writeHead(403, { Date: serverDateHdr });
+        res.end('forbidden');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', Date: serverDateHdr });
+      res.end('ok-referer');
+      return;
+    }
+    if (req.url === '/poster-503.jpg') {
+      poster503Hits += 1;
+      if (poster503Hits === 1) {
+        res.writeHead(503, { Date: serverDateHdr });
+        res.end('busy');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', Date: serverDateHdr });
+      res.end('ok-503');
+      return;
+    }
+    if (req.url === '/api/v2/search') {
+      searchHits += 1;
+      res.writeHead(200, { 'Content-Type': 'application/json', Date: serverDateHdr });
+      res.end(JSON.stringify({ ua: req.headers['user-agent'], got: body, hits: searchHits }));
+      return;
+    }
     if (req.url === '/api/v3/files/1') {
       res.writeHead(200, { 'Content-Type': 'application/json', Date: serverDateHdr });
       res.end('{"url":"https://cdn-media.example.org/hls/1/master.m3u8","poster":"https:\\\\u002f\\\\u002fposter-cdn.example.org\\\\u002f99.jpg","got":' + JSON.stringify(body) + '}');
@@ -482,6 +523,8 @@ Promise.all([
     Agent: function (o) { return new https.Agent(Object.assign({ ca: caPem }, o)); },
     request(opts, cb) {
       const o = Object.assign({}, opts, { host: '127.0.0.1', hostname: '127.0.0.1', port: modePort, ca: caPem });
+      delete o.lookup;
+      delete o.family;
       return https.request(o, cb);
     }
   };
@@ -526,6 +569,31 @@ Promise.all([
     const rRedirProto = await get('/__proxy/beletapis.com/redir-proto');
     assert.strictEqual(rRedirProto.status, 302);
     assert.strictEqual(rRedirProto.headers.location, 'http://127.0.0.1:' + p + '/__proxy/cdn-media.example.org/hls/1/master.m3u8');
+
+    const rUa = await get('/__proxy/img.belet.me/poster-ua.jpg', 'GET', null, { 'User-Agent': 'Mozilla/5.0 (SMART-TV; LINUX; Tizen 8.0)' });
+    assert.strictEqual(rUa.status, 200);
+    assert.strictEqual(rUa.body, 'belet_films_android');
+
+    const r403Retry = await get('/__proxy/img.belet.me/poster-403.jpg');
+    assert.strictEqual(r403Retry.status, 200);
+    assert.strictEqual(r403Retry.body, 'ok-referer');
+    assert.strictEqual(poster403Hits, 2);
+
+    const r503Retry = await get('/__proxy/img.belet.me/poster-503.jpg');
+    assert.strictEqual(r503Retry.status, 200);
+    assert.strictEqual(r503Retry.body, 'ok-503');
+    assert.strictEqual(poster503Hits, 2);
+
+    const rSearchPostRetry = await get('/__proxy/film-search.belet.me/api/v2/search', 'POST', 'text=dune&page=1&type=search', {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Authorization: 'tok123'
+    });
+    assert.strictEqual(rSearchPostRetry.status, 200);
+    const searchParsed = JSON.parse(rSearchPostRetry.body);
+    assert.strictEqual(searchParsed.ua, 'belet_films_android');
+    assert.strictEqual(searchParsed.got, 'text=dune&page=1&type=search');
+    assert.strictEqual(searchParsed.hits, 2);
+
     const p2 = await get('/__ping');
     assert(JSON.parse(p2.body).serverTimeMs > 1704067200000);
 
@@ -580,5 +648,27 @@ def test_boot_loader_and_image_rendering_contracts():
     assert not re.search(r'обход|SSL|прокси', boot_block, re.IGNORECASE), 'boot markup contains bypass jargon'
     assert re.search(r'\.card\s*\{[^}]*display:\s*block\s*;', css), 'card button requires explicit display: block for Chromium grid posters'
     assert '.detail-backdrop-img' in css, 'detail-backdrop-img rule missing in style.css'
+
+
+def test_search_and_media_resilience_contracts():
+    api_js = _client_source('api.js')
+    app_js = _client_source('app.js')
+    proxy_js = _client_source('service/clock-proxy.js')
+
+    assert 'searchListFrom' in api_js
+    assert '/api/v1/search' in api_js
+    assert "encodeURIComponent(searchType)" in api_js
+
+    assert 'KB_ROWS_RU' in app_js and 'KB_ROWS_EN' in app_js
+    assert 'data-kb-lang' in app_js
+    assert 'keepForMedia' in app_js
+    assert 'triggerImageProxyFallback' in app_js
+    assert 'posterCandidates' in app_js and 'backdropCandidates' in app_js
+
+    assert "ANDROID_UA = 'belet_films_android'" in proxy_js
+    assert 'maxCachedSessions: 0' in proxy_js
+    assert 'MAX_BUFFERED_BODY' in proxy_js
+    assert '119.235.124.77' in proxy_js
+    assert 'attemptTimedOut' in proxy_js
 
 

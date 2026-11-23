@@ -36,14 +36,20 @@
   var https = reqFn('https');
   var url = reqFn('url');
   var os = reqFn('os');
+  var dnsMod = null;
   var zlib = null;
   var tlsMod = null;
+  try { dnsMod = reqFn('dns'); } catch (e) {}
   try { zlib = reqFn('zlib'); } catch (e) {}
   try { tlsMod = reqFn('tls'); } catch (e) {}
 
   var PORT = 18767;
   var LISTEN_HOST = '0.0.0.0';
   var MIN_VALID_MS = 1704067200000; /* 2024-01-01T00:00:00Z */
+  var MAX_BUFFERED_BODY = 256 * 1024;
+  var ANDROID_UA = 'belet_films_android';
+  var WEB_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  var FALLBACK_DNS_SERVERS = ['119.235.124.77', '1.1.1.1', '8.8.8.8'];
   var BASE_DOMAINS = ['beletapis.com', 'belet.tm', 'belet.me'];
   var API_SCAN_HOSTS = {
     'beletapis.com': true,
@@ -55,16 +61,23 @@
   };
   var dynamicHosts = {};
   var dynamicOrder = [];
+  var resolvedIpCache = {};
   var lastServerDateMs = 0;
   var lastServerMonoMs = 0;
   var strictAgent = null;
   var skewAgent = null;
 
   try {
-    strictAgent = new https.Agent({ keepAlive: true, maxSockets: 32, keepAliveMsecs: 15000 });
+    strictAgent = new https.Agent({ keepAlive: true, maxSockets: 8, keepAliveMsecs: 15000 });
   } catch (e) { strictAgent = null; }
   try {
-    skewAgent = new https.Agent({ keepAlive: true, maxSockets: 32, keepAliveMsecs: 15000, rejectUnauthorized: false });
+    skewAgent = new https.Agent({
+      keepAlive: true,
+      maxSockets: 8,
+      maxCachedSessions: 0,
+      keepAliveMsecs: 15000,
+      rejectUnauthorized: false
+    });
   } catch (e) { skewAgent = null; }
 
   function bufFrom(data, enc) {
@@ -376,6 +389,64 @@
     res.end(body);
   }
 
+  function makeFixedLookup(ip) {
+    return function (hostname, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {}; }
+      if (opts && opts.all) cb(null, [{ address: ip, family: 4 }]);
+      else cb(null, ip, 4);
+    };
+  }
+
+  function getCachedIpv4(host) {
+    var entry = resolvedIpCache[host];
+    if (!entry) return null;
+    if (Date.now() - entry.at > 300000) {
+      delete resolvedIpCache[host];
+      return null;
+    }
+    return entry.ip;
+  }
+
+  function fallbackResolveIpv4(host, cb) {
+    var cached = getCachedIpv4(host);
+    var resolver;
+    var done = false;
+    var timer;
+    function finish(ip) {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      if (ip) resolvedIpCache[host] = { ip: ip, at: Date.now() };
+      cb(ip || null);
+    }
+    if (cached) { finish(cached); return; }
+    if (!dnsMod || typeof dnsMod.Resolver !== 'function' || !isSafePublicHost(host)) {
+      finish(null);
+      return;
+    }
+    try {
+      resolver = new dnsMod.Resolver();
+      resolver.setServers(FALLBACK_DNS_SERVERS);
+      timer = setTimeout(function () { finish(null); }, 1800);
+      resolver.resolve4(host, function (err, addrs) {
+        var i;
+        var addr;
+        if (!err && addrs && addrs.length) {
+          for (i = 0; i < addrs.length; i += 1) {
+            addr = String(addrs[i] || '');
+            if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(addr) && !/^127\.|^0\./.test(addr)) {
+              finish(addr);
+              return;
+            }
+          }
+        }
+        finish(null);
+      });
+    } catch (e) {
+      finish(null);
+    }
+  }
+
   function handleRequest(req, res) {
     var reqOrigin = req.headers && req.headers.origin ? String(req.headers.origin) : '';
     var reqHdrs = req.headers && req.headers['access-control-request-headers']
@@ -394,9 +465,14 @@
     var k;
     var lk;
     var reqMethod;
+    var isBeletStaticHost;
+    var isBodyless;
     var aborted = false;
     var reqPaused = false;
     var canRetry = false;
+    var reqBodyBuf = null;
+    var preChunks = null;
+    var activeUpReq = null;
 
     if (!fromThisTv(req)) {
       res.writeHead(403, { 'Content-Type': 'text/plain' });
@@ -449,28 +525,25 @@
     inH = req.headers || {};
     outH = {};
     reqMethod = String(req.method || 'GET').toUpperCase();
-    canRetry = (reqMethod === 'GET' || reqMethod === 'HEAD');
+    isBeletStaticHost = isStaticAllowedHost(upHost);
+    isBodyless = (reqMethod === 'GET' || reqMethod === 'HEAD');
+    canRetry = isBodyless;
     for (k in inH) {
       if (!Object.prototype.hasOwnProperty.call(inH, k)) continue;
       lk = k.toLowerCase();
       if (lk === 'host' || lk === 'connection' || lk === 'keep-alive' || lk === 'proxy-connection' ||
           lk === 'origin' || lk === 'referer' || lk === 'accept-encoding' ||
           lk === 'x-forwarded-host' || lk === 'x-forwarded-proto' || lk === 'x-forwarded-for' ||
-          lk.indexOf('sec-fetch-') === 0) {
+          lk.indexOf('sec-fetch-') === 0 ||
+          (isBeletStaticHost && lk === 'user-agent')) {
         continue;
       }
-      outH[k] = inH[k];
+      outH[lk] = inH[k];
     }
     outH.host = upHost;
+    if (isBeletStaticHost) outH['user-agent'] = ANDROID_UA;
     if (zlib) outH['accept-encoding'] = 'gzip, deflate';
     else outH['accept-encoding'] = 'identity';
-
-    if (!canRetry && typeof req.pause === 'function') {
-      req.pause();
-      reqPaused = true;
-    }
-
-    var activeUpReq = null;
 
     res.on('close', function () {
       if (!res.finished && !res.writableFinished) {
@@ -481,33 +554,68 @@
       }
     });
 
-    function startAttempt(useFreshSocket, retryCount, forceIpv4) {
+    function startAttempt(useFreshSocket, retryCount, forceIpv4, useWebFallback, overrideIp) {
       var reqOpts;
+      var attemptHeaders = {};
+      var hk2;
       var upReq;
       var startedUpstream = false;
       var tlsRejected = false;
+      var attemptTimedOut = false;
+      var connectTimer = null;
+      var ipToUse = overrideIp || getCachedIpv4(upHost);
+      var isMediaPath = /\.m3u8|\.(?:ts|m4s|mp4)(?:$|\?)/i.test(upPathname);
 
       if (aborted) return;
+
+      for (hk2 in outH) {
+        if (Object.prototype.hasOwnProperty.call(outH, hk2)) attemptHeaders[hk2] = outH[hk2];
+      }
+      if (useWebFallback && isBeletStaticHost) {
+        attemptHeaders['user-agent'] = WEB_UA;
+        attemptHeaders.referer = 'https://belet.tm/';
+      }
 
       reqOpts = {
         hostname: upHost,
         port: 443,
         path: upPath,
         method: reqMethod,
-        headers: outH,
+        headers: attemptHeaders,
         servername: upHost,
         rejectUnauthorized: false
       };
-      if (forceIpv4) reqOpts.family = 4;
+      if (ipToUse) {
+        reqOpts.lookup = makeFixedLookup(ipToUse);
+      } else if (forceIpv4) {
+        reqOpts.family = 4;
+      }
       if (!useFreshSocket && skewAgent) reqOpts.agent = skewAgent;
       else reqOpts.agent = false;
 
+      function clearConnectTimer() {
+        if (connectTimer) {
+          clearTimeout(connectTimer);
+          connectTimer = null;
+        }
+      }
+
       function flushBodyToUpstream() {
+        var ci;
+        clearConnectTimer();
         if (startedUpstream || aborted || tlsRejected) return;
         startedUpstream = true;
-        if (canRetry) {
+        if (isBodyless) {
           upReq.end();
           return;
+        }
+        if (reqBodyBuf !== null) {
+          upReq.end(reqBodyBuf);
+          return;
+        }
+        if (preChunks && preChunks.length) {
+          for (ci = 0; ci < preChunks.length; ci += 1) upReq.write(preChunks[ci]);
+          preChunks = null;
         }
         if (reqPaused && typeof req.resume === 'function') req.resume();
         req.pipe(upReq);
@@ -528,12 +636,26 @@
         var total;
         var overflow;
 
+        clearConnectTimer();
         dateErr = verifyCertWindowAgainstDate(upRes.socket, serverMs || (clockOk ? Date.now() : 0));
         if (dateErr) {
           tlsRejected = true;
           upRes.resume();
           sendJsonError(res, 502, dateErr.message);
           return;
+        }
+
+        if (canRetry && retryCount < 2 && !aborted) {
+          if (status === 403 && isBeletStaticHost && isBodyless && !useWebFallback) {
+            upRes.resume();
+            startAttempt(true, retryCount + 1, forceIpv4, true, ipToUse);
+            return;
+          }
+          if (status === 502 || status === 503 || status === 504 || status === 429) {
+            upRes.resume();
+            startAttempt(true, retryCount + 1, true, useWebFallback, ipToUse);
+            return;
+          }
         }
 
         for (hk in upH) {
@@ -630,7 +752,18 @@
 
       activeUpReq = upReq;
 
+      if (!isMediaPath) {
+        connectTimer = setTimeout(function () {
+          connectTimer = null;
+          if (!startedUpstream && !aborted && !tlsRejected) {
+            attemptTimedOut = true;
+            try { upReq.abort(); } catch (e) {}
+          }
+        }, 8000);
+      }
+
       upReq.on('socket', function (sock) {
+        var peerReady;
         if (!sock) {
           flushBodyToUpstream();
           return;
@@ -639,6 +772,7 @@
           if (clockOk) {
             var cachedDateErr = verifyClockSkewSocket(sock, upHost, clockOk);
             if (cachedDateErr) {
+              clearConnectTimer();
               tlsRejected = true;
               try { upReq.destroy(cachedDateErr); } catch (e) {}
               sendJsonError(res, 502, cachedDateErr.message);
@@ -648,9 +782,13 @@
           flushBodyToUpstream();
           return;
         }
-        if (sock.encrypted && !sock.connecting && !sock.pending) {
+        peerReady = !!(sock.encrypted && !sock.connecting && !sock.pending &&
+          typeof sock.getPeerCertificate === 'function' && sock.getPeerCertificate(false) &&
+          sock.getPeerCertificate(false).subject);
+        if (peerReady) {
           var syncErr = verifyClockSkewSocket(sock, upHost, clockOk);
           if (syncErr) {
+            clearConnectTimer();
             tlsRejected = true;
             try { upReq.destroy(syncErr); } catch (e) {}
             sendJsonError(res, 502, syncErr.message);
@@ -663,6 +801,7 @@
           sock.once('secureConnect', function () {
             var tlsErr = verifyClockSkewSocket(sock, upHost, clockOk);
             if (tlsErr) {
+              clearConnectTimer();
               tlsRejected = true;
               try { upReq.destroy(tlsErr); } catch (e) {}
               sendJsonError(res, 502, tlsErr.message);
@@ -675,7 +814,8 @@
         }
       });
 
-      upReq.setTimeout(/\.m3u8|\.(?:ts|m4s|mp4)(?:$|\?)/i.test(upPathname) ? 45000 : 25000, function () {
+      upReq.setTimeout(isMediaPath ? 45000 : 25000, function () {
+        attemptTimedOut = true;
         try { upReq.abort(); } catch (e) {}
       });
 
@@ -683,22 +823,94 @@
         var code = err && err.code ? String(err.code) : '';
         var msg = String(err && err.message || '');
         var netRetryable = (
+          attemptTimedOut ||
           code === 'ECONNRESET' || code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' ||
           code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT' || code === 'ECONNABORTED' ||
-          code === 'ENETUNREACH' || code === 'EHOSTUNREACH' ||
+          code === 'ENETUNREACH' || code === 'EHOSTUNREACH' || code === 'ECONNREFUSED' ||
           /socket hang up/i.test(msg)
         );
-        var nextIpv4 = forceIpv4 || code === 'ETIMEDOUT' || code === 'ENETUNREACH' || code === 'EHOSTUNREACH';
+        var dnsFailed = (code === 'ENOTFOUND' || code === 'EAI_AGAIN' || code === 'ECONNREFUSED');
+        clearConnectTimer();
         if (aborted || res.headersSent) return;
+        if (retryCount < 2 && !tlsRejected && canRetry && dnsFailed && !ipToUse && isSafePublicHost(upHost)) {
+          fallbackResolveIpv4(upHost, function (resolvedIp) {
+            if (aborted || res.headersSent) return;
+            if (resolvedIp) {
+              startAttempt(true, retryCount + 1, true, useWebFallback, resolvedIp);
+              return;
+            }
+            if (code === 'ECONNREFUSED') {
+              startAttempt(true, retryCount + 1, true, useWebFallback, null);
+              return;
+            }
+            sendJsonError(res, 502, msg || 'Upstream DNS error');
+          });
+          return;
+        }
         if (retryCount < 2 && !tlsRejected && canRetry && netRetryable) {
-          startAttempt(true, retryCount + 1, nextIpv4);
+          startAttempt(true, retryCount + 1, true, useWebFallback, ipToUse);
           return;
         }
         sendJsonError(res, 502, msg || 'Upstream network error');
       });
     }
 
-    startAttempt(false, 0, false);
+    if (isBodyless) {
+      startAttempt(false, 0, false, false, null);
+      return;
+    }
+
+    var declaredLen = parseInt(String(inH['content-length'] || ''), 10);
+    if (!isNaN(declaredLen) && declaredLen > MAX_BUFFERED_BODY) {
+      if (typeof req.pause === 'function') {
+        req.pause();
+        reqPaused = true;
+      }
+      canRetry = false;
+      startAttempt(false, 0, false, false, null);
+      return;
+    }
+
+    var bodyChunks = [];
+    var bodyLen = 0;
+    var streamedFallback = false;
+
+    function onBodyData(chunk) {
+      if (streamedFallback || aborted) return;
+      bodyLen += chunk.length;
+      bodyChunks.push(chunk);
+      if (bodyLen > MAX_BUFFERED_BODY) {
+        streamedFallback = true;
+        req.removeListener('data', onBodyData);
+        req.removeListener('end', onBodyEnd);
+        if (typeof req.pause === 'function') {
+          req.pause();
+          reqPaused = true;
+        }
+        preChunks = bodyChunks;
+        bodyChunks = null;
+        canRetry = false;
+        startAttempt(false, 0, false, false, null);
+      }
+    }
+
+    function onBodyEnd() {
+      if (streamedFallback || aborted) return;
+      req.removeListener('data', onBodyData);
+      req.removeListener('end', onBodyEnd);
+      reqBodyBuf = Buffer.concat(bodyChunks || []);
+      bodyChunks = null;
+      canRetry = true;
+      outH['content-length'] = reqBodyBuf.length;
+      delete outH['transfer-encoding'];
+      startAttempt(false, 0, false, false, null);
+    }
+
+    req.on('error', function () {
+      aborted = true;
+    });
+    req.on('data', onBodyData);
+    req.on('end', onBodyEnd);
   }
 
   var server = http.createServer(handleRequest);

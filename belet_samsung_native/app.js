@@ -55,7 +55,8 @@
     categories: [],
     categoriesLoaded: false,
     browse: { mode: 'category', id: null, title: '', items: [], offset: 0, loading: false, done: false },
-    search: { text: '', items: [], page: 1, loading: false, done: false },
+    search: { text: '', items: [], page: 1, loading: false, done: false, gen: 0 },
+    kbLang: 'ru',
     detail: { movie: null, seasons: [], seasonId: null, episodes: [], loadingEpisodes: false },
     player: {
       movie: null, movieId: null, seasonId: null, episodeId: null, title: '', subtitle: '',
@@ -229,7 +230,42 @@
   /* Generic input overlay: numeric pad or full keyboard. */
   var NUM_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'delete', '0', 'ok'];
   var NUM_IP_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'ok'];
-  var KB_ROWS = ['йцукенгшщзхъ', 'фывапролджэ', 'ячсмитьбю', '1234567890', '- '];
+  var KB_ROWS_RU = ['йцукенгшщзхъ', 'фывапролджэ', 'ячсмитьбю', '1234567890-'];
+  var KB_ROWS_EN = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm', '1234567890-'];
+
+  function renderKeyboardRows(keysHost, focusLangAfter) {
+    var rows = state.kbLang === 'en' ? KB_ROWS_EN : KB_ROWS_RU;
+    clear(keysHost);
+    rows.forEach(function (row, idx) {
+      var rowNode = el('div', 'kb-row');
+      row.split('').forEach(function (char) {
+        var button;
+        if (char === ' ') return;
+        button = el('button', 'key focusable', char.toUpperCase());
+        button.onclick = (function (value) {
+          return function () { inputAppend(value); };
+        }(char));
+        rowNode.appendChild(button);
+      });
+      if (idx === 2) {
+        var space = el('button', 'key space focusable', 'пробел');
+        space.onclick = function () { inputAppend(' '); };
+        rowNode.appendChild(space);
+        var lang = el('button', 'key lang focusable', state.kbLang === 'en' ? 'АБВ' : 'ABC');
+        lang.setAttribute('data-kb-lang', '1');
+        lang.onclick = function () {
+          state.kbLang = state.kbLang === 'en' ? 'ru' : 'en';
+          renderKeyboardRows(keysHost, true);
+        };
+        rowNode.appendChild(lang);
+      }
+      keysHost.appendChild(rowNode);
+    });
+    if (focusLangAfter) {
+      var langBtn = keysHost.querySelector('[data-kb-lang="1"]');
+      if (langBtn) langBtn.focus();
+    }
+  }
 
   function inputOverlay(kind, options) {
     var isNum = kind === 'num';
@@ -259,25 +295,7 @@
         keysHost.appendChild(button);
       });
     } else {
-      KB_ROWS.forEach(function (row) {
-        var rowNode = el('div', 'kb-row');
-        row.split('').forEach(function (char) {
-          var button;
-          if (char === '-') return;
-          if (char === ' ') return;
-          button = el('button', 'key focusable', char.toUpperCase());
-          button.onclick = (function (value) {
-            return function () { inputAppend(value); };
-          }(char));
-          rowNode.appendChild(button);
-        });
-        if (row === KB_ROWS[2]) {
-          var space = el('button', 'key space focusable', 'пробел');
-          space.onclick = function () { inputAppend(' '); };
-          rowNode.appendChild(space);
-        }
-        keysHost.appendChild(rowNode);
-      });
+      renderKeyboardRows(keysHost, false);
     }
     setHidden(host, false);
     inputRender();
@@ -497,7 +515,7 @@
 
   function shouldUseBypass() {
     if (isBypassModeDisabled()) return false;
-    return isClockInvalid() || isBypassModeForced();
+    return isClockInvalid() || isBypassModeForced() || !!clockProxyState.keepForMedia;
   }
 
   function isClockBypassed() {
@@ -529,7 +547,9 @@
     launchDiag: '',
     serverOffsetMs: 0,
     serverSynced: false,
-    watchTicks: 0
+    watchTicks: 0,
+    keepForMedia: false,
+    lastMediaProbe: 0
   };
 
   function canProbeAnyClockBridge() {
@@ -814,6 +834,28 @@
     tryNext();
   }
 
+  function triggerImageProxyFallback(failedUrl) {
+    var now;
+    if (isBypassModeDisabled() || isClockBypassed() || !canProbeAnyClockBridge()) return;
+    if (failedUrl && !/^https:\/\/(?:[^\/]+\.)?(?:belet\.me|belet\.tm|beletapis\.com)(?:\/|:|$)/i.test(failedUrl)) {
+      return;
+    }
+    now = Date.now();
+    clockProxyState.keepForMedia = true;
+    if (clockProxyState.probing || (clockProxyState.lastMediaProbe && now - clockProxyState.lastMediaProbe < 4000)) {
+      return;
+    }
+    clockProxyState.lastMediaProbe = now;
+    probeClockProxy(function (ok) {
+      if (ok) {
+        clockProxyState.keepForMedia = true;
+        refreshVisibleImages();
+      } else {
+        scheduleClockWatch();
+      }
+    }, { forceLaunch: hasTizenServiceApi(), includeTvIp: true });
+  }
+
   function clockHelpText() {
     var tz = readTizenClock();
     var tzValid = !!(tz && tz.getFullYear && tz.getFullYear() >= 2026);
@@ -968,7 +1010,7 @@
     state.categories = [];
     state.categoriesLoaded = false;
     state.browse = { mode: 'category', id: null, title: '', items: [], offset: 0, loading: false, done: false };
-    state.search = { text: '', items: [], page: 1, loading: false, done: false };
+    state.search = { text: '', items: [], page: 1, loading: false, done: false, gen: (state.search.gen || 0) + 1 };
     state.detail = { movie: null, seasons: [], seasonId: null, episodes: [], loadingEpisodes: false };
     clear($('rows'));
     clear($('browseGrid'));
@@ -1382,36 +1424,72 @@
     return null;
   }
 
-  function imageUrl(value) {
+  function normalizeRawImageUrl(value) {
     var raw = (value && typeof value === 'object') ? extractImageValue(value, 0) : value;
     var url;
-    var resolved;
     if (typeof raw !== 'string') return null;
     url = raw.replace(/^\s+|\s+$/g, '').replace(/ /g, '%20');
     if (!url) return null;
-    if (/^(https?:|data:|file:)/i.test(url)) resolved = url;
-    else if (url.indexOf('//') === 0) resolved = 'https:' + url;
-    else if (/^[a-z0-9.-]*belet\.[a-z]+\//i.test(url)) resolved = 'https://' + url;
-    else resolved = IMAGE_BASE + (url.charAt(0) === '/' ? url.slice(1) : url);
+    if (/^(https?:|data:|file:)/i.test(url)) return url;
+    if (url.indexOf('//') === 0) return 'https:' + url;
+    if (/^[a-z0-9.-]*belet\.[a-z]+\//i.test(url)) return 'https://' + url;
+    return IMAGE_BASE + (url.charAt(0) === '/' ? url.slice(1) : url);
+  }
+
+  function imageUrl(value) {
+    var resolved = normalizeRawImageUrl(value);
+    if (!resolved) return null;
     if (window.Belet && Belet.proxyUrl && /^https?:/i.test(resolved)) {
       return Belet.proxyUrl(resolved);
     }
     return resolved;
   }
 
+  function pushRawCandidate(out, seen, value) {
+    var raw = normalizeRawImageUrl(value);
+    if (!raw || seen[raw]) return;
+    seen[raw] = true;
+    out.push(raw);
+  }
+
+  function buildRawCandidateList(rawOrList) {
+    var out = [];
+    var seen = {};
+    var i;
+    if (Array.isArray(rawOrList)) {
+      for (i = 0; i < rawOrList.length; i += 1) pushRawCandidate(out, seen, rawOrList[i]);
+    } else if (rawOrList !== undefined && rawOrList !== null) {
+      pushRawCandidate(out, seen, rawOrList);
+    }
+    return out;
+  }
+
+  function sameRawCandidateList(a, b) {
+    var i;
+    if (!a || !b || a.length !== b.length) return false;
+    for (i = 0; i < a.length; i += 1) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
   function setContentImage(img, rawSource) {
-    var raw = (rawSource && typeof rawSource === 'object') ? extractImageValue(rawSource, 0) : rawSource;
-    var source = imageUrl(raw);
+    var candidates = buildRawCandidateList(rawSource);
+    var primaryRaw = candidates.length ? candidates[0] : '';
+    var source = primaryRaw ? imageUrl(primaryRaw) : null;
     var gen;
+    var candIndex = 0;
     var retryCount = 0;
     if (!img) return;
-    if (source && img._beletResolved === source && img._beletRawSource === (raw || '') &&
+    if (source && img._beletResolved === source &&
+        sameRawCandidateList(img._beletRawCandidates, candidates) &&
         !img._beletBrandFallback && img.src === source && !(img.complete && img.naturalWidth === 0)) {
       return;
     }
     gen = (img._beletImgGen || 0) + 1;
     img._beletImgGen = gen;
-    img._beletRawSource = (typeof raw === 'string') ? raw : '';
+    img._beletRawCandidates = candidates;
+    img._beletRawSource = primaryRaw;
     img._beletResolved = source || '';
     if (img._beletRetryTimer) {
       clearTimeout(img._beletRetryTimer);
@@ -1431,21 +1509,45 @@
     }
 
     function handleImageError() {
-      var retryUrl;
+      var currentRaw;
+      var currentUrl;
+      var nextRaw;
+      var delay;
       if (img._beletImgGen !== gen) return;
-      retryUrl = imageUrl(img._beletRawSource) || source;
-      if (!img._beletBrandFallback && retryUrl && /^https?:\/\//i.test(retryUrl) && retryCount < 2) {
-        var delay = retryCount === 0 ? 350 : 900;
-        retryCount += 1;
-        img._beletRetryTimer = setTimeout(function () {
-          img._beletRetryTimer = null;
-          if (img._beletImgGen !== gen || img._beletBrandFallback) return;
-          var nextUrl = imageUrl(img._beletRawSource) || retryUrl;
-          img._beletResolved = nextUrl || '';
-          if (img.removeAttribute) img.removeAttribute('src');
-          img.src = nextUrl;
-        }, delay);
-        return;
+      currentRaw = candidates[candIndex] || primaryRaw;
+      currentUrl = currentRaw ? imageUrl(currentRaw) : source;
+      triggerImageProxyFallback(currentRaw);
+      if (img._beletImgGen !== gen) return;
+      if (!img._beletBrandFallback && currentUrl && /^https?:\/\//i.test(currentUrl)) {
+        if (candidates.length > 1) {
+          if (candIndex + 1 < candidates.length && retryCount < 4) {
+            delay = retryCount === 0 ? 350 : 900;
+            retryCount += 1;
+            candIndex += 1;
+            nextRaw = candidates[candIndex];
+            img._beletRetryTimer = setTimeout(function () {
+              img._beletRetryTimer = null;
+              if (img._beletImgGen !== gen || img._beletBrandFallback) return;
+              var resolvedNext = imageUrl(nextRaw);
+              img._beletResolved = resolvedNext || '';
+              if (img.removeAttribute) img.removeAttribute('src');
+              img.src = resolvedNext;
+            }, delay);
+            return;
+          }
+        } else if (retryCount < 2) {
+          delay = retryCount === 0 ? 350 : 900;
+          retryCount += 1;
+          img._beletRetryTimer = setTimeout(function () {
+            img._beletRetryTimer = null;
+            if (img._beletImgGen !== gen || img._beletBrandFallback) return;
+            var resolvedRetry = imageUrl(currentRaw) || currentUrl;
+            img._beletResolved = resolvedRetry || '';
+            if (img.removeAttribute) img.removeAttribute('src');
+            img.src = resolvedRetry;
+          }, delay);
+          return;
+        }
       }
       showBrandFallback();
     }
@@ -1474,47 +1576,42 @@
     var imgs;
     var i;
     var img;
+    var rawSrc;
     var nextUrl;
     if (!doc || !doc.querySelectorAll) return;
     imgs = doc.querySelectorAll('img');
     for (i = 0; i < imgs.length; i += 1) {
       img = imgs[i];
-      if (!img || !img._beletRawSource) continue;
-      nextUrl = imageUrl(img._beletRawSource);
+      if (!img || (!img._beletRawSource && !(img._beletRawCandidates && img._beletRawCandidates.length))) continue;
+      rawSrc = (img._beletRawCandidates && img._beletRawCandidates.length) ? img._beletRawCandidates[0] : img._beletRawSource;
+      nextUrl = imageUrl(rawSrc);
       if (!nextUrl) continue;
       if (img._beletBrandFallback || img._beletResolved !== nextUrl ||
           (img.complete && img.naturalWidth === 0)) {
-        setContentImage(img, img._beletRawSource);
+        setContentImage(img, (img._beletRawCandidates && img._beletRawCandidates.length) ? img._beletRawCandidates : img._beletRawSource);
       }
     }
   }
 
-  function pickImageFromEntry(entry, sizes) {
+  function collectImageFromEntry(entry, sizes, out, seen) {
     var j;
     var val;
-    var url;
     var fallbackKeys = ['original', 'large', 'high', 'full', 'default', 'standard', 'medium', 'small', 'low', 'thumb', 'thumbnail', 'preview', 'webp', 'url', 'src', 'link', 'path'];
-    if (!entry) return null;
-    if (typeof entry === 'string') return imageUrl(entry);
-    if (typeof entry !== 'object') return null;
+    if (!entry) return;
+    if (typeof entry === 'string') { pushRawCandidate(out, seen, entry); return; }
+    if (typeof entry !== 'object') return;
     for (j = 0; j < sizes.length; j += 1) {
       val = entry[sizes[j]];
-      if (val !== undefined && val !== null) {
-        url = imageUrl(val);
-        if (url) return url;
-      }
+      if (val !== undefined && val !== null) pushRawCandidate(out, seen, val);
     }
     for (j = 0; j < fallbackKeys.length; j += 1) {
       val = entry[fallbackKeys[j]];
-      if (val !== undefined && val !== null) {
-        url = imageUrl(val);
-        if (url) return url;
-      }
+      if (val !== undefined && val !== null) pushRawCandidate(out, seen, val);
     }
-    return imageUrl(extractImageValue(entry, 0));
+    pushRawCandidate(out, seen, extractImageValue(entry, 0));
   }
 
-  function pickImage(images, kind, size) {
+  function collectImageCandidates(images, kind, size, out, seen) {
     var entry;
     var sizes = size || ['medium', 'standard', 'default', 'high'];
     var order = kind === 'horizontal'
@@ -1528,33 +1625,36 @@
         'horizontal_without_name', 'horizontal-without-name', 'horizontal_with_name', 'horizontal-with-name', 'horizontal', 'banner', 'backdrop', 'name'
       ];
     var i;
-    var url;
-    if (!images) return null;
-    if (typeof images === 'string') return imageUrl(images);
+    if (!images) return;
+    if (typeof images === 'string') { pushRawCandidate(out, seen, images); return; }
     if (Array.isArray(images)) {
       for (i = 0; i < images.length; i += 1) {
         entry = images[i];
         if (entry && typeof entry === 'object' && entry.type &&
             ((kind === 'horizontal' && /horiz|banner|back|land|wide/i.test(String(entry.type))) ||
              (kind !== 'horizontal' && /vert|poster|port|cover/i.test(String(entry.type))))) {
-          url = pickImageFromEntry(entry, sizes);
-          if (url) return url;
+          collectImageFromEntry(entry, sizes, out, seen);
         }
       }
       for (i = 0; i < images.length; i += 1) {
-        url = pickImageFromEntry(images[i], sizes);
-        if (url) return url;
+        collectImageFromEntry(images[i], sizes, out, seen);
       }
-      return null;
+      return;
     }
-    if (typeof images !== 'object') return null;
+    if (typeof images !== 'object') return;
     for (i = 0; i < order.length; i += 1) {
       entry = images[order[i]];
       if (!entry) continue;
-      url = pickImageFromEntry(entry, sizes);
-      if (url) return url;
+      collectImageFromEntry(entry, sizes, out, seen);
     }
-    return imageUrl(extractImageValue(images, 0));
+    pushRawCandidate(out, seen, extractImageValue(images, 0));
+  }
+
+  function pickImage(images, kind, size) {
+    var out = [];
+    var seen = {};
+    collectImageCandidates(images, kind, size, out, seen);
+    return out.length ? imageUrl(out[0]) : null;
   }
 
   function unwrapItem(item) {
@@ -1563,7 +1663,7 @@
     return item;
   }
 
-  function posterOf(item) {
+  function posterCandidates(item) {
     var inner = unwrapItem(item);
     var fields = [
       'poster', 'poster_url', 'posterUrl', 'vertical_image', 'verticalImage',
@@ -1571,24 +1671,24 @@
       'thumb', 'thumbnail', 'img', 'photo', 'picture', 'backdrop', 'backdrop_url', 'banner', 'banner_url'
     ];
     var list = [inner];
-    var i, j, src, url;
+    var out = [];
+    var seen = {};
+    var i, j, src;
     if (item && inner !== item) list.push(item);
     for (i = 0; i < list.length; i += 1) {
       src = list[i];
       if (!src || typeof src !== 'object') continue;
-      url = pickImage(src.images, 'vertical', ['medium', 'standard', 'default', 'high']);
-      if (url) return url;
+      collectImageCandidates(src.images, 'vertical', ['medium', 'standard', 'default', 'high'], out, seen);
       for (j = 0; j < fields.length; j += 1) {
         if (src[fields[j]] !== undefined && src[fields[j]] !== null) {
-          url = imageUrl(src[fields[j]]);
-          if (url) return url;
+          pushRawCandidate(out, seen, src[fields[j]]);
         }
       }
     }
-    return null;
+    return out;
   }
 
-  function backdropOf(item) {
+  function backdropCandidates(item) {
     var inner = unwrapItem(item);
     var fields = [
       'banner', 'banner_url', 'bannerUrl', 'backdrop', 'backdrop_url', 'backdropUrl',
@@ -1596,21 +1696,31 @@
       'cover', 'cover_url', 'image_url', 'imageUrl', 'image', 'poster', 'poster_url'
     ];
     var list = [inner];
-    var i, j, src, url;
+    var out = [];
+    var seen = {};
+    var i, j, src;
     if (item && inner !== item) list.push(item);
     for (i = 0; i < list.length; i += 1) {
       src = list[i];
       if (!src || typeof src !== 'object') continue;
-      url = pickImage(src.images, 'horizontal', ['high', 'large', 'original', 'default', 'medium', 'standard']);
-      if (url) return url;
+      collectImageCandidates(src.images, 'horizontal', ['high', 'large', 'original', 'default', 'medium', 'standard'], out, seen);
       for (j = 0; j < fields.length; j += 1) {
         if (src[fields[j]] !== undefined && src[fields[j]] !== null) {
-          url = imageUrl(src[fields[j]]);
-          if (url) return url;
+          pushRawCandidate(out, seen, src[fields[j]]);
         }
       }
     }
-    return null;
+    return out;
+  }
+
+  function posterOf(item) {
+    var list = posterCandidates(item);
+    return list.length ? imageUrl(list[0]) : null;
+  }
+
+  function backdropOf(item) {
+    var list = backdropCandidates(item);
+    return list.length ? imageUrl(list[0]) : null;
   }
 
   function itemsOf(group) {
@@ -1618,6 +1728,7 @@
     if (Array.isArray(group.items)) return group.items;
     if (Array.isArray(group.movies)) return group.movies;
     if (Array.isArray(group.banners)) return group.banners;
+    if (Array.isArray(group.promotions)) return group.promotions;
     if (Array.isArray(group.data)) return group.data;
     if (Array.isArray(group.list)) return group.list;
     return [];
@@ -1653,7 +1764,7 @@
     var movie = unwrapItem(item);
     var card = doc.createElement('button');
     var poster = el('div', 'poster');
-    var image = posterOf(movie) || posterOf(item);
+    var candidates = posterCandidates(item);
     var name = el('span', 'name', movieTitle(movie));
     var badge;
     var progress;
@@ -1662,7 +1773,7 @@
     card.className = 'card focusable' + (options.continueWatching ? ' continue' : '');
     card.setAttribute('type', 'button');
     var img = doc.createElement('img');
-    setContentImage(img, image);
+    setContentImage(img, candidates);
     poster.appendChild(img);
     if (movie && movie.age) {
       badge = el('span', 'badge', movie.age + '+');
@@ -1715,13 +1826,13 @@
       var rawItems = itemsOf(group);
       var items = rawItems.filter(isPlayable).map(unwrapItem);
       var block;
-      if (!items.length) return;
-      if (!firstFallback) firstFallback = items[0];
       if (!heroGroup && isHeroGroup(group)) {
         heroGroup = group;
-        heroItem = items[0];
+        heroItem = items[0] || (rawItems[0] ? unwrapItem(rawItems[0]) : null);
         return;
       }
+      if (!items.length) return;
+      if (!firstFallback) firstFallback = items[0];
       block = buildRowBlock(group);
       if (block) rows.appendChild(block);
     });
@@ -1736,10 +1847,12 @@
       setHidden(hero, true);
       return;
     }
-    var image = backdropOf(movie) || posterOf(movie) || backdropOf(item) || posterOf(item);
+    var candidates = backdropCandidates(item);
+    var fallbackPosters = posterCandidates(item);
+    var merged = buildRawCandidateList(candidates.concat(fallbackPosters));
     var meta = [];
     state.home.hero = movie;
-    setContentImage($('heroImage'), image);
+    setContentImage($('heroImage'), merged);
     var duration = durationText(movie.duration);
     var genres = genreNames(movie.genres);
     if (movie.age) meta.push(movie.age + '+');
@@ -2089,17 +2202,27 @@
       value: state.search.text,
       maxLength: 40,
       onDone: function (value) {
-        state.search.text = value;
-        $('searchValue').textContent = value;
-        $('searchValue').classList.remove('placeholder');
-        runSearch();
+        var clean = String(value || '').replace(/^\s+|\s+$/g, '');
+        state.search.text = clean;
+        if (clean) {
+          $('searchValue').textContent = clean;
+          $('searchValue').classList.remove('placeholder');
+          runSearch();
+        } else {
+          $('searchValue').textContent = 'Нажмите OK и введите название';
+          $('searchValue').classList.add('placeholder');
+          toast('Введите название для поиска');
+        }
       }
     });
   }
 
   function runSearch() {
-    var text = state.search.text;
+    var text = String(state.search.text || '').replace(/^\s+|\s+$/g, '');
     if (!text) return;
+    state.search.text = text;
+    state.search.gen += 1;
+    state.search.loading = false;
     state.search.page = 1;
     state.search.items = [];
     state.search.done = false;
@@ -2110,10 +2233,16 @@
 
   function searchPage() {
     var search = state.search;
+    var gen;
     if (search.loading || search.done) return;
     search.loading = true;
+    gen = search.gen;
     toast('Ищем «' + search.text + '»…', 1500);
     Belet.search(search.text, search.page, function (err, list) {
+      var items;
+      var target;
+      var active;
+      if (gen !== state.search.gen) return;
       search.loading = false;
       if (err) {
         if (handleAuthError(err)) return;
@@ -2122,7 +2251,7 @@
         $('searchEmpty').querySelector('p').textContent = describeError(err);
         return;
       }
-      var items = flattenList(list).filter(isPlayable);
+      items = flattenList(list).filter(isPlayable);
       if (!items.length) search.done = true;
       else search.page += 1;
       search.items = search.items.concat(items);
@@ -2130,12 +2259,13 @@
       if (!search.items.length) {
         $('searchEmpty').classList.remove('hidden');
         $('searchEmpty').querySelector('h2').textContent = 'Ничего не найдено';
-        $('searchEmpty').querySelector('p').textContent = 'Попробуйте другое название.';
+        $('searchEmpty').querySelector('p').textContent = 'Попробуйте другое название (на русском или латинице).';
       }
       if (search.items.length) {
-        var target = $('searchGrid').querySelector('.card');
+        target = $('searchGrid').querySelector('.card');
         state.mainFocus = target;
-        if (!doc.activeElement || doc.activeElement === $('searchField')) {
+        active = doc.activeElement;
+        if (!active || active === doc.body || active === $('searchField') || closest(active, '#keyboard')) {
           target.focus();
           reveal(target);
         }
@@ -2145,16 +2275,27 @@
 
   function flattenList(list) {
     var out = [];
+    var hasTypedSections = false;
+    var typedSearch = [];
+    var other = [];
     (list || []).forEach(function (item) {
-      if (!item) return;
-      if (Array.isArray(item.movies)) {
-        item.movies.forEach(function (movie) { if (movie) out.push(movie); });
-      } else if (Array.isArray(item.items)) {
-        item.items.forEach(function (movie) { if (movie) out.push(movie); });
-      } else if (item.id) {
+      var arr;
+      var t;
+      if (!item || typeof item !== 'object') return;
+      arr = item.result || item.movies || item.items || item.data || item.films;
+      if (Array.isArray(arr)) {
+        hasTypedSections = true;
+        t = typeof item.type === 'string' ? item.type.toLowerCase() : '';
+        if (t === 'search' || t === 'top_search') {
+          arr.forEach(function (movie) { if (movie) typedSearch.push(movie); });
+        } else if (t !== 'history') {
+          arr.forEach(function (movie) { if (movie) other.push(movie); });
+        }
+      } else if (item.id || item.movie || item.item) {
         out.push(item);
       }
     });
+    if (hasTypedSections) return typedSearch.length ? typedSearch : other;
     return out;
   }
 
@@ -2166,21 +2307,23 @@
 
   function openDetail(item) {
     var movie = unwrapItem(item);
-    state.detail = { movie: movie, seasons: [], seasonId: null, episodes: [], loadingEpisodes: false };
+    var detail = { movie: movie, seasons: [], seasonId: null, episodes: [], loadingEpisodes: false };
+    state.detail = detail;
     screen('detail');
     $('episodesSection').classList.add('hidden');
     $('detailTitle').textContent = movieTitle(movie);
     $('detailMeta').textContent = '';
     $('detailGenres').textContent = '';
     $('detailText').textContent = 'Загружаем описание…';
-    setContentImage($('detailPoster'), posterOf(movie));
-    setContentImage($('detailBackdropImg'), backdropOf(movie) || posterOf(movie));
+    setContentImage($('detailPoster'), posterCandidates(item));
+    setContentImage($('detailBackdropImg'), buildRawCandidateList(backdropCandidates(item).concat(posterCandidates(item))));
     setHidden($('detailTrailer'), true);
     state.mainFocus = $('detailPlay');
     $('detailPlay').textContent = 'Смотреть';
     setTimeout(function () { $('detailPlay').focus(); }, 30);
 
     Belet.movie(movie.id, function (err, fullMovie) {
+      if (state.detail !== detail) return;
       if (err) {
         if (handleAuthError(err)) return;
         $('detailText').textContent = describeError(err);
@@ -2194,13 +2337,15 @@
     var detail = state.detail;
     var prevMovie = detail && detail.movie;
     var meta = [];
-    var poster = posterOf(movie) || posterOf(prevMovie);
-    var backdrop = backdropOf(movie) || posterOf(movie) || backdropOf(prevMovie) || posterOf(prevMovie);
+    var posterList = buildRawCandidateList(posterCandidates(movie).concat(posterCandidates(prevMovie)));
+    var backdropList = buildRawCandidateList(
+      backdropCandidates(movie).concat(posterCandidates(movie)).concat(backdropCandidates(prevMovie)).concat(posterCandidates(prevMovie))
+    );
     var watch = Number(movie.watch_time || 0);
     detail.movie = movie;
 
-    setContentImage($('detailPoster'), poster);
-    setContentImage($('detailBackdropImg'), backdrop);
+    setContentImage($('detailPoster'), posterList);
+    setContentImage($('detailBackdropImg'), backdropList);
     $('detailTitle').textContent = movieTitle(movie);
     var year = movie.year || (movie.release_date ? String(movie.release_date).slice(0, 4) : '');
     var duration = durationText(movie.duration);
@@ -3439,10 +3584,16 @@
       if (isBack(key)) { closeInput(); handled = true; }
       else if (!hasClass($('numpad'), 'hidden') && key >= 48 && key <= 57) { inputAppend(String(key - 48)); handled = true; }
       else if (!hasClass($('numpad'), 'hidden') && key >= 96 && key <= 105) { inputAppend(String(key - 96)); handled = true; }
-      else if (!hasClass($('numpad'), 'hidden') && key === 8) { inputDelete(); handled = true; }
+      else if (key === 8 || (!hasClass($('keyboard'), 'hidden') && key === 46)) { inputDelete(); handled = true; }
       else if (key === KEYS.LEFT || key === KEYS.RIGHT || key === KEYS.UP || key === KEYS.DOWN) handled = move({
         37: 'left', 38: 'up', 39: 'right', 40: 'down'
       }[key]);
+      else if (!hasClass($('keyboard'), 'hidden') && key !== KEYS.OK &&
+               !event.ctrlKey && !event.metaKey && !event.altKey &&
+               typeof event.key === 'string' && event.key.length === 1) {
+        inputAppend(event.key);
+        handled = true;
+      }
       if (handled) event.preventDefault();
       return;
     }
@@ -3605,7 +3756,7 @@
         return;
       }
       if (fromClockSync) {
-        if ($('rows').children.length) {
+        if ($('rows').children.length || !hasClass($('hero'), 'hidden')) {
           refreshVisibleImages();
           return;
         }
@@ -3681,7 +3832,7 @@
     var nowSynced = date.getFullYear() >= 2026;
     var displayDate = date;
     var tz;
-    if (nowSynced && isClockBypassed() && !isBypassModeForced()) {
+    if (nowSynced && isClockBypassed() && !isBypassModeForced() && !clockProxyState.keepForMedia) {
       if (window.Belet && Belet.setClockProxy) Belet.setClockProxy('');
       clockProxyState.base = '';
       clockProxyState.diag = 'не требуется (часы ТВ синхронизировались)';

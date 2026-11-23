@@ -1018,16 +1018,50 @@ assert(ids.browseMore.classList.contains('hidden'), 'paging stops on an empty pa
 fireKey(10009);
 assert(!ids.home.classList.contains('hidden'), 'back leaves the catalog');
 
-/* 10. Search through the TV keyboard */
+/* 10. Search through the TV keyboard (RU/EN toggle, physical keys, Belet SearchRespDTO, v1 fallback) */
 click(ids.nav.querySelectorAll('.nav-item')[2]);
 assert(!ids.search.classList.contains('hidden'));
 click(ids.searchField);
 assert(!ids.keyboard.classList.contains('hidden'));
+assert.strictEqual(ids.keyboardKeys.querySelectorAll('.kb-row').length, 4, 'keyboard renders 4 non-empty rows');
+route('https://film-search.belet.me/api/v2/search', 200, [
+  { type: 'history', result: [{ id: 999, type_id: 1, name: 'Old History Noise' }] },
+  { type: 'search', result: [{
+    id: 801, type_id: 1, name: 'Дюна',
+    images: { vertical: { medium: { url: 'https://img.belet.me/801.jpg' } } }
+  }] }
+]);
 ['д', 'ю', 'н', 'а'].forEach(letter => click(byText(ids.keyboardKeys, letter.toUpperCase())));
 click(ids.kbDone);
 const searchCall = calls.find(c => c.url.indexOf('/api/v2/search') >= 0);
 assert(searchCall && searchCall.method === 'POST');
-assert(searchCall.body.indexOf('text=') >= 0);
+assert(searchCall.body.indexOf('text=') >= 0, 'search sends text parameter');
+assert(searchCall.body.indexOf('type=search') >= 0, 'search sends type=search required by Belet v2 API');
+assert(searchCall.body.indexOf('page=1') >= 0, 'search sends page parameter');
+assert.strictEqual(ids.searchGrid.querySelectorAll('.card').length, 1, 'SearchRespDTO history noise excluded, search match rendered');
+assert(ids.searchGrid.textContent.indexOf('Дюна') >= 0, 'rendered search card shows title');
+assert.strictEqual(document.activeElement, ids.searchGrid.querySelector('.card'), 'focus moves to first search result card');
+
+// Switch keyboard to Latin QWERTY + physical keydown + test /api/v1/search fallback
+click(ids.searchField);
+assert(!ids.keyboard.classList.contains('hidden'));
+click(ids.kbClear);
+click(byText(ids.keyboardKeys, 'ABC'));
+assert(byText(ids.keyboardKeys, 'Q'), 'Latin QWERTY layout rendered after ABC toggle');
+assert(byText(ids.keyboardKeys, 'АБВ'), 'toggle button switches label to АБВ');
+click(byText(ids.keyboardKeys, 'D'));
+click(byText(ids.keyboardKeys, 'U'));
+click(byText(ids.keyboardKeys, 'N'));
+document.dispatch('keydown', { keyCode: 69, key: 'e', preventDefault() {} });
+assert.strictEqual(ids.keyboardValue.textContent, 'dune', 'physical keydown appends inside keyboard');
+route('https://film-search.belet.me/api/v2/search', 500, { status: 'error' });
+route('https://search.belet.me/api/v2/search', 404, { status: 'error' });
+route('https://film-search.belet.me/api/v1/search', 200, {
+  result: [{ id: 802, type_id: 1, name: 'Dune Part Two' }]
+});
+click(ids.kbDone);
+assert.strictEqual(ids.searchGrid.querySelectorAll('.card').length, 1, 'search v1 fallback renders result');
+assert(ids.searchGrid.textContent.indexOf('Dune Part Two') >= 0);
 
 /* 11. Profile and logout */
 click(ids.nav.querySelectorAll('.nav-item')[3]);
@@ -2168,6 +2202,106 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   assert.strictEqual(ids.detailBackdropImg.src,
     'http://127.0.0.1:18767/__proxy/img.belet.me/banners/backdrop702.jpg',
     'detailBackdropImg renders film backdrop via ClockProxy');
+})();
+
+/* 26. Direct 2026 mode recovers broken banners/posters via alternate candidates and ClockProxy fallback */
+(() => {
+  const RealDate = Date;
+  const now2026 = RealDate.UTC(2026, 10, 23, 22, 15, 0);
+  function Fake2026(arg) {
+    if (!(this instanceof Fake2026)) return new RealDate(now2026).toString();
+    return new RealDate(arg === undefined ? now2026 : arg);
+  }
+  Fake2026.now = () => now2026;
+  Fake2026.UTC = RealDate.UTC;
+  Fake2026.parse = RealDate.parse;
+
+  buildDom();
+  store.neon_belet_samsung_session_v2 = JSON.stringify({
+    token: 'tok-26', refresh: 'ref-26', phone: '+99361000026', fingerprint: 'fp-26'
+  });
+  timers.length = 0;
+  calls.length = 0;
+
+  let svcLaunches26 = 0;
+  let tickFn = null;
+  const s26 = Object.assign({}, sandbox, {
+    document,
+    Date: Fake2026,
+    setInterval: fn => { tickFn = fn; return 1; },
+    tizen: {
+      systeminfo: { getCapability: () => '10.0' },
+      ApplicationControl: function (op) { this.operation = op; },
+      application: {
+        launchAppControl: (c, id, ok) => { svcLaunches26 += 1; if (ok) ok(); },
+        getCurrentApplication: () => ({ appInfo: { id: 'BeletFilm1.BeletClient' } })
+      },
+      time: { getCurrentDateTime: () => new RealDate(now2026), setDateTimeChangeListener: () => {} }
+    },
+    webapis: { network: { getActiveConnectionType: () => 3 } }
+  });
+  s26.window = s26;
+  s26.global = s26;
+  s26.self = s26;
+  vm.createContext(s26);
+
+  route('https://beletapis.com/api/v1/users/device', 200, { msg: 'ok' });
+  route('https://homepage.belet.me/api/v2/home_page', 200, {
+    status: 'ok',
+    result: [
+      {
+        id: 1, title: 'Баннеры', source: 'header', items: [
+          {
+            id: 900, type_id: 1, name: 'Hero Multi 900',
+            images: {
+              horizontal_with_name: { default: { url: 'https://img.belet.me/hero_bad.webp' } },
+              horizontal_without_name: { default: { url: 'https://img.belet.me/hero_clean.webp' } }
+            }
+          }
+        ]
+      },
+      {
+        id: 2, title: 'Топ', source: 'top', items: [
+          { id: 901, type_id: 1, name: 'Poster 901',
+            images: { vertical: { medium: { url: 'https://img.belet.me/901.jpg' } } } }
+        ]
+      }
+    ]
+  });
+  route('https://homepage.belet.me/api/v2/home_page', 200, { status: 'ok', result: [] });
+
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), s26, { filename: 'api.js' });
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), s26, { filename: 'app.js' });
+  runTimers();
+
+  assert.strictEqual(svcLaunches26, 0, '2026 auto mode boots without launching ClockProxy');
+  assert.strictEqual(ids.heroImage.src, 'https://img.belet.me/hero_bad.webp');
+  const card901 = ids.rows.querySelector('.card');
+  const card901Img = card901 && card901.querySelector('img');
+  assert.strictEqual(card901Img.src, 'https://img.belet.me/901.jpg');
+
+  // If ClockProxy responds on image error recovery, both hero and card posters upgrade through proxy
+  route('http://127.0.0.1:18767/__ping', 200, {
+    ok: true, mode: 'clock-proxy', port: 18767, sslClockYear: 2026, serverTimeMs: now2026
+  });
+  ids.heroImage.dispatch('error');
+  runTimers();
+  assert(svcLaunches26 >= 1, 'direct image error triggers ClockProxy launch for media recovery');
+  assert.strictEqual(s26.Belet.clockProxy(), 'http://127.0.0.1:18767', 'Belet switches to ClockProxy on image recovery');
+  assert.strictEqual(ids.heroImage.src, 'http://127.0.0.1:18767/__proxy/img.belet.me/hero_bad.webp',
+    'heroImage switches to proxied URL on ClockProxy recovery');
+  assert.strictEqual(card901Img.src, 'http://127.0.0.1:18767/__proxy/img.belet.me/901.jpg',
+    'card poster also upgrades to proxied URL');
+  assert(typeof tickFn === 'function', 'tickClock interval captured');
+  tickFn();
+  assert.strictEqual(s26.Belet.clockProxy(), 'http://127.0.0.1:18767',
+    '30s tickClock keeps ClockProxy active when keepForMedia is set');
+
+  // Secondary candidate fallback still advances when an image URL fails even with proxy active
+  ids.heroImage.dispatch('error');
+  runTimers();
+  assert.strictEqual(ids.heroImage.src, 'http://127.0.0.1:18767/__proxy/img.belet.me/hero_clean.webp',
+    'hero falls back to horizontal_without_name candidate when horizontal_with_name fails');
 })();
 
 assert.strictEqual(routes.length, 0, 'all queued responses were consumed: ' + JSON.stringify(routes.map(r => r.match)));

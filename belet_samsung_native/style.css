@@ -390,6 +390,7 @@ button {
 .kb-row .key { flex: 1; padding: 13px 0; font-size: 22px; }
 .kb-row .key + .key { margin-left: 8px; }
 .kb-row .key.space { flex: 3; }
+.kb-row .key.lang { flex: 1.5; }
 .pad-actions { display: flex; justify-content: flex-end; margin-top: 20px; }
 .pad-actions > * + * { margin-left: 12px; }
 

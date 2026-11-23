@@ -800,26 +800,92 @@
 
   /* ── Search ─────────────────────────────────────────────────────────── */
 
+  function isSearchSectionItem(item) {
+    if (!item || typeof item !== 'object') return false;
+    return typeof item.id === 'undefined' && (
+      Array.isArray(item.result) || Array.isArray(item.data) ||
+      Array.isArray(item.movies) || Array.isArray(item.items) ||
+      Array.isArray(item.films) || typeof item.type === 'string'
+    );
+  }
+
+  function unwrapSectionItems(section) {
+    if (!section || typeof section !== 'object') return [];
+    if (Array.isArray(section.result)) return section.result;
+    if (Array.isArray(section.data)) return section.data;
+    if (Array.isArray(section.movies)) return section.movies;
+    if (Array.isArray(section.items)) return section.items;
+    if (Array.isArray(section.films)) return section.films;
+    return [];
+  }
+
+  function searchListFrom(data, expectedType) {
+    var raw = listFrom(data);
+    var hasSections = false;
+    var exact = [];
+    var nonHistory = [];
+    var i;
+    var item;
+    var secType;
+    var items;
+    if (!raw.length) return [];
+    for (i = 0; i < raw.length; i += 1) {
+      if (isSearchSectionItem(raw[i])) {
+        hasSections = true;
+        break;
+      }
+    }
+    if (!hasSections) return raw;
+    for (i = 0; i < raw.length; i += 1) {
+      item = raw[i];
+      if (!item || typeof item !== 'object') continue;
+      secType = typeof item.type === 'string' ? item.type.toLowerCase() : '';
+      items = unwrapSectionItems(item);
+      if (!items.length) continue;
+      if (expectedType && secType === expectedType) {
+        Array.prototype.push.apply(exact, items);
+      } else if (secType !== 'history') {
+        Array.prototype.push.apply(nonHistory, items);
+      }
+    }
+    if (exact.length) return exact;
+    return nonHistory;
+  }
+
   function search(text, page, callback) {
-    page = page || 1;
-    var encoded = 'text=' + encodeURIComponent(text) + '&page=' + encodeURIComponent(page);
-    // The Android client posts a hash map (text/page/type); the web client posts a form.
-    authorized({
-      method: 'POST',
-      url: HOSTS.search + '/api/v2/search',
-      form: encoded
-    }, function (err, data) {
-      if (!err) return callback(null, listFrom(data));
-      if (err.kind === 'auth') return callback(err, null);
+    var cleanText = String(text === null || typeof text === 'undefined' ? '' : text).replace(/^\s+|\s+$/g, '');
+    var pageNum = page || 1;
+    var searchType = cleanText ? 'search' : 'top_search';
+    var formV2 = (cleanText ? 'text=' + encodeURIComponent(cleanText) + '&' : '') +
+      'page=' + encodeURIComponent(pageNum) + '&type=' + encodeURIComponent(searchType);
+    var formV1 = (cleanText ? 'text=' + encodeURIComponent(cleanText) + '&' : '') +
+      'page=' + encodeURIComponent(pageNum);
+    var attempts = [
+      { url: HOSTS.search + '/api/v2/search', form: formV2 },
+      { url: HOSTS.searchWeb + '/api/v2/search', form: formV2 },
+      { url: HOSTS.search + '/api/v1/search', form: formV1 },
+      { url: HOSTS.searchWeb + '/api/v1/search', form: formV1 }
+    ];
+    var firstErr = null;
+    function tryAttempt(index) {
+      if (index >= attempts.length) return callback(firstErr, null);
+      // The Android client posts text/page/type form-encoded to film-search.belet.me/api/v2/search;
+      // fall back to search.belet.me and /api/v1/search when v2 returns HTTP or network failure.
       authorized({
         method: 'POST',
-        url: HOSTS.searchWeb + '/api/v2/search',
-        form: encoded
-      }, function (webErr, webData) {
-        if (!webErr) return callback(null, listFrom(webData));
-        callback(err, null);
+        url: attempts[index].url,
+        form: attempts[index].form,
+        timeout: 12000
+      }, function (err, data) {
+        if (err) {
+          if (!firstErr) firstErr = err;
+          if (err.kind === 'auth') return callback(err, null);
+          return tryAttempt(index + 1);
+        }
+        callback(null, searchListFrom(data, searchType));
       });
-    });
+    }
+    tryAttempt(0);
   }
 
   /* ── Profile ────────────────────────────────────────────────────────── */
