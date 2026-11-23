@@ -516,6 +516,14 @@ def test_router_snippets_and_reachability_diagnostics(monkeypatch):
     assert diag['best_public_dns'] == '1.1.1.1'
     assert '1.1.1.1' in diag['recommendation']
 
+    # Verify default resolver list covers CIS/AdGuard/OpenDNS resolvers too
+    seen_default = []
+    monkeypatch.setattr(sto, 'resolve_ipv4_via_upstream', lambda d, ups, **kw: seen_default.extend(ups) or (_ for _ in ()).throw(OSError('blocked')))
+    diag_def = sto.diagnose_samsung_time_reachability()
+    assert diag_def['any_direct_working'] is False
+    for pub in ('1.1.1.1', '8.8.8.8', '9.9.9.9', '77.88.8.8', '94.140.14.14', '208.67.222.222'):
+        assert pub in seen_default
+
 
 def test_deploy_samsung_time_remote_linux_openwrt_mikrotik(monkeypatch):
     import paramiko
@@ -694,10 +702,20 @@ def test_api_export_deploy_and_samsung_send_text(tmp_path, monkeypatch):
         port=2222,
     )
     assert dep['ok'] is True
+    assert dep['is_private_host'] is True
+
+    dep_pub = api.deploy_samsung_time_remote(
+        host='93.184.216.34',
+        username='admin',
+        password='SUPER_SECRET_SSH_PASSWORD',
+        port=2222,
+    )
+    assert dep_pub['ok'] is True
+    assert dep_pub['is_private_host'] is False
     import os
     raw_settings = open(os.path.join(api._data_dir(), 'settings.json'), 'r', encoding='utf-8').read()
     assert 'SUPER_SECRET_SSH_PASSWORD' not in raw_settings
-    assert '192.168.1.99' in raw_settings
+    assert '93.184.216.34' in raw_settings
 
     # Verify SamsungWsClient.send_text & Api.samsung_send_text RFC-6455 wire frame formatting
     srv_sock, cli_sock = socket.socketpair()

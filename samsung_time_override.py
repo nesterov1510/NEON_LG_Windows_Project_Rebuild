@@ -1411,7 +1411,11 @@ def diagnose_samsung_time_reachability(
     http_port=80,
 ):
     """Probe whether Samsung's official time domain works directly via ISP/public DNS."""
-    probe_list = list(resolvers) if resolvers is not None else ['system', '1.1.1.1', '8.8.8.8', '9.9.9.9']
+    probe_list = (
+        list(resolvers)
+        if resolvers is not None
+        else ['system', '1.1.1.1', '8.8.8.8', '9.9.9.9', '77.88.8.8', '94.140.14.14', '208.67.222.222']
+    )
     results = []
     working_dns = []
     lines = [f'[*] Testing direct reachability of http://{domain}:{http_port}/openapi/timesync ...']
@@ -1446,13 +1450,20 @@ def diagnose_samsung_time_reachability(
     rec = working_dns[0] if working_dns else ''
     any_ok = sys_ok or bool(working_dns)
     if sys_ok:
-        summary = f'Direct Samsung server works via current network DNS! No PC needed.'
+        summary = (
+            'Direct Samsung server works via current network DNS! '
+            'Customer TV does not need a PC if their home ISP also allows time.samsungcloudsolution.com.'
+        )
     elif rec:
-        summary = f'Current network DNS failed, but {rec} works! Set TV/Router DNS = {rec} once (no PC needed).'
+        summary = (
+            f'Current ISP DNS failed, but public DNS {rec} works! '
+            f'Set TV DNS Manual = {rec} (no shop PC or VPS needed; remind customer to keep DNS = {rec} on home Wi-Fi/LAN).'
+        )
     else:
         summary = (
-            'time.samsungcloudsolution.com is blocked or unreachable in this network. '
-            'For 24/7 time without PC, deploy the standalone gateway to a Router/Linux/VPS.'
+            'time.samsungcloudsolution.com is blocked at ISP/HTTP level (1.1.1.1/8.8.8.8 cannot fix it alone). '
+            'To work at customer home without router access: deploy 24/7 gateway on ONE public-IP VPS (or public-IP Linux) '
+            'and point TV DNS to that IP, plus install Belet TV With Bypass (1970/TLS).'
         )
     lines.append(f'[i] {summary}')
     return {
@@ -2175,11 +2186,30 @@ def deploy_samsung_time_remote(
         else:
             lines.append(f'[!] Live HTTP verify note: {http_check.get("error")}')
 
-        lines.append(f'[+] Done! Set Samsung TV (or Router) DNS once to: {clean_host} — PC can now stay OFF.')
+        is_private_host = False
+        if _is_ipv4(clean_host):
+            try:
+                is_private_host = ipaddress.IPv4Address(clean_host).is_private
+            except ipaddress.AddressValueError:
+                is_private_host = False
+
+        if is_private_host:
+            lines.append(
+                f'[!] Note: {clean_host} is a private LAN IP. It works inside your service shop without Windows PC, '
+                'but when a customer takes the TV home on another network they cannot reach a private 192.168/10.x IP '
+                'unless this Linux host has a public IP (with ports 53/80 forwarded) or you deploy to a public-IP VPS.'
+            )
+        else:
+            lines.append(
+                f'[+] Public IP/host {clean_host}: any customer TV at home with DNS = {clean_host} will auto-sync time '
+                'after reboots/power-off without your PC or router access!'
+            )
+
         return {
             'ok': True,
             'platform': 'linux-systemd' if sys_out.strip() else 'linux-nohup',
             'host': clean_host,
+            'is_private_host': is_private_host,
             'dns_ip_for_tv': clean_host,
             'tv_dns_ip': clean_host,
             'dns_verified': dns_ok,
