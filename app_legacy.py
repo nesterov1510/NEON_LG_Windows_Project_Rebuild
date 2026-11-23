@@ -34,6 +34,7 @@ from PyQt5.QtWidgets import (
 
 from alemtv_app import ALEMTV_PORTALS, ALEMTV_DEFAULT_PORTAL
 from core import Api, DNS_PRESETS, resource
+from samsung_time_override import DEFAULT_SOURCE_DOMAINS as SAMSUNG_TIME_DEFAULT_SOURCES, TIME_TARGET_PRESETS
 from samsung_tv import SAMSUNG_LOCAL_SETS
 from ui_qt import (
     ConfirmDialog,
@@ -971,6 +972,90 @@ class NeonWindow(QMainWindow):
         btn.clicked.connect(self.install_local_samsung_wgt)
         local_layout.addWidget(btn)
         left.addWidget(local_card)
+
+        # Card 6: Samsung Time Domain Override (DNS + /openapi/timesync + NTP)
+        c_sam_time, stl = self._make_card('lbl_sam_time', 6)
+        self.sam_time_desc = QLabel()
+        self.sam_time_desc.setObjectName('HintLabel')
+        self.sam_time_desc.setWordWrap(True)
+        stl.addWidget(self.sam_time_desc)
+
+        self.sam_time_lbl_mode = QLabel()
+        self.sam_time_lbl_mode.setObjectName('FieldLabel')
+        stl.addWidget(self.sam_time_lbl_mode)
+        self.sam_time_mode_combo = QComboBox()
+        self.sam_time_mode_combo.addItem('NEON Time Gateway (DNS :53 + HTTP :80 + NTP :123)', 'gateway')
+        self.sam_time_mode_combo.addItem('Direct DNS A-record rewrite (DNS :53 -> Target IP)', 'dns_direct')
+        stl.addWidget(self.sam_time_mode_combo)
+
+        self.sam_time_lbl_target = QLabel()
+        self.sam_time_lbl_target.setObjectName('FieldLabel')
+        stl.addWidget(self.sam_time_lbl_target)
+        self.sam_time_preset_combo = QComboBox()
+        for p in TIME_TARGET_PRESETS:
+            self.sam_time_preset_combo.addItem(p['label_ru'], p['id'])
+        self.sam_time_preset_combo.addItem('Свой домен или IPv4...', 'custom')
+        self.sam_time_preset_combo.currentIndexChanged.connect(self._on_sam_time_preset_changed)
+        stl.addWidget(self.sam_time_preset_combo)
+
+        self.sam_time_target_input = QLineEdit('time.cloudflare.com')
+        self.sam_time_target_input.setPlaceholderText('time.cloudflare.com / pool.ntp.org / 192.168.1.50 / local')
+        self.sam_time_target_input.textChanged.connect(self._on_sam_time_target_edited)
+        stl.addWidget(self.sam_time_target_input)
+
+        self.sam_time_lbl_sources = QLabel()
+        self.sam_time_lbl_sources.setObjectName('FieldLabel')
+        stl.addWidget(self.sam_time_lbl_sources)
+        self.sam_time_sources_input = QLineEdit(', '.join(SAMSUNG_TIME_DEFAULT_SOURCES))
+        self.sam_time_sources_input.setPlaceholderText('time.samsungcloudsolution.com, time.samsungcloudsolution.net')
+        stl.addWidget(self.sam_time_sources_input)
+
+        self.sam_time_chk_check = ToggleSwitch('', checked=True)
+        self.sam_time_chk_check.lbl.setWordWrap(True)
+        stl.addWidget(self.sam_time_chk_check)
+
+        self.sam_time_lbl_upstream = QLabel()
+        self.sam_time_lbl_upstream.setObjectName('FieldLabel')
+        stl.addWidget(self.sam_time_lbl_upstream)
+        self.sam_time_upstream_input = QLineEdit()
+        self.sam_time_upstream_input.setPlaceholderText('Auto (1.1.1.1, 8.8.8.8 / NEON DNS)')
+        stl.addWidget(self.sam_time_upstream_input)
+
+        self.sam_time_dns_hint_lbl = QLabel()
+        self.sam_time_dns_hint_lbl.setStyleSheet(
+            'background:#0a181e;color:#7de8ff;border:1px solid #1e4252;border-radius:8px;'
+            'padding:6px 10px;font-family:"Consolas",monospace;font-size:11px;font-weight:bold;'
+        )
+        self.sam_time_dns_hint_lbl.setWordWrap(True)
+        stl.addWidget(self.sam_time_dns_hint_lbl)
+
+        self.sam_time_status_lbl = QLabel()
+        self.sam_time_status_lbl.setObjectName('HintLabel')
+        self.sam_time_status_lbl.setWordWrap(True)
+        stl.addWidget(self.sam_time_status_lbl)
+
+        st_btn_row = QHBoxLayout()
+        st_btn_row.setSpacing(8)
+        self.btn_sam_time_start = QPushButton()
+        self.btn_sam_time_start.setObjectName('PrimaryBtn')
+        self.btn_sam_time_start.setCursor(Qt.PointingHandCursor)
+        self.btn_sam_time_start.clicked.connect(self.start_samsung_time_override)
+        self.btn_sam_time_stop = QPushButton()
+        self.btn_sam_time_stop.setObjectName('DangerBtn')
+        self.btn_sam_time_stop.setCursor(Qt.PointingHandCursor)
+        self.btn_sam_time_stop.setEnabled(False)
+        self.btn_sam_time_stop.clicked.connect(self.stop_samsung_time_override)
+        st_btn_row.addWidget(self.btn_sam_time_start, 2)
+        st_btn_row.addWidget(self.btn_sam_time_stop, 1)
+        stl.addLayout(st_btn_row)
+
+        self.btn_sam_time_sync = QPushButton()
+        self.btn_sam_time_sync.setObjectName('NormalBtn')
+        self.btn_sam_time_sync.setCursor(Qt.PointingHandCursor)
+        self.btn_sam_time_sync.clicked.connect(self.sync_samsung_time_now)
+        stl.addWidget(self.btn_sam_time_sync)
+        left.addWidget(c_sam_time)
+
         left.addStretch(1)
 
         grid.addWidget(self._wrap_scroll(left_inner, fixed_width=428))
@@ -1738,6 +1823,49 @@ class NeonWindow(QMainWindow):
         self.btn_sam_alem_install.setText(self.t('sam_btn_alemtv_install'))
         self.btn_sam_alem_launch.setText(self.t('sam_btn_alemtv_launch'))
         self.btn_sam_alem_remove.setText(self.t('sam_btn_alemtv_remove'))
+
+        self.lbl_sam_time.setText(self.t('sam_card_time'))
+        self.sam_time_desc.setText(self.t('sam_time_desc'))
+        self.sam_time_lbl_mode.setText(self.t('sam_time_lbl_mode'))
+        cur_stm_mode = self.sam_time_mode_combo.currentData() or 'gateway'
+        self.sam_time_mode_combo.blockSignals(True)
+        self.sam_time_mode_combo.setItemText(
+            0,
+            'Шлюз времени NEON (DNS :53 + /openapi/timesync :80 + NTP :123)'
+            if self.lang == 'ru'
+            else 'NEON Time Gateway (DNS :53 + /openapi/timesync :80 + NTP :123)',
+        )
+        self.sam_time_mode_combo.setItemText(
+            1,
+            'Прямая DNS A-запись (DNS :53 → IP целевого сервера)'
+            if self.lang == 'ru'
+            else 'Direct DNS A-record rewrite (DNS :53 → Target IP)',
+        )
+        m_idx = self.sam_time_mode_combo.findData(cur_stm_mode)
+        if m_idx >= 0:
+            self.sam_time_mode_combo.setCurrentIndex(m_idx)
+        self.sam_time_mode_combo.blockSignals(False)
+        self.sam_time_lbl_target.setText(self.t('sam_time_lbl_target'))
+        cur_target_txt = self.sam_time_target_input.text().strip()
+        self.sam_time_preset_combo.blockSignals(True)
+        self.sam_time_preset_combo.clear()
+        for p in TIME_TARGET_PRESETS:
+            self.sam_time_preset_combo.addItem(p['label_ru'] if self.lang == 'ru' else p['label_en'], p['id'])
+        self.sam_time_preset_combo.addItem(
+            'Свой домен или IPv4...' if self.lang == 'ru' else 'Custom domain or IPv4...',
+            'custom',
+        )
+        p_match = self.sam_time_preset_combo.findData(cur_target_txt)
+        self.sam_time_preset_combo.setCurrentIndex(p_match if p_match >= 0 else self.sam_time_preset_combo.count() - 1)
+        self.sam_time_preset_combo.blockSignals(False)
+        self.sam_time_lbl_sources.setText(self.t('sam_time_lbl_sources'))
+        self.sam_time_chk_check.setText(self.t('sam_time_chk_check'))
+        self.sam_time_lbl_upstream.setText(self.t('sam_time_lbl_upstream'))
+        self.btn_sam_time_start.setText(self.t('sam_time_btn_start'))
+        self.btn_sam_time_stop.setText(self.t('sam_time_btn_stop'))
+        self.btn_sam_time_sync.setText(self.t('sam_time_btn_sync'))
+        self._refresh_sam_time_status()
+
         self._update_sam_host_ip_label()
 
         self.kpi_sam.lbl.setText(self.t('sam_kpi_tv'))
@@ -1864,6 +1992,21 @@ class NeonWindow(QMainWindow):
         p_idx = self.sam_port_combo.findData(saved_sam_port)
         if p_idx >= 0:
             self.sam_port_combo.setCurrentIndex(p_idx)
+        saved_st_mode = str(self.settings.get('samsung_time_mode', 'gateway') or 'gateway')
+        stm_idx = self.sam_time_mode_combo.findData(saved_st_mode)
+        if stm_idx >= 0:
+            self.sam_time_mode_combo.setCurrentIndex(stm_idx)
+        saved_st_target = str(self.settings.get('samsung_time_target', 'time.cloudflare.com') or 'time.cloudflare.com')
+        self.sam_time_target_input.blockSignals(True)
+        self.sam_time_target_input.setText(saved_st_target)
+        self.sam_time_target_input.blockSignals(False)
+        self._on_sam_time_target_edited(saved_st_target)
+        self.sam_time_sources_input.setText(
+            str(self.settings.get('samsung_time_sources') or ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES))
+        )
+        self.sam_time_chk_check.setChecked(bool(self.settings.get('samsung_time_intercept_check', True)))
+        self.sam_time_upstream_input.setText(str(self.settings.get('samsung_time_upstream_dns', '') or ''))
+        self._refresh_sam_time_status()
         self.hs_ssid.setText(self.settings.get('hotspot_ssid', 'NEON-NET') or 'NEON-NET')
         self._apply_dns_ui_state(
             self.settings.get('dns_mode', 'auto'),
@@ -2204,6 +2347,16 @@ class NeonWindow(QMainWindow):
                 self.vpn_state = new_state
                 self._last_share_sig = new_share
                 self._sync_status_badges()
+        except Exception:
+            pass
+
+        try:
+            srv = getattr(self.api, '_samsung_time_server', None)
+            if srv is not None and getattr(srv, '_running', False):
+                tick = getattr(self, '_sam_time_tick', 0) + 1
+                self._sam_time_tick = tick
+                if tick % 12 == 0:
+                    self._refresh_sam_time_status(srv.get_status())
         except Exception:
             pass
 
@@ -2862,6 +3015,120 @@ class NeonWindow(QMainWindow):
         except Exception:
             pc_ip = '192.168.1.x'
         self.sam_host_ip_lbl.setText(self.t('sam_belet_host_prefix') + pc_ip)
+        if hasattr(self, 'sam_time_dns_hint_lbl'):
+            self.sam_time_dns_hint_lbl.setText(self.t('sam_time_dns_prefix') + pc_ip)
+
+    def _on_sam_time_preset_changed(self):
+        val = self.sam_time_preset_combo.currentData()
+        if val and val != 'custom':
+            self.sam_time_target_input.blockSignals(True)
+            self.sam_time_target_input.setText(str(val))
+            self.sam_time_target_input.blockSignals(False)
+        elif val == 'custom':
+            self.sam_time_target_input.setFocus()
+
+    def _on_sam_time_target_edited(self, text):
+        clean = str(text or '').strip()
+        idx = self.sam_time_preset_combo.findData(clean)
+        self.sam_time_preset_combo.blockSignals(True)
+        self.sam_time_preset_combo.setCurrentIndex(idx if idx >= 0 else self.sam_time_preset_combo.count() - 1)
+        self.sam_time_preset_combo.blockSignals(False)
+
+    def _refresh_sam_time_status(self, st=None):
+        if not hasattr(self, 'sam_time_status_lbl'):
+            return
+        try:
+            st = st or self.api.get_samsung_time_status(self.sam_ip.text().strip())
+        except Exception:
+            return
+        running = bool(st.get('running'))
+        pc_ip = st.get('pc_ip') or '192.168.1.x'
+        if hasattr(self, 'sam_time_dns_hint_lbl'):
+            self.sam_time_dns_hint_lbl.setText(self.t('sam_time_dns_prefix') + pc_ip)
+        self.btn_sam_time_stop.setEnabled(running)
+        if running:
+            stats = st.get('stats') or {}
+            dns_hits = stats.get('dns_overridden', 0)
+            http_hits = stats.get('http_timesync', 0)
+            chk_hits = stats.get('http_check', 0)
+            ntp_hits = stats.get('ntp_hits', 0)
+            off = st.get('offset_ms', 0)
+            method = st.get('sync_method') or st.get('mode')
+            ports_txt = f"DNS:{st.get('dns_port') or 53}"
+            if st.get('http_port'):
+                ports_txt += f" · HTTP:{st.get('http_port')}"
+            if st.get('ntp_port'):
+                ports_txt += f" · NTP:{st.get('ntp_port')}"
+            self.sam_time_status_lbl.setStyleSheet('color:#5ef2a0;font-weight:bold;')
+            self.sam_time_status_lbl.setText(
+                f"{self.t('sam_time_status_active')} ({ports_txt} | {method} | {off:+d}ms) · "
+                f"DNS:{dns_hits} · timesync:{http_hits} · check:{chk_hits} · NTP:{ntp_hits}"
+            )
+        else:
+            self.sam_time_status_lbl.setStyleSheet('')
+            self.sam_time_status_lbl.setText(self.t('sam_time_status_idle'))
+
+    def start_samsung_time_override(self):
+        target = self.sam_time_target_input.text().strip()
+        mode = self.sam_time_mode_combo.currentData() or 'gateway'
+        sources = self.sam_time_sources_input.text().strip()
+        chk = self.sam_time_chk_check.isChecked()
+        upstream = self.sam_time_upstream_input.text().strip()
+        tv_ip = self.sam_ip.text().strip()
+        self.log(f'$ start samsung_time_override mode={mode} target={target}')
+
+        def done(r):
+            self._refresh_sam_time_status(r if r.get('ok') else None)
+            if r.get('ok'):
+                self.toast.show_toast(
+                    'Перехват времени Samsung запущен! Укажите DNS ПК на ТВ.'
+                    if self.lang == 'ru'
+                    else 'Samsung Time Override active! Set TV DNS to PC IP.',
+                    'info',
+                )
+
+        self._run_async(
+            'sam',
+            lambda: self.api.start_samsung_time_override(
+                target=target,
+                mode=mode,
+                source_domains=sources,
+                intercept_check=chk,
+                upstream_dns=upstream,
+                tv_ip=tv_ip,
+            ),
+            done,
+        )
+
+    def stop_samsung_time_override(self):
+        self.log('$ stop samsung_time_override')
+
+        def done(r):
+            self._refresh_sam_time_status(r)
+            if r.get('ok'):
+                self.toast.show_toast(
+                    'Перехват времени Samsung остановлен.' if self.lang == 'ru' else 'Samsung Time Override stopped.',
+                    'info',
+                )
+
+        self._run_async('sam', self.api.stop_samsung_time_override, done)
+
+    def sync_samsung_time_now(self):
+        target = self.sam_time_target_input.text().strip()
+        self.log(f'$ sync samsung_time_now target={target}')
+
+        def done(r):
+            if r.get('status'):
+                self._refresh_sam_time_status(r['status'])
+            if r.get('ok'):
+                self.toast.show_toast(
+                    f"Время синхронизировано ({r.get('offset_ms', 0):+d} ms)"
+                    if self.lang == 'ru'
+                    else f"Time synced ({r.get('offset_ms', 0):+d} ms)",
+                    'info',
+                )
+
+        self._run_async('sam', lambda: self.api.sync_samsung_time_now(target=target), done)
 
     def check_samsung_sdb(self):
         ip = self.sam_ip.text().strip()

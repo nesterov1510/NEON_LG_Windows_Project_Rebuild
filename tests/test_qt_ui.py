@@ -367,6 +367,8 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
         'ethAdapter', 'startEthernetShare()', 'stopEthernetShare()',
         'dnsPreset', 'dnsPrimary', 'dnsSecondary', 'dnsApplyUplink', 'applySharingDns()', 'resetSharingDns()',
         'alemPortal', 'samAlemPortal', 'installAlem()', 'installSamAlem()',
+        'samTimeMode', 'samTimePreset', 'samTimeTarget', 'samTimeSources',
+        'samTimeChkCheck', 'samTimeUpstream', 'startSamTimeOverride()', 'stopSamTimeOverride()', 'syncSamTimeNow()',
     ):
         assert token in ui_html
 
@@ -377,6 +379,53 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     assert win.sam_alem_portal_combo is not None
     assert win.sam_alem_portal_combo.count() >= 7
     assert win.btn_sam_alem_install is not None
+
+    # Check Samsung Time Domain Override card widgets & start/stop flow
+    assert win.sam_time_mode_combo.count() == 2
+    assert win.sam_time_preset_combo.count() >= 6
+    assert win.sam_time_target_input.text() == 'time.cloudflare.com'
+    win.sam_time_target_input.setText('pool.ntp.org')
+    qt_app.processEvents()
+    assert win.sam_time_preset_combo.currentData() == 'pool.ntp.org'
+    win.sam_time_target_input.setText('my-ntp.example.com')
+    qt_app.processEvents()
+    assert win.sam_time_preset_combo.currentData() == 'custom'
+    with mock.patch.object(api, 'start_samsung_time_override', return_value={
+        'ok': True,
+        'running': True,
+        'mode': 'gateway',
+        'target': 'my-ntp.example.com',
+        'pc_ip': '192.168.1.45',
+        'dns_port': 53,
+        'http_port': 80,
+        'ntp_port': 123,
+        'offset_ms': 15,
+        'sync_method': 'SNTP :123',
+        'stats': {'dns_overridden': 2, 'http_timesync': 1, 'http_check': 1, 'ntp_hits': 0},
+        'output': '[+] Samsung Time Override ACTIVE',
+    }) as m_st_start:
+        win.start_samsung_time_override()
+        deadline = __import__('time').time() + 2.0
+        while win.sam_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_st_start.assert_called_once()
+        assert win.btn_sam_time_stop.isEnabled() is True
+        assert 'my-ntp.example.com' in win.sam_term.edit.toPlainText() or 'ACTIVE' in win.sam_time_status_lbl.text()
+
+    with mock.patch.object(api, 'stop_samsung_time_override', return_value={
+        'ok': True,
+        'running': False,
+        'pc_ip': '192.168.1.45',
+        'output': '[+] Samsung Time Override stopped.',
+    }) as m_st_stop:
+        win.stop_samsung_time_override()
+        deadline = __import__('time').time() + 2.0
+        while win.sam_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_st_stop.assert_called_once()
+        assert win.btn_sam_time_stop.isEnabled() is False
 
     win._force_exit = True
     win.close()

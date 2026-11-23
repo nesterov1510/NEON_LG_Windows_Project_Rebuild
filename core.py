@@ -52,6 +52,14 @@ from samsung_tizen import (
     sign_wgt_bytes,
     verify_wgt_signatures,
 )
+from samsung_time_override import (
+    DEFAULT_SOURCE_DOMAINS as SAMSUNG_TIME_DEFAULT_SOURCES,
+    SamsungTimeOverrideServer,
+    normalize_time_target as normalize_samsung_time_target,
+    parse_source_domains as parse_samsung_source_domains,
+    parse_upstream_dns as parse_samsung_upstream_dns,
+    sync_clock_from_target as sync_samsung_clock_from_target,
+)
 from alemtv_app import (
     ALEMTV_APP_ID,
     ALEMTV_DEFAULT_PORTAL,
@@ -117,6 +125,7 @@ class Api:
         self._sam_logs = []
         self._sam_log_lock = threading.Lock()
         self._samsung_auth_stop = threading.Event()
+        self._samsung_time_server = SamsungTimeOverrideServer(log_cb=self._sam_log)
         self._logger = self._setup_logger()
 
     def _data_dir(self):
@@ -165,6 +174,11 @@ class Api:
             'samsung_ip': '192.168.1.101',
             'samsung_port': 'auto',
             'samsung_tokens': {},
+            'samsung_time_mode': 'gateway',
+            'samsung_time_target': 'time.cloudflare.com',
+            'samsung_time_sources': ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES),
+            'samsung_time_intercept_check': True,
+            'samsung_time_upstream_dns': '',
         }
         try:
             with open(self._settings_path(), 'r', encoding='utf-8') as f:
@@ -3287,6 +3301,10 @@ class Api:
 
         self._cleanup_auth_file()
         self.cancel_samsung_auth()
+        try:
+            self._samsung_time_server.stop()
+        except Exception:
+            pass
         self.disconnect_tv()
         self.disconnect_lg_remote()
         self.disconnect_samsung()
@@ -4340,3 +4358,129 @@ class Api:
             }
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': f'[!] Uninstall failed: {exc}'}
+
+    def _effective_samsung_time_upstream(self, upstream_dns=None):
+        raw = str(upstream_dns or '').strip()
+        if raw:
+            return parse_samsung_upstream_dns(raw)
+        cfg = self._get_dns_config_from_settings()
+        if cfg.get('servers'):
+            return parse_samsung_upstream_dns(cfg['servers'])
+        return parse_samsung_upstream_dns(None)
+
+    def get_samsung_time_status(self, tv_ip=None):
+        s = self.load_settings()
+        target_tv = str(tv_ip or '').strip() or self.samsung_ip or str(s.get('samsung_ip') or '192.168.1.101')
+        st = self._samsung_time_server.get_status()
+        if not st.get('running'):
+            st['mode'] = str(s.get('samsung_time_mode', 'gateway') or 'gateway')
+            st['target'] = str(s.get('samsung_time_target', 'time.cloudflare.com') or 'time.cloudflare.com')
+            st['sources_text'] = str(s.get('samsung_time_sources') or ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES))
+            st['intercept_check'] = bool(s.get('samsung_time_intercept_check', True))
+            st['upstream_dns_text'] = str(s.get('samsung_time_upstream_dns', '') or '')
+            st['pc_ip'] = _tizen_local_ip(target_tv)
+        else:
+            st['sources_text'] = ', '.join(
+                d for d in st.get('source_domains', [])
+                if d not in ('cdn.samsungcloudsolution.com', 'cdn.samsungcloudsolution.net')
+            ) or ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES)
+            st['upstream_dns_text'] = str(s.get('samsung_time_upstream_dns', '') or '')
+        return st
+
+    def save_samsung_time_settings(
+        self,
+        target=None,
+        mode=None,
+        source_domains=None,
+        intercept_check=None,
+        upstream_dns=None,
+    ):
+        s = self.load_settings()
+        clean_mode = 'dns_direct' if str(mode or s.get('samsung_time_mode') or 'gateway').strip().lower() == 'dns_direct' else 'gateway'
+        tgt_raw = str(target if target is not None else s.get('samsung_time_target') or 'time.cloudflare.com').strip()
+        spec = normalize_samsung_time_target(tgt_raw)
+        if clean_mode == 'dns_direct' and spec['is_local']:
+            raise ValueError('Direct DNS A-record mode needs a remote domain or IPv4 server (or use NEON Time Gateway).')
+        src_raw = source_domains if source_domains is not None else s.get('samsung_time_sources')
+        chk = bool(s.get('samsung_time_intercept_check', True) if intercept_check is None else intercept_check)
+        parsed_sources = parse_samsung_source_domains(src_raw, intercept_check=chk)
+        if spec['host'] in parsed_sources:
+            raise ValueError(f'Target "{spec["host"]}" cannot be inside Samsung intercepted source domains.')
+        user_sources_text = ', '.join(
+            d for d in parsed_sources
+            if d not in ('cdn.samsungcloudsolution.com', 'cdn.samsungcloudsolution.net')
+        ) or ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES)
+        up_raw = str(s.get('samsung_time_upstream_dns', '') if upstream_dns is None else upstream_dns).strip()
+        self.save_settings({
+            'samsung_time_mode': clean_mode,
+            'samsung_time_target': spec['raw'],
+            'samsung_time_sources': user_sources_text,
+            'samsung_time_intercept_check': chk,
+            'samsung_time_upstream_dns': up_raw,
+        })
+        return {
+            'mode': clean_mode,
+            'target': spec['raw'],
+            'source_domains': user_sources_text,
+            'intercept_check': chk,
+            'upstream_dns': up_raw,
+        }
+
+    def start_samsung_time_override(
+        self,
+        target=None,
+        mode=None,
+        source_domains=None,
+        intercept_check=True,
+        upstream_dns=None,
+        tv_ip=None,
+    ):
+        try:
+            saved = self.save_samsung_time_settings(
+                target=target,
+                mode=mode,
+                source_domains=source_domains,
+                intercept_check=intercept_check,
+                upstream_dns=upstream_dns,
+            )
+            eff_upstreams = self._effective_samsung_time_upstream(saved['upstream_dns'])
+            clean_tv_ip = str(tv_ip or '').strip() or self.samsung_ip or str(self.load_settings().get('samsung_ip') or '192.168.1.101')
+            res = self._samsung_time_server.start(
+                target=saved['target'],
+                mode=saved['mode'],
+                source_domains=saved['source_domains'],
+                intercept_check=saved['intercept_check'],
+                upstream_dns=eff_upstreams,
+                tv_ip=clean_tv_ip,
+            )
+            res['sources_text'] = saved['source_domains']
+            res['upstream_dns_text'] = saved['upstream_dns']
+            return res
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Samsung Time Override failed: {exc}'}
+
+    def stop_samsung_time_override(self):
+        try:
+            st = self._samsung_time_server.stop()
+            return st
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Stop failed: {exc}'}
+
+    def sync_samsung_time_now(self, target=None):
+        try:
+            s = self.load_settings()
+            tgt = str(target if target is not None else s.get('samsung_time_target') or 'time.cloudflare.com').strip()
+            up = self._effective_samsung_time_upstream(s.get('samsung_time_upstream_dns', ''))
+            if self._samsung_time_server.get_status().get('running') and (target is None or tgt == self._samsung_time_server.target):
+                res = self._samsung_time_server.sync_now(target=tgt, upstream_dns=up)
+            else:
+                res = sync_samsung_clock_from_target(tgt, upstream_dns=up)
+            msg = (
+                f"[+] Time sync OK from {res.get('target', tgt)} ({res.get('method', '')})"
+                f" | UTC {res.get('utc_iso', '')} | offset {res.get('offset_ms', 0):+d} ms"
+            )
+            res['output'] = msg
+            res['status'] = self.get_samsung_time_status()
+            return res
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Time sync failed: {exc}'}
