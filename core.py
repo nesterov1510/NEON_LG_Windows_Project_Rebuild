@@ -117,6 +117,8 @@ class Api:
         self._sam_logs = []
         self._sam_log_lock = threading.Lock()
         self._samsung_auth_stop = threading.Event()
+        self._belet_tv_bridge = None
+        self._belet_tv_bridge_lock = threading.Lock()
         self._logger = self._setup_logger()
 
     def _data_dir(self):
@@ -1255,7 +1257,27 @@ class Api:
                     bundle = cert_mgr.sign_in_and_provision(duid, open_browser=True, timeout=240.0,
                                 stop_event=self._samsung_auth_stop,
                                 url_cb=lambda u: self._sam_log('[CERT] Sign-in URL: ' + u))
-                signed = sign_wgt_bytes(data, bundle['author_key'], bundle['author_certs'], bundle['dist_key'], bundle['dist_certs'])
+                wgt_payload = data
+                if _expected_pkg == 'BeletFilm1':
+                    try:
+                        pc_ip = str(_tizen_local_ip(clean_ip) or '').strip()
+                    except Exception:
+                        pc_ip = ''
+                    if re.fullmatch(r'(?:\d{1,3}\.){3}\d{1,3}', pc_ip) and not pc_ip.startswith('127.'):
+                        import zipfile
+                        meta_buf = io.BytesIO()
+                        with zipfile.ZipFile(io.BytesIO(data), 'r') as zin, zipfile.ZipFile(meta_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+                            for item in zin.infolist():
+                                payload = zin.read(item.filename)
+                                if item.filename == 'index.html':
+                                    html_txt = payload.decode('utf-8')
+                                    meta_tag = f'<meta name="neon-pc-bridge" content="{pc_ip}">\n</head>'
+                                    if 'name="neon-pc-bridge"' not in html_txt and '</head>' in html_txt:
+                                        html_txt = html_txt.replace('</head>', meta_tag, 1)
+                                        payload = html_txt.encode('utf-8')
+                                zout.writestr(item.filename, payload)
+                        wgt_payload = meta_buf.getvalue()
+                signed = sign_wgt_bytes(wgt_payload, bundle['author_key'], bundle['author_certs'], bundle['dist_key'], bundle['dist_certs'])
                 verify_wgt_signatures(signed)
                 remote = sdk_path + '/' + pkg_id + '.wgt'
                 sdb.push_bytes(signed, remote)
@@ -1263,11 +1285,21 @@ class Api:
                 if result.strip():
                     lines.extend(result.strip().splitlines())
                 diag = diagnose_install_output(result, pkg_id)
+                if diag.get('status') == 'cert_mismatch':
+                    lines.append(f'[i] Removing previous {pkg_id} (certificate mismatch) and retrying...')
+                    try:
+                        sdb.uninstall_app(pkg_id)
+                    except Exception:
+                        pass
+                    result = sdb.install_wgt(pkg_id, remote, timeout=120.0)
+                    if result.strip():
+                        lines.extend(result.strip().splitlines())
+                    diag = diagnose_install_output(result, pkg_id)
                 if _expected_pkg == 'BeletFilm1' and diag.get('status') in ('manifest_error', 'api_mismatch'):
                     import zipfile
-                    lines.append('[i] TV rejected background service manifest; retrying service-free client WGT...')
+                    lines.append('[!] ТВ отклонил манифест фонового сервиса ClockProxy; ставим облегчённый пакет без встроенного сервиса (при часах 1970 используйте «Мост Belet» в Neon на ПК).')
                     buf = io.BytesIO()
-                    with zipfile.ZipFile(io.BytesIO(data), 'r') as zin, zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+                    with zipfile.ZipFile(io.BytesIO(wgt_payload), 'r') as zin, zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
                         for item in zin.infolist():
                             if item.filename in ('service/clock-proxy.js', 'wrt-service.js'):
                                 continue
@@ -4260,5 +4292,519 @@ class Api:
             }
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': f'[!] Uninstall failed: {exc}'}
+
+    def _ensure_windows_bridge_firewall(self, port=18767):
+        if platform.system() != 'Windows':
+            return
+        rule_name = f'NEON Belet TV Bridge {int(port)}'
+        try:
+            chk = subprocess.run(
+                ['netsh', 'advfirewall', 'firewall', 'show', 'rule', f'name={rule_name}'],
+                capture_output=True, text=True, timeout=5,
+                creationflags=self._creation_flags(),
+            )
+            if chk.returncode == 0 and rule_name.lower() in (chk.stdout or '').lower():
+                return
+            subprocess.run(
+                [
+                    'netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                    f'name={rule_name}', 'dir=in', 'action=allow',
+                    'protocol=TCP', f'localport={int(port)}',
+                ],
+                capture_output=True, text=True, timeout=5,
+                creationflags=self._creation_flags(),
+            )
+        except Exception:
+            pass
+
+    def start_belet_tv_bridge(self, tv_ip=None, port=18767):
+        """Start a local HTTP->HTTPS bridge on the PC LAN IP for TVs stuck on a 1970 clock."""
+        hint_tv = str(tv_ip or self.samsung_ip or '192.168.1.101').strip()
+        try:
+            pc_ip = str(_tizen_local_ip(hint_tv) or '').strip()
+        except Exception:
+            pc_ip = ''
+        if not pc_ip or pc_ip.startswith('127.'):
+            try:
+                pc_ip = socket.gethostbyname(socket.gethostname())
+            except Exception:
+                pc_ip = '127.0.0.1'
+        with self._belet_tv_bridge_lock:
+            if self._belet_tv_bridge is not None and self._belet_tv_bridge.running:
+                actual_port = self._belet_tv_bridge.port
+                return {
+                    'ok': True,
+                    'running': True,
+                    'port': actual_port,
+                    'pc_ip': pc_ip,
+                    'url': f'http://{pc_ip}:{actual_port}',
+                    'output': f'[+] Мост Belet уже запущен: http://{pc_ip}:{actual_port}',
+                }
+            bridge = _BeletTvBridge(host='0.0.0.0', port=int(port))
+            try:
+                bridge.start()
+            except OSError as exc:
+                return {'ok': False, 'running': False, 'error': str(exc), 'output': f'[!] Не удалось запустить мост ({exc})'}
+            self._belet_tv_bridge = bridge
+        self._ensure_windows_bridge_firewall(bridge.port)
+        url_str = f'http://{pc_ip}:{bridge.port}'
+        msg = (
+            f'[+] Мост Belet для ТВ запущен на {url_str}\n'
+            f'[i] На ТВ (в клиенте Belet Samsung при 1970) нажмите «Мост через ПК (IP)» и введите {pc_ip} '
+            '(если ПК не определился автоматически).'
+        )
+        self._sam_log(msg)
+        return {
+            'ok': True,
+            'running': True,
+            'port': bridge.port,
+            'pc_ip': pc_ip,
+            'url': url_str,
+            'output': msg,
+        }
+
+    def stop_belet_tv_bridge(self):
+        with self._belet_tv_bridge_lock:
+            bridge = self._belet_tv_bridge
+            self._belet_tv_bridge = None
+        if bridge is not None:
+            bridge.stop()
+        msg = '[i] Мост Belet для ТВ остановлен.'
+        self._sam_log(msg)
+        return {'ok': True, 'running': False, 'output': msg}
+
+    def get_belet_tv_bridge_status(self, tv_ip=None):
+        hint_tv = str(tv_ip or self.samsung_ip or '192.168.1.101').strip()
+        try:
+            pc_ip = str(_tizen_local_ip(hint_tv) or '').strip()
+        except Exception:
+            pc_ip = ''
+        with self._belet_tv_bridge_lock:
+            running = bool(self._belet_tv_bridge is not None and self._belet_tv_bridge.running)
+            port = self._belet_tv_bridge.port if running else 18767
+        return {
+            'ok': True,
+            'running': running,
+            'port': port,
+            'pc_ip': pc_ip,
+            'url': f'http://{pc_ip}:{port}' if pc_ip else '',
+        }
+
+
+class _BeletTvBridge:
+    """Pure-stdlib HTTP->HTTPS bridge so a 1970-clock Samsung TV can load Belet via the PC."""
+
+    BASE_DOMAINS = ('beletapis.com', 'belet.tm', 'belet.me')
+    API_SCAN_HOSTS = {
+        'beletapis.com',
+        'api.belet.tm',
+        'homepage.belet.me',
+        'film.beletapis.com',
+        'film-search.belet.me',
+        'search.belet.me',
+    }
+
+    def __init__(self, host='0.0.0.0', port=18767, ssl_context=None, upstream_opener=None):
+        self.host = host
+        self.requested_port = int(port)
+        self.port = int(port)
+        self._upstream_opener = upstream_opener
+        if ssl_context is not None:
+            self._ssl_ctx = ssl_context
+        else:
+            import ssl
+            try:
+                import certifi
+                self._ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+            except Exception:
+                self._ssl_ctx = ssl.create_default_context()
+        self._dyn_lock = threading.Lock()
+        self._dynamic_hosts = []
+        self._server = None
+        self._thread = None
+        self.running = False
+
+    @staticmethod
+    def is_safe_public_host(raw_host):
+        h = str(raw_host or '').strip().lower()
+        if not h or len(h) > 253:
+            return False
+        if re.search(r'[\s/\\@:\[\]]', h):
+            return False
+        if not re.fullmatch(r'[a-z0-9.-]+', h):
+            return False
+        if '.' not in h or h.startswith('.') or h.endswith('.'):
+            return False
+        if re.fullmatch(r'\d{1,3}(?:\.\d{1,3}){3}', h):
+            return False
+        if h == 'localhost' or h.endswith(('.local', '.internal', '.lan', '.home.arpa')):
+            return False
+        return True
+
+    @classmethod
+    def is_static_allowed(cls, host):
+        h = str(host or '').strip().lower()
+        if not cls.is_safe_public_host(h):
+            return False
+        return any(h == d or h.endswith('.' + d) for d in cls.BASE_DOMAINS)
+
+    def register_dynamic_host(self, host):
+        h = str(host or '').strip().lower()
+        if not self.is_safe_public_host(h) or self.is_static_allowed(h):
+            return
+        with self._dyn_lock:
+            if h in self._dynamic_hosts:
+                return
+            self._dynamic_hosts.append(h)
+            if len(self._dynamic_hosts) > 256:
+                self._dynamic_hosts.pop(0)
+
+    def is_allowed_host(self, host):
+        h = str(host or '').strip().lower()
+        if not self.is_safe_public_host(h):
+            return False
+        if self.is_static_allowed(h):
+            return True
+        with self._dyn_lock:
+            return h in self._dynamic_hosts
+
+    def resolves_globally(self, host):
+        if self._upstream_opener is not None:
+            return True
+        try:
+            infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        except Exception:
+            return False
+        if not infos:
+            return False
+        for info in infos:
+            ip_str = info[4][0].split('%', 1)[0]
+            try:
+                ip_obj = ipaddress.ip_address(ip_str)
+                if not ip_obj.is_global:
+                    return False
+            except ValueError:
+                return False
+        return True
+
+    def scan_json_for_hosts(self, text):
+        for match in re.finditer(r'https:(?:\\/|/){2}([a-z0-9.-]+)(?:[/\"\'?\\]|$)', text, re.I):
+            self.register_dynamic_host(match.group(1))
+
+    def rewrite_m3u8(self, text, proxy_origin, up_host):
+        def _repl_https(m):
+            h = (m.group(1) or '').lower()
+            rest = m.group(2) or '/'
+            if not self.is_safe_public_host(h):
+                return m.group(0)
+            self.register_dynamic_host(h)
+            if not rest.startswith('/'):
+                rest = '/' + rest
+            return f'{proxy_origin}/__proxy/{h}{rest}'
+
+        out = re.sub(r'https://([a-z0-9.-]+)(?::443)?([^\s"\'<>]*)', _repl_https, text, flags=re.I)
+
+        def _repl_proto_uri(m):
+            h = (m.group(1) or '').lower()
+            p = m.group(2) or '/'
+            if not self.is_safe_public_host(h):
+                return m.group(0)
+            self.register_dynamic_host(h)
+            return f'URI="{proxy_origin}/__proxy/{h}{p}"'
+
+        out = re.sub(r'URI="//([a-z0-9.-]+)(/[^"]*)"', _repl_proto_uri, out, flags=re.I)
+        if up_host and self.is_safe_public_host(up_host):
+            out = re.sub(r'URI="(/(?!/)[^"]*)"', lambda m: f'URI="{proxy_origin}/__proxy/{up_host}{m.group(1)}"', out)
+            out = re.sub(r'(^|\r?\n)(/(?!/)[^\r\n]*)', lambda m: f'{m.group(1)}{proxy_origin}/__proxy/{up_host}{m.group(2)}', out)
+        return out
+
+    def rewrite_location(self, loc, proxy_origin):
+        m = re.match(r'^https://([a-z0-9.-]+)(?::443)?(/.*)?$', str(loc or ''), re.I)
+        if not m:
+            return loc
+        h = m.group(1).lower()
+        if not self.is_safe_public_host(h):
+            return loc
+        self.register_dynamic_host(h)
+        return f'{proxy_origin}/__proxy/{h}{m.group(2) or "/"}'
+
+    def start(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import gzip
+        import http.client
+        import urllib.parse
+        import zlib
+
+        bridge = self
+
+        class BridgeHandler(BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+
+            def log_message(self, format, *args):
+                return
+
+            def _is_lan_peer(self):
+                raw = str(self.client_address[0] if self.client_address else '')
+                ip_str = raw.replace('::ffff:', '').split('%', 1)[0]
+                if not ip_str:
+                    return True
+                try:
+                    ip_obj = ipaddress.ip_address(ip_str)
+                    return bool(ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_link_local)
+                except ValueError:
+                    return False
+
+            def _send_cors_headers(self):
+                req_orig = self.headers.get('Origin') or ''
+                safe_orig = req_orig if req_orig and req_orig not in ('null', 'file://') else '*'
+                self.send_header('Access-Control-Allow-Origin', safe_orig)
+                if safe_orig != '*':
+                    self.send_header('Access-Control-Allow-Credentials', 'true')
+                self.send_header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD')
+                req_hdrs = self.headers.get('Access-Control-Request-Headers')
+                self.send_header(
+                    'Access-Control-Allow-Headers',
+                    req_hdrs or (
+                        'Accept,Authorization,Content-Type,Lang,X-Platform,X-VersionCode,X-App-Version,'
+                        'app-version,fingerprint,X-Device-Model,X-Code-Sending-Type,X-Player-Session-Id,'
+                        'X-Chunk-Length,Range'
+                    ),
+                )
+                self.send_header('Access-Control-Allow-Private-Network', 'true')
+                self.send_header('Cross-Origin-Resource-Policy', 'cross-origin')
+
+            def _send_json(self, code, obj):
+                body = json.dumps(obj).encode('utf-8')
+                self.send_response(code)
+                self._send_cors_headers()
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                if self.command != 'HEAD':
+                    self.wfile.write(body)
+
+            def _handle_proxy(self):
+                if not self._is_lan_peer():
+                    self.send_response(403)
+                    self.send_header('Content-Length', '9')
+                    self.end_headers()
+                    if self.command != 'HEAD':
+                        self.wfile.write(b'Forbidden')
+                    return
+
+                if self.command == 'OPTIONS':
+                    self.send_response(204)
+                    self._send_cors_headers()
+                    self.send_header('Content-Length', '0')
+                    self.send_header('Cache-Control', 'no-store')
+                    self.end_headers()
+                    return
+
+                parsed = urllib.parse.urlsplit(self.path or '/')
+                if parsed.path == '/__ping':
+                    self._send_json(200, {
+                        'ok': True,
+                        'mode': 'pc-bridge',
+                        'port': bridge.port,
+                        'serverTimeMs': int(time.time() * 1000),
+                        'sslClockYear': time.gmtime().tm_year,
+                    })
+                    return
+
+                m = re.match(r'^/__proxy/([a-z0-9.-]+)(/.*)?$', parsed.path, re.I)
+                if not m:
+                    self._send_json(404, {'ok': False, 'error': 'Unknown proxy route'})
+                    return
+
+                up_host = m.group(1).lower()
+                up_pathname = m.group(2) or '/'
+                up_path = up_pathname + (f'?{parsed.query}' if parsed.query else '')
+                if not bridge.is_allowed_host(up_host) or not bridge.resolves_globally(up_host):
+                    self._send_json(403, {'ok': False, 'error': 'Disallowed host'})
+                    return
+
+                host_hdr = self.headers.get('Host') or f'127.0.0.1:{bridge.port}'
+                proxy_origin = f'http://{host_hdr}'
+
+                req_body = None
+                clen_raw = self.headers.get('Content-Length')
+                if clen_raw and self.command in ('POST', 'PUT', 'PATCH', 'DELETE'):
+                    try:
+                        clen = min(max(0, int(clen_raw)), 16 * 1024 * 1024)
+                    except ValueError:
+                        clen = 0
+                    if clen > 0:
+                        req_body = self.rfile.read(clen)
+
+                out_h = {}
+                skip_req = {
+                    'host', 'connection', 'keep-alive', 'proxy-connection', 'origin', 'referer',
+                    'accept-encoding', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-for',
+                    'content-length', 'transfer-encoding',
+                }
+                for k, v in self.headers.items():
+                    lk = k.lower()
+                    if lk in skip_req or lk.startswith('sec-fetch-'):
+                        continue
+                    out_h[k] = v
+                out_h['Host'] = up_host
+                out_h['Accept-Encoding'] = 'gzip, deflate'
+                if req_body is not None:
+                    out_h['Content-Length'] = str(len(req_body))
+
+                is_media = bool(re.search(r'\.(?:m3u8|ts|m4s|mp4)(?:$|\?)', up_pathname, re.I))
+                timeout = 45.0 if is_media else 20.0
+                conn = None
+                try:
+                    if bridge._upstream_opener is not None:
+                        conn = bridge._upstream_opener(up_host, 443, bridge._ssl_ctx, timeout)
+                    else:
+                        conn = http.client.HTTPSConnection(up_host, 443, context=bridge._ssl_ctx, timeout=timeout)
+                    conn.request(self.command, up_path, body=req_body, headers=out_h)
+                    up_res = conn.getresponse()
+                    status = up_res.status
+                    skip_resp = {
+                        'transfer-encoding', 'connection', 'keep-alive', 'proxy-connection',
+                        'upgrade', 'te', 'trailer', 'strict-transport-security',
+                        'content-security-policy', 'content-security-policy-report-only',
+                        'cross-origin-resource-policy', 'content-length',
+                    }
+                    resp_h = []
+                    ctype = ''
+                    cenc = ''
+                    for hk, hv in up_res.getheaders():
+                        lhk = hk.lower()
+                        if lhk in skip_resp:
+                            continue
+                        if lhk == 'location':
+                            resp_h.append((hk, bridge.rewrite_location(hv, proxy_origin)))
+                            continue
+                        if lhk == 'content-type':
+                            ctype = hv.lower()
+                        elif lhk == 'content-encoding':
+                            cenc = hv.lower()
+                        resp_h.append((hk, hv))
+
+                    is_m3u8 = bool(re.search(r'\.m3u8(?:$|\?)', up_pathname, re.I)) or ('mpegurl' in ctype)
+                    is_json_scan = (up_host in bridge.API_SCAN_HOSTS) and (
+                        'application/json' in ctype or 'text/plain' in ctype
+                    )
+
+                    if (is_m3u8 or is_json_scan) and self.command != 'HEAD' and 200 <= status < 300:
+                        raw_bytes = up_res.read(4 * 1024 * 1024 + 1)
+                        if len(raw_bytes) <= 4 * 1024 * 1024:
+                            plain_bytes = raw_bytes
+                            if 'gzip' in cenc:
+                                try:
+                                    plain_bytes = gzip.decompress(raw_bytes)
+                                except Exception:
+                                    plain_bytes = raw_bytes
+                            elif 'deflate' in cenc:
+                                try:
+                                    plain_bytes = zlib.decompress(raw_bytes)
+                                except Exception:
+                                    try:
+                                        plain_bytes = zlib.decompress(raw_bytes, -zlib.MAX_WBITS)
+                                    except Exception:
+                                        plain_bytes = raw_bytes
+                            text = plain_bytes.decode('utf-8', errors='replace')
+                            if is_json_scan:
+                                bridge.scan_json_for_hosts(text)
+                                out_bytes = raw_bytes
+                            else:
+                                out_bytes = bridge.rewrite_m3u8(text, proxy_origin, up_host).encode('utf-8')
+                                resp_h = [(k, v) for (k, v) in resp_h if k.lower() != 'content-encoding']
+                            self.send_response(status)
+                            self._send_cors_headers()
+                            for k, v in resp_h:
+                                self.send_header(k, v)
+                            self.send_header('Content-Length', str(len(out_bytes)))
+                            self.end_headers()
+                            self.wfile.write(out_bytes)
+                            return
+                        # Larger than 4 MB: flush prefix and stream remainder
+                        self.send_response(status)
+                        self._send_cors_headers()
+                        for k, v in resp_h:
+                            self.send_header(k, v)
+                        self.send_header('Connection', 'close')
+                        self.end_headers()
+                        self.close_connection = True
+                        self.wfile.write(raw_bytes)
+                        while True:
+                            chunk = up_res.read(65536)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                        return
+
+                    orig_len = up_res.getheader('Content-Length')
+                    self.send_response(status)
+                    self._send_cors_headers()
+                    for k, v in resp_h:
+                        self.send_header(k, v)
+                    if orig_len is not None:
+                        self.send_header('Content-Length', orig_len)
+                    elif self.command != 'HEAD' and status not in (204, 304):
+                        self.send_header('Connection', 'close')
+                        self.close_connection = True
+                    self.end_headers()
+                    if self.command == 'HEAD' or status in (204, 304):
+                        up_res.read()
+                        return
+                    while True:
+                        chunk = up_res.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                except Exception as exc:
+                    self._send_json(502, {'ok': False, 'error': str(exc)})
+                finally:
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+
+            do_GET = _handle_proxy
+            do_POST = _handle_proxy
+            do_PUT = _handle_proxy
+            do_PATCH = _handle_proxy
+            do_DELETE = _handle_proxy
+            do_HEAD = _handle_proxy
+            do_OPTIONS = _handle_proxy
+
+        class _Server(ThreadingHTTPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
+        self._server = _Server((self.host, self.requested_port), BridgeHandler)
+        self.port = int(self._server.server_address[1])
+        self.running = True
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self.port
+
+    def stop(self):
+        srv = self._server
+        self._server = None
+        self.running = False
+        if srv is not None:
+            try:
+                srv.shutdown()
+            except Exception:
+                pass
+            try:
+                srv.server_close()
+            except Exception:
+                pass
+        if self._thread is not None:
+            try:
+                self._thread.join(timeout=2.0)
+            except Exception:
+                pass
+            self._thread = None
+
 
 

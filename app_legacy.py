@@ -897,6 +897,12 @@ class NeonWindow(QMainWindow):
         btn_belet_client.setToolTip('Клиент Belet для Tizen: вход, каталог, поиск, сезоны, плеер и прогресс. Обычный Belet не изменяется.')
         btn_belet_client.clicked.connect(self.install_samsung_belet_client)
         sbl.addWidget(btn_belet_client)
+        self.btn_sam_belet_bridge = QPushButton('МОСТ BELET НА ПК (ЕСЛИ 1970 НА ТВ)')
+        self.btn_sam_belet_bridge.setObjectName('NormalBtn')
+        self.btn_sam_belet_bridge.setCursor(Qt.PointingHandCursor)
+        self.btn_sam_belet_bridge.setToolTip('Запускает на ПК локальный HTTP→HTTPS мост (порт 18767) для Belet Samsung на ТВ с датой 1970.')
+        self.btn_sam_belet_bridge.clicked.connect(self.toggle_samsung_belet_bridge)
+        sbl.addWidget(self.btn_sam_belet_bridge)
         sbl_row = QHBoxLayout()
         sbl_row.setSpacing(8)
         self.btn_sam_belet_launch = QPushButton()
@@ -2935,6 +2941,25 @@ class NeonWindow(QMainWindow):
         self.log('[+] Подписываем и устанавливаем отдельный Belet Samsung (BeletFilm1).')
         self._run_async('sam', lambda: self.api.install_samsung_belet_client(ip),
                         lambda r: self.toast.show_toast('Belet Samsung установлен; проверьте запуск на ТВ', 'info') if r.get('ok') else None)
+
+    def toggle_samsung_belet_bridge(self):
+        ip = self.sam_ip.text().strip() or None
+        st = self.api.get_belet_tv_bridge_status(ip)
+        if st.get('running'):
+            r = self.api.stop_belet_tv_bridge()
+            self.btn_sam_belet_bridge.setText('МОСТ BELET НА ПК (ЕСЛИ 1970 НА ТВ)')
+            if r.get('output'):
+                self.log(r['output'])
+            self.toast.show_toast('Мост Belet остановлен', 'info')
+            return
+        r = self.api.start_belet_tv_bridge(ip)
+        if r.get('output'):
+            self.log(r['output'])
+        if r.get('ok'):
+            self.btn_sam_belet_bridge.setText(f"МОСТ ВКЛ: {r.get('pc_ip')}:{r.get('port')}")
+            self.toast.show_toast(f"Мост активен: {r.get('pc_ip')}:{r.get('port')}", 'info')
+        else:
+            self.toast.show_toast(r.get('error') or 'Ошибка запуска моста', 'warn')
 
     def install_samsung_belet(self):
         ip = self.sam_ip.text().strip()

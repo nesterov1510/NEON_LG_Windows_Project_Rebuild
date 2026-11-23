@@ -214,12 +214,14 @@
 
   /* Generic input overlay: numeric pad or full keyboard. */
   var NUM_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'delete', '0', 'ok'];
+  var NUM_IP_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'ok'];
   var KB_ROWS = ['йцукенгшщзхъ', 'фывапролджэ', 'ячсмитьбю', '1234567890', '- '];
 
   function inputOverlay(kind, options) {
     var isNum = kind === 'num';
     var host = isNum ? $('numpad') : $('keyboard');
     var keysHost = isNum ? $('numpadKeys') : $('keyboardKeys');
+    var padKeys = options.allowDot ? NUM_IP_KEYS : NUM_KEYS;
     state.input = {
       kind: kind,
       value: options.value || '',
@@ -230,7 +232,7 @@
     $(isNum ? 'numpadTitle' : 'keyboardTitle').textContent = options.title || '';
     clear(keysHost);
     if (isNum) {
-      NUM_KEYS.forEach(function (key) {
+      padKeys.forEach(function (key) {
         var button;
         if (key === 'delete') button = el('button', 'key focusable', '⌫');
         else if (key === 'ok') button = el('button', 'key focusable', 'OK');
@@ -470,6 +472,8 @@
 
   var CLOCK_PROXY_PORT = 18767;
   var CLOCK_PROXY_SVC = 'BeletFilm1.ClockProxy';
+  var PC_BRIDGE_KEY = 'neon_belet_pc_bridge_v1';
+  var WRT_INLINE_CODE = "import { Service } from 'wrt:service'; window.__neonWrtService = Service; window.dispatchEvent(new Event('neon-wrt-ready'));";
   var clockProxyState = {
     launched: false,
     probing: false,
@@ -481,6 +485,48 @@
     serverOffsetMs: 0,
     serverSynced: false
   };
+
+  function isValidIpv4Host(value) {
+    return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(String(value || '').replace(/^\s+|\s+$/g, ''));
+  }
+
+  function readBundledPcBridge() {
+    var metas, i, name, content;
+    try {
+      metas = doc && doc.querySelectorAll ? doc.querySelectorAll('meta') : [];
+      for (i = 0; i < metas.length; i += 1) {
+        name = metas[i] && metas[i].getAttribute ? metas[i].getAttribute('name') : '';
+        if (name === 'neon-pc-bridge') {
+          content = String(metas[i].getAttribute('content') || '').replace(/^\s+|\s+$/g, '');
+          if (isValidIpv4Host(content)) return content;
+        }
+      }
+    } catch (e) {}
+    return '';
+  }
+
+  function getPcBridgeHost() {
+    var saved = '';
+    try {
+      if (window.localStorage) saved = String(window.localStorage.getItem(PC_BRIDGE_KEY) || '').replace(/^\s+|\s+$/g, '');
+    } catch (e) {}
+    if (isValidIpv4Host(saved)) return saved;
+    return readBundledPcBridge();
+  }
+
+  function savePcBridgeHost(ip) {
+    var clean = String(ip || '').replace(/^\s+|\s+$/g, '');
+    try {
+      if (window.localStorage) {
+        if (clean) window.localStorage.setItem(PC_BRIDGE_KEY, clean);
+        else window.localStorage.removeItem(PC_BRIDGE_KEY);
+      }
+    } catch (e) {}
+  }
+
+  function canProbeAnyClockBridge() {
+    return hasTizenServiceApi() || !!getPcBridgeHost();
+  }
 
   function hasTizenServiceApi() {
     return !!(window.tizen && (window.tizen.application || window.tizen.ApplicationControl));
@@ -523,11 +569,16 @@
   }
 
   function getClockProxyCandidates() {
-    var raw = ['http://127.0.0.1:' + CLOCK_PROXY_PORT];
+    var raw = [];
     var out = [];
+    var pcIp = getPcBridgeHost();
     var i;
-    if (clockProxyState.tvIp) raw.push('http://' + clockProxyState.tvIp + ':' + CLOCK_PROXY_PORT);
-    raw.push('http://localhost:' + CLOCK_PROXY_PORT);
+    if (hasTizenServiceApi()) {
+      raw.push('http://127.0.0.1:' + CLOCK_PROXY_PORT);
+      if (clockProxyState.tvIp) raw.push('http://' + clockProxyState.tvIp + ':' + CLOCK_PROXY_PORT);
+      raw.push('http://localhost:' + CLOCK_PROXY_PORT);
+    }
+    if (pcIp) raw.push('http://' + pcIp + ':' + CLOCK_PROXY_PORT);
     for (i = 0; i < raw.length; i += 1) {
       if (out.indexOf(raw[i]) < 0) out.push(raw[i]);
     }
@@ -537,6 +588,7 @@
   function withWrtService(cb) {
     var done = false;
     var s;
+    var sFile;
     function finish() {
       if (done) return;
       done = true;
@@ -548,13 +600,25 @@
     }
     clockProxyState.wrtTried = true;
     try { on(window, 'neon-wrt-ready', finish); } catch (e) {}
-    setTimeout(finish, 1200);
+    setTimeout(function () {
+      if (done || window.__neonWrtService) return;
+      try {
+        if (doc && doc.createElement && (doc.head || doc.body)) {
+          sFile = doc.createElement('script');
+          sFile.type = 'module';
+          sFile.src = 'wrt-service.js';
+          sFile.onerror = function () {};
+          (doc.head || doc.body).appendChild(sFile);
+        }
+      } catch (e) {}
+    }, 450);
+    setTimeout(finish, 1400);
     try {
       if (doc && doc.createElement && (doc.head || doc.body)) {
         s = doc.createElement('script');
         s.type = 'module';
-        s.src = 'wrt-service.js';
-        s.onerror = finish;
+        s.text = WRT_INLINE_CODE;
+        s.onerror = function () {};
         (doc.head || doc.body).appendChild(s);
         return;
       }
@@ -661,10 +725,55 @@
     }
   }
 
+  function updateClockBridgeButtons() {
+    var showBtn = isClockInvalid();
+    var pcIp = getPcBridgeHost();
+    var label = pcIp ? ('Мост ПК: ' + pcIp) : 'Мост через ПК (IP)';
+    if ($('homePcBridge')) {
+      setHidden($('homePcBridge'), !showBtn);
+      $('homePcBridge').textContent = label;
+    }
+    if ($('aboutPcBridge')) {
+      setHidden($('aboutPcBridge'), !showBtn);
+      $('aboutPcBridge').textContent = label;
+    }
+  }
+
+  function openPcBridgePrompt() {
+    var current = getPcBridgeHost() || '192.168.1.';
+    inputOverlay('num', {
+      title: 'IP компьютера с программой NEON (Мост 1970)',
+      value: current,
+      maxLength: 15,
+      allowDot: true,
+      onDone: function (value) {
+        var clean = String(value || '').replace(/^\s+|\s+$/g, '');
+        if (!isValidIpv4Host(clean)) {
+          toast('Введите IPv4 вида 192.168.1.50', 3200);
+          return;
+        }
+        savePcBridgeHost(clean);
+        updateClockBridgeButtons();
+        toast('Проверяем мост на ПК ' + clean + ':18767…', 2500);
+        probeClockProxy(function (ok) {
+          if (ok) {
+            state.clockSynced = true;
+            toast('Мост через ПК подключён — загружаем Belet…', 3000);
+            recoverNetworkScreens(true);
+            return;
+          }
+          toast('ПК ' + clean + ':18767 не ответил — включите «Мост Belet (1970 ТВ)» в Neon на ПК', 4200);
+          if (state.screen === 'about') runHealthCheck();
+        });
+      }
+    });
+  }
+
   function probeClockProxy(callback) {
     var doneCb = typeof callback === 'function' ? callback : function () {};
     var candidates;
     var index = 0;
+    updateClockBridgeButtons();
     if (!isClockInvalid()) {
       if (window.Belet && Belet.setClockProxy) Belet.setClockProxy('');
       clockProxyState.base = '';
@@ -672,8 +781,10 @@
       doneCb(false);
       return;
     }
-    if (!hasTizenServiceApi()) {
-      clockProxyState.diag = 'недоступен вне Tizen service';
+    if (!canProbeAnyClockBridge()) {
+      clockProxyState.diag = hasTizenServiceApi()
+        ? 'ожидание сервиса'
+        : 'локальный сервис недоступен — укажите IP ПК-моста в Neon';
       doneCb(false);
       return;
     }
@@ -681,15 +792,21 @@
       doneCb(isClockBypassed());
       return;
     }
-    launchClockProxyService();
-    probeTvIp();
+    if (hasTizenServiceApi()) {
+      launchClockProxyService();
+      probeTvIp();
+    } else {
+      clockProxyState.diag = 'подключение к ПК-мосту…';
+    }
     clockProxyState.probing = true;
     candidates = getClockProxyCandidates();
     function tryNext() {
       var candidate;
       if (index >= candidates.length) {
         clockProxyState.probing = false;
-        clockProxyState.diag = 'не отвечает' + (clockProxyState.launchDiag ? ' (' + clockProxyState.launchDiag + ')' : '');
+        clockProxyState.diag = 'не отвечает' +
+          (clockProxyState.launchDiag ? ' (' + clockProxyState.launchDiag + ')' : '') +
+          (getPcBridgeHost() ? ' · ПК ' + getPcBridgeHost() : '');
         doneCb(false);
         return;
       }
@@ -697,16 +814,19 @@
       index += 1;
       pingClockProxyCandidate(candidate, function (ok, data) {
         var wasBypassed = isClockBypassed();
+        var modeLabel;
         if (!ok) return tryNext();
         clockProxyState.probing = false;
         clockProxyState.base = candidate;
-        clockProxyState.diag = 'активен (' + candidate + ')';
+        modeLabel = (data && data.mode === 'pc-bridge') ? 'ПК-мост ' : '';
+        clockProxyState.diag = 'активен (' + modeLabel + candidate + ')';
         if (window.Belet && Belet.setClockProxy) Belet.setClockProxy(candidate);
         if (data && data.serverTimeMs && data.serverTimeMs >= 1704067200000) {
           clockProxyState.serverOffsetMs = data.serverTimeMs - Date.now();
           clockProxyState.serverSynced = true;
         }
         tickClock();
+        updateClockBridgeButtons();
         doneCb(true, !wasBypassed);
       });
     }
@@ -1350,6 +1470,7 @@
     });
     renderHero(heroItem || (groups.length ? itemsOf(groups[0])[0] : null));
     $('homeEmpty').classList.toggle('hidden', !!rows.children.length);
+    updateClockBridgeButtons();
   }
 
   function renderHero(item) {
@@ -1408,6 +1529,7 @@
           if (!collected.length) {
             delays = [1500, 3000, 5000, 7000];
             $('homeEmpty').classList.remove('hidden');
+            updateClockBridgeButtons();
             if (isClockBlockingHttps()) scheduleClockWatch();
             if (err.kind === 'network' && retryAttempt < delays.length) {
               delay = delays[retryAttempt];
@@ -2805,9 +2927,11 @@
         sessionRow.appendChild(el('span', '', 'Сессия'));
         sessionRow.appendChild(el('span', '', Belet.hasSession() ? 'активна' : 'не выполнен вход'));
         host.appendChild(sessionRow);
+        updateClockBridgeButtons();
       });
     }
-    if (isClockBlockingHttps() && hasTizenServiceApi()) {
+    updateClockBridgeButtons();
+    if (isClockBlockingHttps() && canProbeAnyClockBridge()) {
       probeClockProxy(function () { runProbeAndCheck(); });
       return;
     }
@@ -3061,6 +3185,7 @@
     };
     $('heroInfo').onclick = function () { if (state.home.hero) openDetail(state.home.hero); };
     $('homeReload').onclick = function () { state.homeLoaded = false; loadHome(true); };
+    if ($('homePcBridge')) $('homePcBridge').onclick = openPcBridgePrompt;
     $('homeHelp').onclick = openAbout;
 
     $('browseMoreBtn').onclick = function () { loadCategory(state.browse.id, false); };
@@ -3075,6 +3200,7 @@
     $('profileLogout').onclick = logout;
 
     $('aboutRetest').onclick = runHealthCheck;
+    if ($('aboutPcBridge')) $('aboutPcBridge').onclick = openPcBridgePrompt;
     $('aboutBack').onclick = function () {
       if (!Belet.hasSession()) {
         screen('login');
@@ -3224,10 +3350,10 @@
       return;
     }
     if (netOk && !clockOk) {
-      $('bootStatus').textContent = hasTizenServiceApi()
-        ? 'Время ТВ сброшено — запускаем встроенный обход SSL…'
+      $('bootStatus').textContent = canProbeAnyClockBridge()
+        ? 'Время ТВ сброшено — запускаем обход SSL…'
         : 'Ожидаем синхронизацию времени телевизора…';
-      if (hasTizenServiceApi() && waited > 0 && waited % 1000 === 0) {
+      if (canProbeAnyClockBridge() && waited > 0 && waited % 1000 === 0) {
         probeClockProxy(function (ok) {
           if (ok && isNetworkReady() && !state.bootDone) startBootSession();
         });
@@ -3250,13 +3376,14 @@
     state.clockSynced = !isClockInvalid();
     tickClock();
     setInterval(tickClock, 30000);
+    updateClockBridgeButtons();
     state.bootSession = Belet.init();
     if (isNetworkReady() && !isClockInvalid()) {
       startBootSession();
       return;
     }
-    if (isClockInvalid() && hasTizenServiceApi()) {
-      $('bootStatus').textContent = 'Время ТВ сброшено — запускаем встроенный обход SSL…';
+    if (isClockInvalid() && canProbeAnyClockBridge()) {
+      $('bootStatus').textContent = 'Время ТВ сброшено — запускаем обход SSL…';
       probeClockProxy(function (ok) {
         if (ok && isNetworkReady() && !state.bootDone) startBootSession();
       });

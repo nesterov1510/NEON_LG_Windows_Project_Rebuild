@@ -9,7 +9,8 @@
   <access origin="*" subdomains="true"/>
   <tizen:allow-navigation>*</tizen:allow-navigation>
   <tizen:allow-mixed-content>true</tizen:allow-mixed-content>
-  <tizen:content-security-policy>default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src https://beletapis.com https://*.beletapis.com https://api.belet.tm https://belet.tm https://*.belet.tm https://*.belet.me https://belet.me http://127.0.0.1:18767 http://localhost:18767 http://*:18767; img-src 'self' https: data: http://127.0.0.1:18767 http://localhost:18767 http://*:18767; media-src https: blob: http://127.0.0.1:18767 http://localhost:18767 http://*:18767; worker-src blob:</tizen:content-security-policy>
+  <tizen:content-security-policy>default-src 'self'; script-src 'self' 'sha256-H3ls4evEQz8yKpOaN6Zo052zU7sNwlTAq36H8yoOtmc='; style-src 'self' 'unsafe-inline'; connect-src https://beletapis.com https://*.beletapis.com https://api.belet.tm https://belet.tm https://*.belet.tm https://*.belet.me https://belet.me http://127.0.0.1:18767 http://localhost:18767 http://*:18767; img-src 'self' https: data: http://127.0.0.1:18767 http://localhost:18767 http://*:18767; media-src https: blob: http://127.0.0.1:18767 http://localhost:18767 http://*:18767; worker-src blob:</tizen:content-security-policy>
+  <tizen:metadata key="http://samsung.com/tv/metadata/no_use_process_pool" value="true"/>
   <tizen:privilege name="http://tizen.org/privilege/internet"/>
   <tizen:privilege name="http://developer.samsung.com/privilege/network.public"/>
   <tizen:privilege name="http://developer.samsung.com/privilege/avplay"/>
@@ -21,5 +22,5 @@
     <tizen:description>Belet local TLS clock-recovery bridge</tizen:description>
   </tizen:service>
   <tizen:profile name="tv-samsung"/>
-  <tizen:setting screen-orientation="landscape" context-menu="disable" background-support="enable" hwkey-event="enable"/>
+  <tizen:setting screen-orientation="landscape" context-menu="disable" background-support="enable" encryption="disable" install-location="auto" hwkey-event="enable"/>
 </widget>
