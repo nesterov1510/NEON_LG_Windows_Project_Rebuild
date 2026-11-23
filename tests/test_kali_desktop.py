@@ -2,10 +2,13 @@
 import base64
 import http.server
 import importlib.util
+import io
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tarfile
 import threading
 import types
 import urllib.request
@@ -14,6 +17,52 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 KALI_DIR = ROOT / 'kali-desktop'
+
+
+def _extract_deb_via_python(deb_path, extract_dir):
+    data = Path(deb_path).read_bytes()
+    assert data.startswith(b'!<arch>\n'), f'Invalid ar archive: {deb_path}'
+    pos = 8
+    control_text = ''
+    while pos + 60 <= len(data):
+        header = data[pos:pos + 60]
+        pos += 60
+        name = header[:16].decode('ascii', 'replace').strip().rstrip('/')
+        size = int(header[48:58].decode('ascii', 'replace').strip())
+        member = data[pos:pos + size]
+        pos += size + (size % 2)
+        if name.startswith('control.tar'):
+            with tarfile.open(fileobj=io.BytesIO(member), mode='r:*') as tf:
+                for entry in tf.getmembers():
+                    if entry.name.lstrip('./') == 'control':
+                        f = tf.extractfile(entry)
+                        if f:
+                            control_text = f.read().decode('utf-8', 'replace')
+        elif name.startswith('data.tar'):
+            with tarfile.open(fileobj=io.BytesIO(member), mode='r:*') as tf:
+                for entry in tf.getmembers():
+                    rel = Path(entry.name.lstrip('./'))
+                    if not rel.parts:
+                        continue
+                    target = (Path(extract_dir) / rel).resolve()
+                    if Path(extract_dir).resolve() not in target.parents and target != Path(extract_dir).resolve():
+                        raise RuntimeError(f'Unsafe deb path: {entry.name}')
+                    if entry.isdir():
+                        target.mkdir(parents=True, exist_ok=True)
+                    elif entry.isfile():
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        f = tf.extractfile(entry)
+                        if f:
+                            target.write_bytes(f.read())
+    return control_text
+
+
+def _extract_deb(deb_path, extract_dir):
+    dpkg_deb = shutil.which('dpkg-deb')
+    if dpkg_deb:
+        subprocess.run([dpkg_deb, '-x', str(deb_path), str(extract_dir)], check=True)
+        return subprocess.check_output([dpkg_deb, '-f', str(deb_path)], text=True)
+    return _extract_deb_via_python(deb_path, extract_dir)
 
 
 def _load_player_module():
@@ -141,10 +190,10 @@ def test_deb_packages_contain_proxy_and_hls_support(tmp_path):
     assert len(belet_debs) == 1
     assert len(alem_debs) == 1
 
+    node = shutil.which('node')
     for deb, app in ((belet_debs[0], 'beletfilm'), (alem_debs[0], 'alemtv')):
         extract = tmp_path / app
-        subprocess.run(['dpkg-deb', '-x', str(deb), str(extract)], check=True)
-        ctrl = subprocess.check_output(['dpkg-deb', '-f', str(deb)], text=True)
+        ctrl = _extract_deb(deb, extract)
         assert 'Version: 1.0.3' in ctrl
         for dep in ('gir1.2-webkit2-4.1', 'gstreamer1.0-plugins-base', 'gstreamer1.0-plugins-good',
                     'gstreamer1.0-plugins-bad', 'gstreamer1.0-plugins-ugly', 'gstreamer1.0-libav',
@@ -159,7 +208,8 @@ def test_deb_packages_contain_proxy_and_hls_support(tmp_path):
         assert html.index('<script src="desktop.js"></script>') < html.index('api.js' if app == 'beletfilm' else '(function(){')
         if app == 'alemtv':
             assert html.index('<script src="hls.min.js"></script>') < html.index('<script src="desktop.js"></script>')
-        subprocess.run(['node', '--check', str(shared / 'desktop.js')], check=True)
+        if node:
+            subprocess.run([node, '--check', str(shared / 'desktop.js')], check=True)
 
     import alemtv_app
     tv_html = alemtv_app.build_alemtv_html(desktop=False)
@@ -250,13 +300,16 @@ def test_loopback_proxy_headers_redirects_range_and_security():
 
 
 def test_belet_and_alemtv_desktop_js_end_to_end(tmp_path):
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js not installed')
     player_mod = _load_player_module()
     upstream, recorded = _start_upstream_server()
     belet_base, belet_srv = player_mod._start_proxy('beletfilm')
     alem_base, alem_srv = player_mod._start_proxy('alemtv')
 
-    subprocess.run(['dpkg-deb', '-x', str(next((KALI_DIR / 'packages').glob('beletfilm_*_all.deb'))), str(tmp_path / 'belet')], check=True)
-    subprocess.run(['dpkg-deb', '-x', str(next((KALI_DIR / 'packages').glob('alemtv_*_all.deb'))), str(tmp_path / 'alem')], check=True)
+    _extract_deb(next((KALI_DIR / 'packages').glob('beletfilm_*_all.deb')), tmp_path / 'belet')
+    _extract_deb(next((KALI_DIR / 'packages').glob('alemtv_*_all.deb')), tmp_path / 'alem')
 
     node_script = r"""
 const fs = require('fs');
@@ -536,7 +589,7 @@ Promise.all([runBeletCheck(), runAlemCheck()]).catch((e) => {
     try:
         subprocess.run(
             [
-                'node', '-e', node_script,
+                node, '-e', node_script,
                 str(tmp_path / 'belet' / 'usr' / 'share' / 'beletfilm'),
                 str(tmp_path / 'alem' / 'usr' / 'share' / 'alemtv' / 'desktop.js'),
                 belet_base,
