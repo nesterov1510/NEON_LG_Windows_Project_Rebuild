@@ -107,7 +107,7 @@ def test_stylesheet_avoids_css_younger_than_tizen_engines():
 def test_client_targets_belet_api_hosts_and_ships_csp():
     config = _client_source('config.xml')
     for host in ('https://beletapis.com', 'https://*.beletapis.com', 'https://api.belet.tm',
-                 'https://*.belet.me'):
+                 'https://belet.tm', 'https://*.belet.tm', 'https://*.belet.me'):
         assert host in config, host
     # Tizen needs the wildcard access rule for CDN images; the CSP below is what
     # actually pins scripts, XHR and media to the Belet hosts.
@@ -117,6 +117,7 @@ def test_client_targets_belet_api_hosts_and_ships_csp():
     csp = config[config.index('<tizen:content-security-policy>'):config.index('</tizen:content-security-policy>')]
     connect = csp[csp.index('connect-src'):csp.index(';', csp.index('connect-src'))]
     assert 'https://*.belet.me' in connect
+    assert 'https://*.belet.tm' in connect
     assert 'media-src https: blob:' in csp
     assert 'http://developer.samsung.com/privilege/avplay' in config, 'AVPlay needs its Tizen privilege'
     api = _client_source('api.js')

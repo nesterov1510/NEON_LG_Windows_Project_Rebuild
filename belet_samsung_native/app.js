@@ -42,7 +42,12 @@
   var state = {
     screen: 'boot',
     previous: 'home',
+    bootDone: false,
+    bootTimer: null,
+    bootSession: null,
     homeLoaded: false,
+    homeGen: 0,
+    homeRetryTimer: null,
     home: { groups: [], hero: null, items: [] },
     categories: [],
     categoriesLoaded: false,
@@ -59,6 +64,7 @@
       busy: false, generation: 0, loggingOut: false, otpTimer: null, otpFallback: false
     },
     qr: { generation: 0, timer: null, code: null },
+    profileRetryTimer: null,
     toastTimer: null,
     backArmed: false,
     playbackInfo: 'плеер ещё не запускался',
@@ -458,6 +464,53 @@
     return 'Сервис Belet ответил ошибкой' + (err.http ? ' HTTP ' + err.http : '') + (err.message ? ': ' + err.message : '.');
   }
 
+  function networkConnectionType() {
+    try {
+      if (window.webapis && window.webapis.network && window.webapis.network.getActiveConnectionType) {
+        return window.webapis.network.getActiveConnectionType();
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function isNetworkReady() {
+    var connType = networkConnectionType();
+    if (connType === 0) return false;
+    if (typeof window.navigator !== 'undefined' && window.navigator.onLine === false) return false;
+    return true;
+  }
+
+  function networkLabel() {
+    var connType = networkConnectionType();
+    if (connType === 0) return 'нет подключения (Tizen)';
+    if (connType === 1) return 'Wi-Fi';
+    if (connType === 2) return 'мобильная сеть';
+    if (connType === 3) return 'Ethernet';
+    if (typeof window.navigator !== 'undefined' && window.navigator.onLine === false) return 'офлайн';
+    return 'подключена';
+  }
+
+  function clearBootTimer() {
+    if (state.bootTimer) {
+      clearTimeout(state.bootTimer);
+      state.bootTimer = null;
+    }
+  }
+
+  function clearHomeTimer() {
+    if (state.homeRetryTimer) {
+      clearTimeout(state.homeRetryTimer);
+      state.homeRetryTimer = null;
+    }
+  }
+
+  function clearProfileTimer() {
+    if (state.profileRetryTimer) {
+      clearTimeout(state.profileRetryTimer);
+      state.profileRetryTimer = null;
+    }
+  }
+
   function clearOtpTimer() {
     if (state.login.otpTimer) {
       clearTimeout(state.login.otpTimer);
@@ -466,6 +519,9 @@
   }
 
   function resetCatalogueState() {
+    state.homeGen += 1;
+    clearHomeTimer();
+    clearProfileTimer();
     state.homeLoaded = false;
     state.home = { groups: [], hero: null, items: [] };
     state.categories = [];
@@ -502,6 +558,8 @@
   function showLogin() {
     stopQr();
     clearOtpTimer();
+    clearHomeTimer();
+    clearProfileTimer();
     cancelPlayback(true);
     state.input = null;
     state.dialogActions = [];
@@ -561,27 +619,26 @@
       select.textContent = retryAttempt ? 'Повторяем запрос…' : 'Загружаем способы…';
     }
     Belet.otpMethods(function (err, methods) {
+      var isNetwork, maxRetries, delays, delay;
       if (gen !== state.login.generation || state.screen !== 'login') return;
       state.login.methods = [];
       if (err) {
-        if (retryAttempt === 0) {
-          if (!Belet.hasSession() && Belet.resetDevice) Belet.resetDevice();
-          state.login.methods = fallbackOtpMethods();
-          state.login.otpFallback = true;
-          state.login.methodIndex = 0;
-          select.textContent = state.login.methods[0].name;
-          updatePhoneDisplay();
-          state.login.otpTimer = setTimeout(function () {
-            state.login.otpTimer = null;
-            if (gen === state.login.generation && state.screen === 'login') loadOtpMethods(1);
-          }, 900);
-          return;
-        }
+        isNetwork = err.kind === 'network';
+        maxRetries = isNetwork ? 3 : 1;
+        delays = [1200, 2500, 5000];
+        if (retryAttempt === 0 && !Belet.hasSession() && Belet.resetDevice) Belet.resetDevice();
         state.login.methods = fallbackOtpMethods();
         state.login.otpFallback = true;
         state.login.methodIndex = 0;
         select.textContent = state.login.methods[0].name;
         updatePhoneDisplay();
+        if (retryAttempt < maxRetries) {
+          delay = isNetwork ? delays[retryAttempt] : 900;
+          state.login.otpTimer = setTimeout(function () {
+            state.login.otpTimer = null;
+            if (gen === state.login.generation && state.screen === 'login') loadOtpMethods(retryAttempt + 1);
+          }, delay);
+        }
         return;
       }
       methods.forEach(function (item) {
@@ -744,20 +801,27 @@
     }, 30);
 
     Belet.qrCode(function (err, data) {
-      var code;
+      var code, isNetwork, maxRetries, delays, delay;
       if (generation !== state.qr.generation || state.screen !== 'login') return;
       if (err || !data) {
-        if (retryAttempt === 0) {
-          if (!Belet.hasSession() && Belet.resetDevice) Belet.resetDevice();
-          $('qrStatus').textContent = 'Повторяем запрос QR-кода…';
+        isNetwork = !!(err && err.kind === 'network');
+        maxRetries = isNetwork ? 3 : 1;
+        delays = [1200, 2500, 5000];
+        if (retryAttempt === 0 && !Belet.hasSession() && Belet.resetDevice) Belet.resetDevice();
+        if (retryAttempt < maxRetries) {
+          delay = isNetwork ? delays[retryAttempt] : 900;
+          $('qrStatus').textContent = isNetwork
+            ? 'Нет связи с сервером (HTTP 0). Повторяем запрос QR-кода…'
+            : 'Повторяем запрос QR-кода…';
           state.qr.timer = setTimeout(function () {
             state.qr.timer = null;
-            if (generation === state.qr.generation && state.screen === 'login') startQr(1);
-          }, 900);
+            if (generation === state.qr.generation && state.screen === 'login') startQr(retryAttempt + 1);
+          }, delay);
           return;
         }
         $('qrStatus').textContent = 'Не удалось получить QR-код' +
-          (err && err.http ? ' (HTTP ' + err.http + ')' : '') + '. Проверьте сеть и обновите.';
+          (err && err.http ? ' (HTTP ' + err.http + ')' : (isNetwork ? ' (HTTP 0)' : '')) +
+          '. Проверьте сеть и обновите.';
         return;
       }
       code = data.code;
@@ -970,10 +1034,16 @@
     setHidden(hero, false);
   }
 
-  function loadHome(showSpinner) {
+  function loadHome(showSpinner, attempt) {
+    var retryAttempt = typeof attempt === 'number' ? attempt : 0;
     var collected = [];
+    var gen;
     stopQr();
     clearOtpTimer();
+    clearHomeTimer();
+    state.homeLoaded = false;
+    state.homeGen += 1;
+    gen = state.homeGen;
     screen('home');
     setHidden($('hero'), true);
     setHidden($('homeEmpty'), true);
@@ -981,14 +1051,39 @@
     state.mainFocus = null;
     if (showSpinner) toast('Загружаем каталог…', 1800);
 
+    function focusReload() {
+      state.mainFocus = $('homeReload');
+      if (state.screen === 'home' && !activeOverlay() && $('homeReload')) {
+        $('homeReload').focus();
+      }
+    }
+
     function fetchPage(offset, pagesLeft) {
       Belet.home(offset, 3, function (err, groups) {
+        var delays, delay;
+        if (gen !== state.homeGen || state.screen !== 'home') return;
         if (err) {
           if (handleAuthError(err)) return;
           if (!collected.length) {
+            delays = [1500, 3000, 5000, 7000];
             $('homeEmpty').classList.remove('hidden');
+            if (err.kind === 'network' && retryAttempt < delays.length) {
+              delay = delays[retryAttempt];
+              $('homeEmpty').querySelector('h2').textContent = 'Подключение к серверам Belet…';
+              $('homeEmpty').querySelector('p').textContent = describeError(err) +
+                '\nАвтоматический повтор через ' + Math.round(delay / 1000) + ' с…';
+              focusReload();
+              state.homeRetryTimer = setTimeout(function () {
+                state.homeRetryTimer = null;
+                if (gen === state.homeGen && state.screen === 'home' && !state.homeLoaded && Belet.hasSession()) {
+                  loadHome(false, retryAttempt + 1);
+                }
+              }, delay);
+              return;
+            }
             $('homeEmpty').querySelector('h2').textContent = 'Каталог не загрузился';
             $('homeEmpty').querySelector('p').textContent = describeError(err);
+            focusReload();
             return;
           }
           finish();
@@ -1006,12 +1101,17 @@
     }
 
     function finish() {
+      clearHomeTimer();
       state.home.groups = collected;
       state.homeLoaded = true;
       $('homeEmpty').querySelector('h2').textContent = 'Каталог пуст';
       $('homeEmpty').querySelector('p').textContent = 'Сервис ответил, но не вернул ни одного раздела. Проверьте подписку и повторите.';
       renderRows(collected);
-      var first = $('rows').querySelector('.card') || $('heroPlay');
+      if (deviceRegistration.state !== 'сервер принял регистрацию телевизора' &&
+          deviceRegistration.state !== 'отправляется…') {
+        registerDevice();
+      }
+      var first = $('rows').querySelector('.card') || ($('hero') && !hasClass($('hero'), 'hidden') ? $('heroPlay') : null) || $('homeReload');
       state.mainFocus = first;
       if (first) {
         first.focus();
@@ -2213,12 +2313,21 @@
     loadProfile();
   }
 
-  function loadProfile() {
-    $('profilePlan').textContent = 'Загрузка данных…';
+  function loadProfile(attempt) {
+    var retryAttempt = typeof attempt === 'number' ? attempt : 0;
+    clearProfileTimer();
+    $('profilePlan').textContent = retryAttempt ? 'Повторяем загрузку профиля…' : 'Загрузка данных…';
     Belet.profile(function (err, data) {
+      if (state.screen !== 'profile') return;
       if (err) {
         if (handleAuthError(err)) return;
         $('profilePlan').textContent = describeError(err);
+        if (err.kind === 'network' && retryAttempt < 2) {
+          state.profileRetryTimer = setTimeout(function () {
+            state.profileRetryTimer = null;
+            if (state.screen === 'profile' && Belet.hasSession()) loadProfile(retryAttempt + 1);
+          }, 2000);
+        }
         return;
       }
       var view = data && data.profile_page_view;
@@ -2245,7 +2354,6 @@
 
   function runHealthCheck() {
     var host = $('aboutStatus');
-    var rows = [];
     host.innerHTML = '<div class="about-row"><span>Проверка…</span><span></span></div>';
     Belet.healthCheck(function (results) {
       var labels = {
@@ -2254,6 +2362,13 @@
         film: 'Видеосервис (film.beletapis.com)'
       };
       var order = ['auth', 'home', 'film'];
+      var now = new Date();
+      var year = now.getFullYear();
+      var timeValid = year >= 2024;
+      var timeText = pad2(now.getDate()) + '.' + pad2(now.getMonth() + 1) + '.' + year + ' ' +
+        pad2(now.getHours()) + ':' + pad2(now.getMinutes()) +
+        (timeValid ? '' : ' (не синхронизировано — HTTPS блокируется)');
+      var netOk = isNetworkReady();
       host.innerHTML = '';
       order.forEach(function (key) {
         var value = results[key] || 'нет ответа';
@@ -2264,6 +2379,14 @@
         row.appendChild(status);
         host.appendChild(row);
       });
+      var netRow = el('div', 'about-row');
+      netRow.appendChild(el('span', '', 'Сеть телевизора'));
+      netRow.appendChild(el('span', netOk ? 'ok' : 'bad', networkLabel()));
+      host.appendChild(netRow);
+      var timeRow = el('div', 'about-row');
+      timeRow.appendChild(el('span', '', 'Время на телевизоре'));
+      timeRow.appendChild(el('span', timeValid ? 'ok' : 'bad', timeText));
+      host.appendChild(timeRow);
       var modelRow = el('div', 'about-row');
       modelRow.appendChild(el('span', '', 'Модель телевизора'));
       modelRow.appendChild(el('span', '', Belet.model()));
@@ -2541,7 +2664,7 @@
     $('detailPlay').onclick = playMovieOrResume;
     $('detailFav').onclick = toggleFavorite;
 
-    $('profileRefresh').onclick = loadProfile;
+    $('profileRefresh').onclick = function () { loadProfile(0); };
     $('profileFavorites').onclick = openFavorites;
     $('profileHelp').onclick = openAbout;
     $('profileLogout').onclick = logout;
@@ -2566,9 +2689,40 @@
     on($('video'), 'play', function () { hideOsdSoon(); });
 
     on(window, 'beforeunload', function () { reportProgress(); });
+    on(window, 'online', recoverNetworkScreens);
     on(doc, 'visibilitychange', function () {
       if (doc.hidden) reportProgress();
+      else recoverNetworkScreens();
     });
+  }
+
+  function recoverNetworkScreens() {
+    if (!isNetworkReady()) return;
+    if (state.screen === 'boot' && !state.bootDone) {
+      startBootSession();
+      return;
+    }
+    if (state.screen === 'home' && !state.homeLoaded && Belet.hasSession()) {
+      loadHome(false, 0);
+      return;
+    }
+    if (state.screen === 'login' && !state.login.busy) {
+      if (!hasClass($('loginQr'), 'hidden') && !state.qr.code) startQr(0);
+      else if (!hasClass($('loginPhone'), 'hidden') && (!state.login.methods.length || state.login.otpFallback)) loadOtpMethods(0);
+      return;
+    }
+    if (state.screen === 'browse' && !state.browse.loading && !state.browse.items.length && Belet.hasSession()) {
+      if (state.browse.mode === 'favorites') openFavorites();
+      else loadCategories(function () { loadCategory(state.browse.id || 1, true); });
+      return;
+    }
+    if (state.screen === 'profile' && Belet.hasSession()) {
+      loadProfile(0);
+      return;
+    }
+    if (state.screen === 'about') {
+      runHealthCheck();
+    }
   }
 
   function toggleFavorite() {
@@ -2608,13 +2762,12 @@
     if (node) node.textContent = pad2(date.getHours()) + ':' + pad2(date.getMinutes());
   }
 
-  function boot() {
+  function startBootSession() {
     var session;
-    registerTvKeys();
-    wire();
-    tickClock();
-    setInterval(tickClock, 30000);
-    session = Belet.init();
+    if (state.bootDone) return;
+    state.bootDone = true;
+    clearBootTimer();
+    session = state.bootSession;
     if (session) {
       $('bootStatus').textContent = 'Восстанавливаем сессию…';
       registerDevice();
@@ -2623,6 +2776,32 @@
       $('bootStatus').textContent = 'Требуется вход в аккаунт Belet';
       setTimeout(function () { showLogin(); }, 350);
     }
+  }
+
+  function waitForNetworkAtBoot(waited) {
+    if (state.bootDone) return;
+    if (isNetworkReady() || waited >= 8000) {
+      startBootSession();
+      return;
+    }
+    state.bootTimer = setTimeout(function () {
+      state.bootTimer = null;
+      waitForNetworkAtBoot(waited + 500);
+    }, 500);
+  }
+
+  function boot() {
+    registerTvKeys();
+    wire();
+    tickClock();
+    setInterval(tickClock, 30000);
+    state.bootSession = Belet.init();
+    if (isNetworkReady()) {
+      startBootSession();
+      return;
+    }
+    $('bootStatus').textContent = 'Ожидаем подключение телевизора к сети…';
+    waitForNetworkAtBoot(0);
   }
 
   if (doc.readyState === 'loading') on(doc, 'DOMContentLoaded', boot);

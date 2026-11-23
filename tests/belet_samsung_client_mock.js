@@ -425,7 +425,7 @@ class XHR {
   constructor() { this.headers = {}; this.readyState = 0; this.status = 0; }
   open(method, url) { this.method = method; this.url = url; }
   setRequestHeader(key, value) {
-    assert(!(key in this.headers) || this.headers[key] === value, 'header set twice: ' + key);
+    assert.strictEqual(headerOf(this, key), undefined, 'header set twice (would concatenate in Chromium): ' + key);
     this.headers[key] = String(value);
   }
   send(body) {
@@ -494,10 +494,17 @@ const sandbox = {
   encodeURIComponent,
   decodeURIComponent
 };
+const windowListeners = {};
 sandbox.window = sandbox;
 sandbox.global = sandbox;
 sandbox.self = sandbox;
 sandbox.navigator = { userAgent: 'Tizen' };
+sandbox.addEventListener = (event, fn) => {
+  (windowListeners[event] = windowListeners[event] || []).push(fn);
+};
+function dispatchWindow(event) {
+  (windowListeners[event] || []).forEach(fn => fn({ type: event }));
+}
 
 let nativeRegistration;
 vm.createContext(sandbox);
@@ -1187,6 +1194,115 @@ assert(!ids.about.classList.contains('hidden'));
 assert(fireKey(10009), 'Back on about is consumed');
 assert(!ids.login.classList.contains('hidden'), 'Back from about while logged out returns to login, not home/profile');
 assert(ids.home.classList.contains('hidden') && ids.profile.classList.contains('hidden'));
+
+/* 16. TV reboot / HTTP 0 resilience: multi-retry on QR, home, refresh-mobile, online recovery, and webapis.network boot wait */
+route('https://beletapis.com/api/v1/auth/get-qrcode', 0, {});
+route('https://api.belet.tm/api/v1/auth/get-qrcode', 0, {});
+click(ids.toQr);
+assert(ids.qrStatus.textContent.indexOf('HTTP 0') >= 0, 'QR reports HTTP 0 retry status');
+route('https://beletapis.com/api/v1/auth/get-qrcode', 0, {});
+route('https://api.belet.tm/api/v1/auth/get-qrcode', 0, {});
+runTimers();
+route('https://beletapis.com/api/v1/auth/get-qrcode', 200, {
+  code: 'https://belet.tm/register/qr-step16',
+  qr_png: 'data:image/png;base64,iVBORw0KGgoStep16=='
+});
+runTimers();
+assert(ids.qrImage.src.indexOf('data:image/png;base64,iVBORw0KGgoStep16==') === 0, 'QR recovers after multiple HTTP 0 network failures');
+
+route('/api/v1/auth/check-qrcode', 200, { token: 'step16-access', refresh_token: 'step16-refresh' });
+route('/api/v1/users/device', 0, {});
+route('/api/v1/users/device', 0, {});
+route('/api/v2/home_page', 0, {});
+runTimers();
+assert(!ids.home.classList.contains('hidden'), 'home screen opens even on initial HTTP 0');
+assert(!ids.homeEmpty.classList.contains('hidden'), 'homeEmpty displays network retry message');
+assert.strictEqual(document.activeElement, ids.homeReload, 'homeReload is focused when homeEmpty appears');
+assert(store.neon_belet_samsung_session_v2, 'session is kept during home HTTP 0');
+
+route('/api/v2/home_page', 0, {});
+runTimers();
+route('/api/v2/home_page', 200, {
+  status: 'ok',
+  result: [{ id: 1, title: 'После сети', source: 'top', items: [
+    { id: 40, type_id: 1, name: 'Recovered Film 40', images: { vertical: { medium: { url: 'https://img.example/40.jpg' } } } }
+  ] }]
+});
+route('https://beletapis.com/api/v1/users/device', 200, { msg: 'ok' });
+runTimers();
+assert(ids.homeEmpty.classList.contains('hidden'), 'home auto-retries HTTP 0 and loads catalogue');
+assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
+
+/* refresh-mobile hitting HTTP 0 preserves session and falls back to authAlt */
+route('/api/v3/movie/40', 401, {});
+route('https://beletapis.com/api/v2/auth/refresh-mobile', 0, {});
+route('https://api.belet.tm/api/v2/auth/refresh-mobile', 0, {});
+click(ids.rows.querySelector('.card'));
+assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, 'step16-access', 'HTTP 0 on refresh-mobile does not wipe session');
+assert(ids.login.classList.contains('hidden'), 'HTTP 0 on refresh-mobile does not kick user to login');
+
+route('/api/v3/movie/40', 401, {});
+route('https://beletapis.com/api/v2/auth/refresh-mobile', 0, {});
+route('https://api.belet.tm/api/v2/auth/refresh-mobile', 200, { token: 'step16-refreshed', refresh_token: 'step16-r2' });
+route('/api/v3/movie/40', 200, { status: 'ok', movie: { id: 40, name: 'Recovered Film 40', type_id: 1 } });
+click(ids.rows.querySelector('.card'));
+assert.strictEqual(JSON.parse(store.neon_belet_samsung_session_v2).token, 'step16-refreshed', 'refresh-mobile recovers via authAlt');
+assert.strictEqual(ids.detailTitle.textContent, 'Recovered Film 40');
+
+/* window online event triggers immediate home reload when home was stuck on HTTP 0 */
+fireKey(10009);
+route('/api/v2/home_page', 0, {});
+click(ids.homeReload);
+assert(!ids.homeEmpty.classList.contains('hidden'));
+timers.length = 0;
+route('/api/v2/home_page', 200, {
+  status: 'ok',
+  result: [{ id: 1, title: 'Онлайн', source: 'top', items: [
+    { id: 41, type_id: 1, name: 'Online Film 41', images: { vertical: { medium: { url: 'https://img.example/41.jpg' } } } }
+  ] }]
+});
+dispatchWindow('online');
+assert(ids.homeEmpty.classList.contains('hidden'), 'online event recovers home immediately');
+assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
+
+/* Cold-reboot simulation while logged in: webapis.network initially disconnected (0), then connects (1) + home HTTP 0 retry */
+(() => {
+  const bootCallsBefore = calls.length;
+  let connType = 0;
+  buildDom();
+  timers.length = 0;
+  const bootSandbox = Object.assign({}, sandbox, {
+    document,
+    webapis: { network: { getActiveConnectionType: () => connType } }
+  });
+  bootSandbox.window = bootSandbox;
+  bootSandbox.global = bootSandbox;
+  bootSandbox.self = bootSandbox;
+  vm.createContext(bootSandbox);
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), bootSandbox, { filename: 'api.js' });
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), bootSandbox, { filename: 'app.js' });
+
+  assert.strictEqual(calls.length, bootCallsBefore, 'no HTTP calls fired before TV network interface connects');
+  assert(ids.bootStatus.textContent.indexOf('сети') >= 0, 'boot displays waiting-for-network status');
+
+  connType = 1;
+  route('https://beletapis.com/api/v1/users/device', 200, { msg: 'ok' });
+  route('/api/v2/home_page', 0, {});
+  runTimers();
+  assert(!ids.home.classList.contains('hidden'), 'boot advances to home after network becomes ready');
+  assert(!ids.homeEmpty.classList.contains('hidden'));
+  assert.strictEqual(document.activeElement, ids.homeReload);
+
+  route('/api/v2/home_page', 200, {
+    status: 'ok',
+    result: [{ id: 1, title: 'После перезагрузки', source: 'top', items: [
+      { id: 42, type_id: 1, name: 'Reboot Film 42', images: { vertical: { medium: { url: 'https://img.example/42.jpg' } } } }
+    ] }]
+  });
+  runTimers();
+  assert(ids.homeEmpty.classList.contains('hidden'), 'post-reboot home loads cleanly once server responds');
+  assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
+})();
 
 assert.strictEqual(routes.length, 0, 'all queued responses were consumed: ' + JSON.stringify(routes.map(r => r.match)));
 console.log('belet_samsung_client_mock: ok');

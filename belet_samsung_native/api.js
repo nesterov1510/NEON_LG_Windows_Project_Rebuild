@@ -121,6 +121,19 @@
     try { return JSON.parse(text); } catch (e) { return undefined; }
   }
 
+  function hasOverrideHeader(headers, name) {
+    var target = String(name).toLowerCase();
+    var k;
+    for (k in headers) {
+      if (Object.prototype.hasOwnProperty.call(headers, k) &&
+          String(k).toLowerCase() === target &&
+          headers[k] !== null && headers[k] !== undefined) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function rawRequest(options, callback) {
     var xhr = new XMLHttpRequest();
     var done = false;
@@ -138,14 +151,13 @@
       xhr.open(options.method || 'GET', options.url, true);
       xhr.timeout = options.timeout || REQUEST_TIMEOUT;
       try { xhr.withCredentials = false; } catch (e) {}
-      xhr.setRequestHeader('Accept', 'application/json');
-      xhr.setRequestHeader('Lang', CLIENT.lang);
-      xhr.setRequestHeader('X-Platform', CLIENT.platform);
-      xhr.setRequestHeader('X-VersionCode', CLIENT.versionCode);
-      xhr.setRequestHeader('X-App-Version', CLIENT.appVersion);
-      xhr.setRequestHeader('app-version', CLIENT.versionCode);
-      if (device && !(Object.prototype.hasOwnProperty.call(headers, 'fingerprint') &&
-          headers.fingerprint !== null && headers.fingerprint !== undefined)) {
+      if (!hasOverrideHeader(headers, 'Accept')) xhr.setRequestHeader('Accept', 'application/json');
+      if (!hasOverrideHeader(headers, 'Lang')) xhr.setRequestHeader('Lang', CLIENT.lang);
+      if (!hasOverrideHeader(headers, 'X-Platform')) xhr.setRequestHeader('X-Platform', CLIENT.platform);
+      if (!hasOverrideHeader(headers, 'X-VersionCode')) xhr.setRequestHeader('X-VersionCode', CLIENT.versionCode);
+      if (!hasOverrideHeader(headers, 'X-App-Version')) xhr.setRequestHeader('X-App-Version', CLIENT.appVersion);
+      if (!hasOverrideHeader(headers, 'app-version')) xhr.setRequestHeader('app-version', CLIENT.versionCode);
+      if (device && !hasOverrideHeader(headers, 'fingerprint')) {
         xhr.setRequestHeader('fingerprint', device);
       }
       for (key in headers) {
@@ -155,10 +167,14 @@
       }
       if (options.form) {
         body = options.form;
-        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+        if (!hasOverrideHeader(headers, 'Content-Type')) {
+          xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+        }
       } else if (options.body !== undefined && options.body !== null) {
         body = JSON.stringify(options.body);
-        xhr.setRequestHeader('Content-Type', 'application/json; charset=utf-8');
+        if (!hasOverrideHeader(headers, 'Content-Type')) {
+          xhr.setRequestHeader('Content-Type', 'application/json; charset=utf-8');
+        }
       }
       xhr.onreadystatechange = function () {
         var parsed;
@@ -190,20 +206,37 @@
       persist(null);
       return callback(apiError('auth', 401), null);
     }
-    rawRequest({
-      method: 'POST',
-      url: HOSTS.auth + '/api/v2/auth/refresh-mobile',
-      body: { fingerprint: device, refresh_token: current.refresh_token },
-      headers: { 'X-Platform': 'Android', 'X-VersionCode': CLIENT.versionCode }
-    }, function (err, data) {
+    function handleRefreshResult(err, data) {
       var next;
       if (!err && data && typeof data.token === 'string' && data.token && typeof data.refresh_token === 'string' && data.refresh_token) {
         next = { token: data.token, refresh_token: data.refresh_token, fingerprint: device, saved_at: Date.now() };
         persist(next);
         return callback(null, next);
       }
+      if (err && (err.kind === 'network' || err.kind === 'server')) {
+        return callback(err, null);
+      }
       if (err && err.http === 401) persist(null);
-      callback(apiError('auth', err ? err.http : 0, err ? err.message : ''), null);
+      callback(apiError('auth', err ? err.http : 401, err ? err.message : ''), null);
+    }
+    rawRequest({
+      method: 'POST',
+      url: HOSTS.auth + '/api/v2/auth/refresh-mobile',
+      timeout: 10000,
+      body: { fingerprint: device, refresh_token: current.refresh_token }
+    }, function (err, data) {
+      if (err && (err.kind === 'network' || err.http === 404 || err.http === 405 || err.http >= 500)) {
+        return rawRequest({
+          method: 'POST',
+          url: HOSTS.authAlt + '/api/v2/auth/refresh-mobile',
+          timeout: 10000,
+          body: { fingerprint: device, refresh_token: current.refresh_token }
+        }, function (altErr, altData) {
+          if (!altErr) return handleRefreshResult(null, altData);
+          handleRefreshResult(altErr || err, altData);
+        });
+      }
+      handleRefreshResult(err, data);
     });
   }
 
@@ -457,14 +490,14 @@
     // v2 is what belet.tm itself calls; v1 stays as a fallback for older deployments.
     var url = HOSTS.home + '/api/v2/home_page?type_id=0&h_limit=12&limit=' + encodeURIComponent(limit) +
       '&offset=' + encodeURIComponent(offset);
-    authorized({ method: 'GET', url: url, fallback: url.replace('/api/v2/', '/api/v1/') }, function (err, data) {
+    authorized({ method: 'GET', url: url, fallback: url.replace('/api/v2/', '/api/v1/'), timeout: 10000 }, function (err, data) {
       if (err) return callback(err, null);
       callback(null, listFrom(data));
     });
   }
 
   function categories(callback) {
-    authorized({ method: 'GET', url: HOSTS.home + '/api/v1/categories' }, function (err, data) {
+    authorized({ method: 'GET', url: HOSTS.home + '/api/v1/categories', timeout: 10000 }, function (err, data) {
       if (err) return callback(err, null);
       callback(null, data && Array.isArray(data.categories) ? data.categories : listFrom(data));
     });
@@ -762,9 +795,13 @@
   /* ── Profile ────────────────────────────────────────────────────────── */
 
   function profile(callback) {
-    authorized({ method: 'GET', url: HOSTS.auth + '/api/v2/users/profile' }, function (err, data) {
-      if (err) return callback(err, null);
-      callback(null, data || null);
+    authorized({ method: 'GET', url: HOSTS.auth + '/api/v2/users/profile', timeout: 10000 }, function (err, data) {
+      if (!err) return callback(null, data || null);
+      if (err.kind === 'auth') return callback(err, null);
+      authorized({ method: 'GET', url: HOSTS.authAlt + '/api/v2/users/profile', timeout: 10000 }, function (altErr, altData) {
+        if (!altErr) return callback(null, altData || null);
+        callback(err, null);
+      });
     });
   }
 
@@ -812,19 +849,34 @@
   function registerDevice(callback) {
     var name = model();
     var lg = global.beletWebosIdentity && global.beletWebosIdentity();
+    var body = {
+      app_version: CLIENT.appVersion,
+      fingerprint: device,
+      model: lg ? lg.model : 'Samsung Tizen ' + name,
+      os_version: lg ? lg.osVersion : tizenVersion()
+    };
     authorized({
       method: 'POST',
       url: HOSTS.auth + '/api/v1/users/device',
-      body: {
-        app_version: CLIENT.appVersion,
-        fingerprint: device,
-        model: lg ? lg.model : 'Samsung Tizen ' + name,
-        os_version: lg ? lg.osVersion : tizenVersion()
-      },
+      timeout: 10000,
+      body: body,
       headers: { 'X-Device-Model': name }
     }, function (err, data) {
-      if (!callback) return;
-      callback(err || null, data || null);
+      if (!err || err.kind === 'auth' || global.beletRegisterDeviceNative) {
+        if (callback) callback(err || null, data || null);
+        return;
+      }
+      authorized({
+        method: 'POST',
+        url: HOSTS.authAlt + '/api/v1/users/device',
+        timeout: 10000,
+        body: body,
+        headers: { 'X-Device-Model': name }
+      }, function (altErr, altData) {
+        if (!callback) return;
+        if (!altErr) return callback(null, altData || null);
+        callback(err || altErr, null);
+      }, sendDeviceRegistration);
     }, sendDeviceRegistration);
   }
 
