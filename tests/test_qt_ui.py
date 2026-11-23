@@ -362,7 +362,8 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     with open(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'ui.html'), 'r', encoding='utf-8') as hf:
         ui_html = hf.read()
     for token in (
-        "openSysTune('samsung')", 'checkSamSdb()', 'authSamCert()', 'installSamBelet()', 'launchSamBelet()', 'removeSamBelet()',
+        "openSysTune('samsung')", 'checkSamSdb()', 'authSamCert()',
+        'installSamBeletClient()', 'installSamBeletDirectClient()', 'launchSamBeletClient()', 'removeSamBeletClient()',
         'ethAdapter', 'startEthernetShare()', 'stopEthernetShare()',
         'dnsPreset', 'dnsPrimary', 'dnsSecondary', 'dnsApplyUplink', 'applySharingDns()', 'resetSharingDns()',
         'alemPortal', 'samAlemPortal', 'installAlem()', 'installSamAlem()',
@@ -394,7 +395,8 @@ def test_new_buttons_have_neon_styles(qt_app, tmp_path, monkeypatch):
     for text, style in [
         ('Подключить пульт', 'PrimaryBtn'), ('Отключить', 'GhostBtn'),
         ('▲', 'SamKeyPrimary'), ('HOME', 'SamKeyBtn'),
-        ('УСТАНОВИТЬ BELET SAMSUNG · НОВЫЙ КЛИЕНТ', 'NormalBtn'),
+        ('Belet TV · С обходом (1970 / TLS)', 'PrimaryBtn'),
+        ('Belet TV · Без обхода (Новый клиент)', 'NormalBtn'),
         ('УСТАНОВИТЬ НА LG', 'PrimaryBtn'), ('УСТАНОВИТЬ НА SAMSUNG', 'PrimaryBtn'),
     ]:
         assert any(button.objectName() == style for button in by_text(text))
