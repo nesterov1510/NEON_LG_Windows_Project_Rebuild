@@ -381,6 +381,18 @@ def test_connect_tv_ssh_falls_back_to_legacy_ssh_rsa_for_lg_dropbear(tmp_api):
     srv.listen(6)
     stop_event = threading.Event()
 
+    def handle_conn(conn):
+        conn.settimeout(None)
+        tr = paramiko.Transport(conn, disabled_algorithms={'pubkeys': ['rsa-sha2-512', 'rsa-sha2-256']})
+        tr.add_server_key(host_key)
+        tr.local_version = 'SSH-2.0-dropbear_2019.78'
+        tr.server_sig_algs = False
+        tr.start_server(server=LegacyDropbearServer())
+        deadline = time.time() + 10.0
+        while tr.is_active() and time.time() < deadline and not stop_event.is_set():
+            time.sleep(0.03)
+        tr.close()
+
     def serve():
         while not stop_event.is_set():
             try:
@@ -390,18 +402,7 @@ def test_connect_tv_ssh_falls_back_to_legacy_ssh_rsa_for_lg_dropbear(tmp_api):
                 continue
             except OSError:
                 break
-            tr = paramiko.Transport(conn, disabled_algorithms={'pubkeys': ['rsa-sha2-512', 'rsa-sha2-256']})
-            tr.add_server_key(host_key)
-            tr.local_version = 'SSH-2.0-dropbear_2019.78'
-            tr.server_sig_algs = False
-            tr.start_server(server=LegacyDropbearServer())
-            # Generous deadline: the client may retry up to three key
-            # profiles (default, rsa-sha2-256, legacy ssh-rsa); on a loaded
-            # CI runner the handshakes can exceed a tight timeout.
-            deadline = time.time() + 10.0
-            while tr.is_active() and time.time() < deadline and not stop_event.is_set():
-                time.sleep(0.03)
-            tr.close()
+            threading.Thread(target=handle_conn, args=(conn,), daemon=True).start()
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
