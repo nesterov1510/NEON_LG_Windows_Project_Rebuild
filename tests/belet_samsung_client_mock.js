@@ -275,6 +275,7 @@ function buildDom() {
   add(homeEmpty, 'h2');
   add(homeEmpty, 'p');
   add(homeEmpty, 'button', 'homeReload', 'ghost focusable');
+  add(homeEmpty, 'button', 'homeHelp', 'ghost focusable');
 
   const browse = add(main, 'section', 'browse', 'screen hidden');
   add(browse, 'h1', 'browseTitle');
@@ -347,6 +348,7 @@ function buildDom() {
   const about = add(main, 'section', 'about', 'screen hidden');
   add(about, 'h1');
   add(about, 'div', 'aboutStatus', 'about-card');
+  add(about, 'div', 'aboutClockAlert', 'about-alert hidden');
   add(about, 'button', 'aboutRetest', 'primary focusable');
   add(about, 'button', 'aboutBack', 'ghost focusable');
 
@@ -379,14 +381,14 @@ function buildDom() {
     'phoneDisplay', 'phoneValue', 'methodPrev', 'methodDisplay', 'methodValue', 'methodNext', 'sendCode', 'toQr',
     'loginCode', 'codeDisplay', 'codeValue', 'verifyCode', 'resendCode', 'backToPhone', 'loginQr', 'qrImage',
     'qrStatus', 'qrRefresh', 'toPhone', 'loginHelp', 'home', 'hero', 'heroImage', 'heroTitle', 'heroMeta',
-    'heroText', 'heroPlay', 'heroInfo', 'rows', 'homeEmpty', 'homeReload', 'browse', 'browseTitle', 'browseChips',
+    'heroText', 'heroPlay', 'heroInfo', 'rows', 'homeEmpty', 'homeReload', 'homeHelp', 'browse', 'browseTitle', 'browseChips',
     'browseGrid', 'browseMore', 'browseMoreBtn', 'browseEmpty', 'search', 'searchField', 'searchValue',
     'searchGrid', 'searchEmpty', 'detail', 'detailBackdrop', 'detailPoster', 'detailTitle', 'detailMeta',
     'detailGenres', 'detailText', 'detailPlay', 'detailFav', 'detailTrailer', 'episodesSection', 'seasonChips',
     'episodeList', 'player', 'video', 'playerOsd', 'playerTitle', 'playerSubtitle', 'playerBadge', 'progress',
     'progressBuffer', 'progressFill', 'progressKnob', 'timeNow', 'timeTotal', 'playerStatus', 'playerSpinner',
     'profile', 'profilePhone', 'profilePlan', 'profileRefresh', 'profileFavorites', 'profileHelp',
-    'profileLogout', 'about', 'aboutStatus', 'aboutRetest', 'aboutBack', 'numpad', 'numpadTitle', 'numpadValue',
+    'profileLogout', 'about', 'aboutStatus', 'aboutClockAlert', 'aboutRetest', 'aboutBack', 'numpad', 'numpadTitle', 'numpadValue',
     'numpadKeys', 'numpadDelete', 'numpadClear', 'numpadDone', 'keyboard', 'keyboardTitle', 'keyboardValue',
     'keyboardKeys', 'kbDelete', 'kbClear', 'kbDone', 'dialog', 'dialogTitle', 'dialogText', 'dialogActions',
     'toast', 'avPlayer'].forEach(id => { ids[id] = document.getElementById(id); });
@@ -1301,6 +1303,73 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   });
   runTimers();
   assert(ids.homeEmpty.classList.contains('hidden'), 'post-reboot home loads cleanly once server responds');
+  assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
+})();
+
+/* 17. TV clock reset to 1970 on Ethernet: explicit guidance + about alert + auto-recovery once NTP syncs */
+(() => {
+  const RealDate = Date;
+  let fakeNow = RealDate.UTC(1970, 0, 1, 1, 2, 0);
+  function FakeDate(arg) {
+    if (!(this instanceof FakeDate)) return new RealDate(fakeNow).toString();
+    return new RealDate(arg === undefined ? fakeNow : arg);
+  }
+  FakeDate.now = () => fakeNow;
+  FakeDate.UTC = RealDate.UTC;
+  FakeDate.parse = RealDate.parse;
+
+  buildDom();
+  timers.length = 0;
+  const clockSandbox = Object.assign({}, sandbox, {
+    document,
+    Date: FakeDate,
+    webapis: { network: { getActiveConnectionType: () => 3 } }
+  });
+  clockSandbox.window = clockSandbox;
+  clockSandbox.global = clockSandbox;
+  clockSandbox.self = clockSandbox;
+  vm.createContext(clockSandbox);
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), clockSandbox, { filename: 'api.js' });
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), clockSandbox, { filename: 'app.js' });
+
+  assert(ids.bootStatus.textContent.indexOf('времени') >= 0, 'boot pauses briefly for TV clock sync when year < 2024');
+
+  // Step through the 4s boot wait and initial HTTP 0 failure while TV clock is still 1970
+  route('https://beletapis.com/api/v1/users/device', 0, {});
+  route('https://api.belet.tm/api/v1/users/device', 0, {});
+  route('/api/v2/home_page', 0, {});
+  let steps = 0;
+  while (timers.length && steps < 10) {
+    const batch = timers.splice(0, timers.length);
+    for (const item of batch) item.fn();
+    steps += 1;
+  }
+  assert(!ids.home.classList.contains('hidden'), 'home screen opens after initial clock wait');
+  assert(!ids.homeEmpty.classList.contains('hidden'));
+  assert(ids.homeEmpty.querySelector('h2').textContent.indexOf('дата и время') >= 0, 'homeEmpty highlights 1970 TV clock error');
+  assert(ids.homeEmpty.querySelector('p').textContent.indexOf('1970') >= 0, 'homeEmpty prints 1970 date');
+
+  // Opening Проверка сети и справка directly via #homeHelp shows #aboutClockAlert
+  route('https://beletapis.com/api/v1/auth/available-otp', 0, {});
+  route('https://homepage.belet.me/api/v1/categories', 0, {});
+  route('https://film.beletapis.com/api/v3/movie/1', 0, {});
+  click(ids.homeHelp);
+  assert(!ids.about.classList.contains('hidden'));
+  assert(!ids.aboutClockAlert.classList.contains('hidden'), 'about shows clock alert when year < 2024');
+
+  // Back to home, then simulate TV NTP syncing clock from 1970 to 2026
+  click(ids.aboutBack);
+  assert(!ids.home.classList.contains('hidden'));
+  fakeNow = RealDate.UTC(2026, 10, 23, 12, 0, 0);
+  route('https://beletapis.com/api/v1/users/device', 200, { msg: 'ok' });
+  route('/api/v2/home_page', 200, {
+    status: 'ok',
+    result: [{ id: 1, title: 'После синхронизации часов', source: 'top', items: [
+      { id: 43, type_id: 1, name: 'Synced Clock Film 43', images: { vertical: { medium: { url: 'https://img.example/43.jpg' } } } }
+    ] }]
+  });
+  runTimers();
+  assert(ids.homeEmpty.classList.contains('hidden'), 'clock sync automatically reloads home and hides error');
   assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
 })();
 

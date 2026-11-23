@@ -7,7 +7,7 @@
   <feature name="http://tizen.org/feature/screen.size.all"/>
   <access origin="*" subdomains="true"/>
   <tizen:allow-navigation>*</tizen:allow-navigation>
-  <tizen:content-security-policy>default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src https://beletapis.com https://*.beletapis.com https://api.belet.tm https://belet.tm https://*.belet.tm https://*.belet.me https://belet.me; img-src https: data:; media-src https: blob:; worker-src blob:</tizen:content-security-policy>
+  <tizen:content-security-policy>default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src https://beletapis.com https://*.beletapis.com https://api.belet.tm https://belet.tm https://*.belet.tm https://*.belet.me https://belet.me; img-src 'self' https: data:; media-src https: blob:; worker-src blob:</tizen:content-security-policy>
   <tizen:privilege name="http://tizen.org/privilege/internet"/>
   <tizen:privilege name="http://developer.samsung.com/privilege/network.public"/>
   <tizen:privilege name="http://developer.samsung.com/privilege/avplay"/>

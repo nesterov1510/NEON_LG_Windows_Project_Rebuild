@@ -118,6 +118,7 @@ def test_client_targets_belet_api_hosts_and_ships_csp():
     connect = csp[csp.index('connect-src'):csp.index(';', csp.index('connect-src'))]
     assert 'https://*.belet.me' in connect
     assert 'https://*.belet.tm' in connect
+    assert "img-src 'self' https: data:" in csp
     assert 'media-src https: blob:' in csp
     assert 'http://developer.samsung.com/privilege/avplay' in config, 'AVPlay needs its Tizen privilege'
     api = _client_source('api.js')

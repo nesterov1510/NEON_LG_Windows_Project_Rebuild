@@ -45,6 +45,8 @@
     bootDone: false,
     bootTimer: null,
     bootSession: null,
+    clockSynced: true,
+    clockSyncTimer: null,
     homeLoaded: false,
     homeGen: 0,
     homeRetryTimer: null,
@@ -435,6 +437,21 @@
     }
   }
 
+  function isClockInvalid() {
+    return new Date().getFullYear() < 2024;
+  }
+
+  function clockDateText() {
+    var d = new Date();
+    return pad2(d.getDate()) + '.' + pad2(d.getMonth() + 1) + '.' + d.getFullYear() + ' ' +
+      pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+
+  function clockHelpText() {
+    return 'Время на ТВ сброшено (' + clockDateText() + ') — браузер блокирует HTTPS (HTTP 0). ' +
+      'Откройте Настройки ТВ → Общие → Диспетчер системы → Время → Часы → Авто (или задайте текущую дату вручную).';
+  }
+
   var deviceRegistration = { state: 'не отправлена', model: '' };
 
   function registerDevice() {
@@ -442,7 +459,13 @@
     Belet.registerDevice(function (err) {
       deviceRegistration.model = Belet.model();
       if (err) {
-        deviceRegistration.state = 'ошибка: ' + describeError(err);
+        if (err.kind === 'network' && isClockInvalid()) {
+          deviceRegistration.state = 'ожидает синхронизации времени (HTTP 0)';
+        } else if (err.kind === 'network') {
+          deviceRegistration.state = 'нет ответа от сервера (HTTP 0)';
+        } else {
+          deviceRegistration.state = 'ошибка: ' + describeError(err);
+        }
         return;
       }
       deviceRegistration.state = 'сервер принял регистрацию телевизора';
@@ -452,7 +475,8 @@
   function describeError(err) {
     if (!err) return 'Неизвестная ошибка.';
     if (err.kind === 'network') {
-      return 'Нет ответа от серверов Belet (HTTP 0). Проверьте Wi-Fi и время на телевизоре. ' +
+      if (isClockInvalid()) return clockHelpText();
+      return 'Нет ответа от серверов Belet (HTTP 0). Проверьте подключение к сети и время на телевизоре. ' +
         'Если сеть работает, встроенный браузер ТВ мог заблокировать запрос политикой CORS.';
     }
     if (err.kind === 'auth') return 'Сессия истекла. Войдите в аккаунт снова.';
@@ -488,6 +512,27 @@
     if (connType === 3) return 'Ethernet';
     if (typeof window.navigator !== 'undefined' && window.navigator.onLine === false) return 'офлайн';
     return 'подключена';
+  }
+
+  function clearClockSyncTimer() {
+    if (state.clockSyncTimer) {
+      clearTimeout(state.clockSyncTimer);
+      state.clockSyncTimer = null;
+    }
+  }
+
+  function scheduleClockWatch() {
+    clearClockSyncTimer();
+    if (!isClockInvalid()) {
+      state.clockSynced = true;
+      return;
+    }
+    state.clockSynced = false;
+    state.clockSyncTimer = setTimeout(function () {
+      state.clockSyncTimer = null;
+      tickClock();
+      if (!state.clockSynced) scheduleClockWatch();
+    }, 2000);
   }
 
   function clearBootTimer() {
@@ -626,6 +671,7 @@
         isNetwork = err.kind === 'network';
         maxRetries = isNetwork ? 3 : 1;
         delays = [1200, 2500, 5000];
+        if (isClockInvalid()) scheduleClockWatch();
         if (retryAttempt === 0 && !Belet.hasSession() && Belet.resetDevice) Belet.resetDevice();
         state.login.methods = fallbackOtpMethods();
         state.login.otpFallback = true;
@@ -808,10 +854,13 @@
         maxRetries = isNetwork ? 3 : 1;
         delays = [1200, 2500, 5000];
         if (retryAttempt === 0 && !Belet.hasSession() && Belet.resetDevice) Belet.resetDevice();
+        if (isClockInvalid()) scheduleClockWatch();
         if (retryAttempt < maxRetries) {
           delay = isNetwork ? delays[retryAttempt] : 900;
           $('qrStatus').textContent = isNetwork
-            ? 'Нет связи с сервером (HTTP 0). Повторяем запрос QR-кода…'
+            ? (isClockInvalid()
+              ? 'Время ТВ сброшено (' + clockDateText() + ') — HTTPS блокируется. Повторяем запрос…'
+              : 'Нет связи с сервером (HTTP 0). Повторяем запрос QR-кода…')
             : 'Повторяем запрос QR-кода…';
           state.qr.timer = setTimeout(function () {
             state.qr.timer = null;
@@ -819,9 +868,11 @@
           }, delay);
           return;
         }
-        $('qrStatus').textContent = 'Не удалось получить QR-код' +
-          (err && err.http ? ' (HTTP ' + err.http + ')' : (isNetwork ? ' (HTTP 0)' : '')) +
-          '. Проверьте сеть и обновите.';
+        $('qrStatus').textContent = (isNetwork && isClockInvalid())
+          ? clockHelpText()
+          : ('Не удалось получить QR-код' +
+            (err && err.http ? ' (HTTP ' + err.http + ')' : (isNetwork ? ' (HTTP 0)' : '')) +
+            '. Проверьте сеть и обновите.');
         return;
       }
       code = data.code;
@@ -1067,9 +1118,12 @@
           if (!collected.length) {
             delays = [1500, 3000, 5000, 7000];
             $('homeEmpty').classList.remove('hidden');
+            if (isClockInvalid()) scheduleClockWatch();
             if (err.kind === 'network' && retryAttempt < delays.length) {
               delay = delays[retryAttempt];
-              $('homeEmpty').querySelector('h2').textContent = 'Подключение к серверам Belet…';
+              $('homeEmpty').querySelector('h2').textContent = isClockInvalid()
+                ? 'Сбиты дата и время на телевизоре'
+                : 'Подключение к серверам Belet…';
               $('homeEmpty').querySelector('p').textContent = describeError(err) +
                 '\nАвтоматический повтор через ' + Math.round(delay / 1000) + ' с…';
               focusReload();
@@ -1081,7 +1135,9 @@
               }, delay);
               return;
             }
-            $('homeEmpty').querySelector('h2').textContent = 'Каталог не загрузился';
+            $('homeEmpty').querySelector('h2').textContent = isClockInvalid()
+              ? 'Сбиты дата и время на телевизоре'
+              : 'Каталог не загрузился';
             $('homeEmpty').querySelector('p').textContent = describeError(err);
             focusReload();
             return;
@@ -2354,7 +2410,17 @@
 
   function runHealthCheck() {
     var host = $('aboutStatus');
+    var alertBox = $('aboutClockAlert');
     host.innerHTML = '<div class="about-row"><span>Проверка…</span><span></span></div>';
+    if (isClockInvalid()) {
+      scheduleClockWatch();
+      if (alertBox) {
+        alertBox.textContent = clockHelpText();
+        setHidden(alertBox, false);
+      }
+    } else if (alertBox) {
+      setHidden(alertBox, true);
+    }
     Belet.healthCheck(function (results) {
       var labels = {
         auth: 'Авторизация (beletapis.com)',
@@ -2369,6 +2435,14 @@
         pad2(now.getHours()) + ':' + pad2(now.getMinutes()) +
         (timeValid ? '' : ' (не синхронизировано — HTTPS блокируется)');
       var netOk = isNetworkReady();
+      if (alertBox) {
+        if (!timeValid) {
+          alertBox.textContent = clockHelpText();
+          setHidden(alertBox, false);
+        } else {
+          setHidden(alertBox, true);
+        }
+      }
       host.innerHTML = '';
       order.forEach(function (key) {
         var value = results[key] || 'нет ответа';
@@ -2657,6 +2731,7 @@
     };
     $('heroInfo').onclick = function () { if (state.home.hero) openDetail(state.home.hero); };
     $('homeReload').onclick = function () { state.homeLoaded = false; loadHome(true); };
+    $('homeHelp').onclick = openAbout;
 
     $('browseMoreBtn').onclick = function () { loadCategory(state.browse.id, false); };
     $('searchField').onclick = editSearch;
@@ -2696,19 +2771,23 @@
     });
   }
 
-  function recoverNetworkScreens() {
+  function recoverNetworkScreens(fromClockSync) {
     if (!isNetworkReady()) return;
     if (state.screen === 'boot' && !state.bootDone) {
       startBootSession();
       return;
     }
     if (state.screen === 'home' && !state.homeLoaded && Belet.hasSession()) {
+      if (fromClockSync && deviceRegistration.state !== 'сервер принял регистрацию телевизора' &&
+          deviceRegistration.state !== 'отправляется…') {
+        registerDevice();
+      }
       loadHome(false, 0);
       return;
     }
     if (state.screen === 'login' && !state.login.busy) {
-      if (!hasClass($('loginQr'), 'hidden') && !state.qr.code) startQr(0);
-      else if (!hasClass($('loginPhone'), 'hidden') && (!state.login.methods.length || state.login.otpFallback)) loadOtpMethods(0);
+      if (!hasClass($('loginQr'), 'hidden') && (!state.qr.code || fromClockSync)) startQr(0);
+      else if (!hasClass($('loginPhone'), 'hidden') && (!state.login.methods.length || state.login.otpFallback || fromClockSync)) loadOtpMethods(0);
       return;
     }
     if (state.screen === 'browse' && !state.browse.loading && !state.browse.items.length && Belet.hasSession()) {
@@ -2721,6 +2800,11 @@
       return;
     }
     if (state.screen === 'about') {
+      if (fromClockSync && Belet.hasSession() &&
+          deviceRegistration.state !== 'сервер принял регистрацию телевизора' &&
+          deviceRegistration.state !== 'отправляется…') {
+        registerDevice();
+      }
       runHealthCheck();
     }
   }
@@ -2759,7 +2843,14 @@
   function tickClock() {
     var node = $('clock');
     var date = new Date();
+    var nowSynced = date.getFullYear() >= 2024;
     if (node) node.textContent = pad2(date.getHours()) + ':' + pad2(date.getMinutes());
+    if (!state.clockSynced && nowSynced) {
+      state.clockSynced = true;
+      clearClockSyncTimer();
+      toast('Время синхронизировано — подключаемся к Belet…', 3000);
+      recoverNetworkScreens(true);
+    }
   }
 
   function startBootSession() {
@@ -2767,6 +2858,7 @@
     if (state.bootDone) return;
     state.bootDone = true;
     clearBootTimer();
+    if (isClockInvalid()) scheduleClockWatch();
     session = state.bootSession;
     if (session) {
       $('bootStatus').textContent = 'Восстанавливаем сессию…';
@@ -2779,10 +2871,15 @@
   }
 
   function waitForNetworkAtBoot(waited) {
+    var netOk = isNetworkReady();
+    var clockOk = !isClockInvalid();
     if (state.bootDone) return;
-    if (isNetworkReady() || waited >= 8000) {
+    if ((netOk && clockOk) || (!netOk && waited >= 8000) || (netOk && !clockOk && waited >= 4000)) {
       startBootSession();
       return;
+    }
+    if (netOk && !clockOk) {
+      $('bootStatus').textContent = 'Ожидаем синхронизацию времени телевизора…';
     }
     state.bootTimer = setTimeout(function () {
       state.bootTimer = null;
@@ -2793,14 +2890,17 @@
   function boot() {
     registerTvKeys();
     wire();
+    state.clockSynced = !isClockInvalid();
     tickClock();
     setInterval(tickClock, 30000);
     state.bootSession = Belet.init();
-    if (isNetworkReady()) {
+    if (isNetworkReady() && !isClockInvalid()) {
       startBootSession();
       return;
     }
-    $('bootStatus').textContent = 'Ожидаем подключение телевизора к сети…';
+    $('bootStatus').textContent = isNetworkReady()
+      ? 'Ожидаем синхронизацию времени телевизора…'
+      : 'Ожидаем подключение телевизора к сети…';
     waitForNetworkAtBoot(0);
   }
 

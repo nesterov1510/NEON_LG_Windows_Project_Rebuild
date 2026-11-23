@@ -164,8 +164,11 @@ button {
 .card.continue .progress-mini { position: absolute; left: 0; right: 0; bottom: 0; height: 6px; background: rgba(255,255,255,.22); z-index: 2; }
 .card.continue .progress-mini i { display: block; height: 100%; background: #fff; }
 
-.empty { text-align: center; padding: 90px 40px; color: #a5a5ad; }
+.empty { text-align: center; padding: 90px 40px; color: #a5a5ad; max-width: 980px; margin: 0 auto; }
 .empty h2 { color: #fff; font-size: 30px; margin-bottom: 8px; }
+.empty p { white-space: pre-line; line-height: 1.5; }
+.empty-actions { display: flex; justify-content: center; margin-top: 22px; }
+.empty-actions > * + * { margin-left: 14px; }
 
 /* ── Grid screens ──────────────────────────────────────────────────── */
 .screen-head {
@@ -297,17 +300,23 @@ button {
 
 /* ── About ─────────────────────────────────────────────────────────── */
 #about { overflow-y: auto; }
-.about-layout { padding: 6px 64px 90px; max-width: 1100px; }
-.about-card { background: #141418; border: 1px solid #26262b; border-radius: 16px; padding: 8px 24px; margin-bottom: 26px; }
-.about-row { display: flex; justify-content: space-between; padding: 14px 0; border-bottom: 1px solid #232328; font-size: 20px; }
+#about .screen-head { padding: 98px 64px 14px; }
+.about-layout { padding: 4px 64px 56px; max-width: 1180px; }
+.about-card { background: #141418; border: 1px solid #26262b; border-radius: 16px; padding: 6px 24px; margin-bottom: 16px; }
+.about-row { display: flex; justify-content: space-between; align-items: baseline; padding: 9px 0; border-bottom: 1px solid #232328; font-size: 19px; }
 .about-row:last-child { border-bottom: 0; }
-.about-row span:first-child { color: #a9a9b2; margin-right: 20px; }
-.about-row span:last-child { text-align: right; word-break: break-all; }
+.about-row span:first-child { color: #a9a9b2; margin-right: 20px; flex-shrink: 0; }
+.about-row span:last-child { text-align: right; word-break: break-word; }
 .about-row .ok { color: #8ce99a; }
 .about-row .bad { color: #ffa8a8; }
-.about-text p { color: #b6b6bf; font-size: 19px; line-height: 1.55; }
-.about-actions { display: flex; margin-top: 26px; }
+.about-alert {
+  background: rgba(255, 136, 136, 0.12); border: 1px solid rgba(255, 152, 152, 0.45);
+  border-radius: 12px; padding: 14px 18px; margin-bottom: 16px;
+  color: #ffd8d8; font-size: 18px; line-height: 1.45;
+}
+.about-actions { display: flex; margin: 16px 0 18px; }
 .about-actions > * + * { margin-left: 14px; }
+.about-text p { color: #b6b6bf; font-size: 18px; line-height: 1.45; margin: 0 0 10px; }
 
 /* ── Overlays ──────────────────────────────────────────────────────── */
 .overlay {
