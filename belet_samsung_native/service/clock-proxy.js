@@ -404,7 +404,7 @@
 
     proxyHostHdr = (req.headers && req.headers.host) ? String(req.headers.host) : ('127.0.0.1:' + PORT);
     proxyOrigin = 'http://' + proxyHostHdr;
-    clockOk = (new Date().getFullYear() >= 2024);
+    clockOk = (new Date().getFullYear() >= 2026);
     inH = req.headers || {};
     outH = {};
     reqMethod = String(req.method || 'GET').toUpperCase();

@@ -2998,7 +2998,7 @@ def _build_belet_proxy_js(target_url=BELET_URL, nav_js=None):
         "    headers:outHeaders\n"
         "  };\n"
         "  if(BASE_PROTOCOL==='https:'){\n"
-        "    reqOpts.rejectUnauthorized=(upHost==='homepage.belet.me')&&(new Date().getFullYear()>=2024);\n"
+        "    reqOpts.rejectUnauthorized=(upHost==='homepage.belet.me')&&(new Date().getFullYear()>=2026);\n"
         "    reqOpts.servername=upHost;\n"
         "    if(httpsAgent)reqOpts.agent=httpsAgent;\n"
         "  }else if(httpAgent){\n"
@@ -3977,8 +3977,8 @@ def build_belet_wgt(
         '  wrtTried=true;\n'
         '  var done=false;\n'
         '  function finish(){if(done)return;done=true;cb();}\n'
-        '  try{window.addEventListener("neon-wrt-ready",finish);}catch(e){}\n'
-        '  setTimeout(finish,2500);\n'
+        '  try{window.addEventListener("neon-wrt-ready",function(){if(!done){finish();}else{launchProxyService();}});}catch(e){}\n'
+        '  setTimeout(finish,900);\n'
         '  try{\n'
         '    if(document.createElement&&document.body){\n'
         '      var s=document.createElement("script");\n'
@@ -4315,6 +4315,10 @@ def build_belet_wgt(
         '              resolved=true;\n'
         '              bootDiag="proxy_timeout_"+svcLaunchDiag+"_cap_"+readWebServiceCapInfo()+"_"+lastErr;\n'
         '              svcTimeoutDiag=bootDiag;\n'
+        '              if(new Date().getFullYear()<2026){\n'
+        '                showErrorUi("Время ТВ не настроено — прямые HTTPS-запросы отключены, локальный прокси не ответил ("+formatBootDiag()+"). Нажмите Повторить.");\n'
+        '                return;\n'
+        '              }\n'
         '              loadViaWebViewFetch(TARGET);\n'
         '              return;\n'
         '            }\n'

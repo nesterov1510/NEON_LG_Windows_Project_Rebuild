@@ -1337,16 +1337,14 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   clockSandbox.window = clockSandbox;
   clockSandbox.global = clockSandbox;
   clockSandbox.self = clockSandbox;
+  calls.length = 0;
   vm.createContext(clockSandbox);
   vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), clockSandbox, { filename: 'api.js' });
   vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), clockSandbox, { filename: 'app.js' });
 
-  assert(ids.bootStatus.textContent.indexOf('времени') >= 0, 'boot pauses briefly for TV clock sync when year < 2024');
+  assert(ids.bootStatus.textContent.indexOf('времени') >= 0, 'boot pauses briefly for TV clock sync when year < 2026');
 
-  // Step through the 4s boot wait and initial HTTP 0 failure while TV clock is still 1970
-  route('https://beletapis.com/api/v1/users/device', 0, {});
-  route('https://api.belet.tm/api/v1/users/device', 0, {});
-  route('/api/v2/home_page', 0, {});
+  // Step through the 4s boot wait while TV clock is still 1970 — ZERO direct https:// requests sent
   let steps = 0;
   while (timers.length && steps < 10) {
     const batch = timers.splice(0, timers.length);
@@ -1357,17 +1355,16 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   assert(!ids.homeEmpty.classList.contains('hidden'));
   assert(ids.homeEmpty.querySelector('h2').textContent.indexOf('дата и время') >= 0, 'homeEmpty highlights 1970 TV clock error');
   assert(ids.homeEmpty.querySelector('p').textContent.indexOf('1970') >= 0, 'homeEmpty prints 1970 date');
+  assert(!calls.some(c => c.url.indexOf('https://') === 0), 'never sends direct https:// during boot/home when clock is invalid');
 
-  // Opening Проверка сети и справка directly via #homeHelp shows #aboutClockAlert
-  route('https://beletapis.com/api/v1/auth/available-otp', 0, {});
-  route('https://homepage.belet.me/api/v1/categories', 0, {});
-  route('https://film.beletapis.com/api/v3/movie/1', 0, {});
+  // Opening Проверка сети и справка directly via #homeHelp shows #aboutClockAlert without probing https://
   click(ids.homeHelp);
   assert(!ids.about.classList.contains('hidden'));
   assert.strictEqual(ids.clock.textContent, '15:42', 'topbar uses Tizen UI clock when manual time is set');
-  assert(!ids.aboutClockAlert.classList.contains('hidden'), 'about shows clock alert when browser SSL clock < 2024');
+  assert(!ids.aboutClockAlert.classList.contains('hidden'), 'about shows clock alert when browser SSL clock < 2026');
   assert(ids.aboutStatus.textContent.indexOf('Время Tizen') >= 0, 'about highlights mismatch between Tizen manual clock and browser SSL clock');
   assert(ids.aboutClockAlert.textContent.indexOf('23.11.2026') >= 0, 'alert explains manual Tizen time vs browser SSL 1970 clock');
+  assert(!calls.some(c => c.url.indexOf('https://') === 0), 'health check skips direct https:// when clock is invalid');
 
   // Back to home, then simulate TV NTP syncing clock from 1970 to 2026
   click(ids.aboutBack);
@@ -1568,9 +1565,6 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   pcSandbox.global = pcSandbox;
   pcSandbox.self = pcSandbox;
   vm.createContext(pcSandbox);
-  route('https://beletapis.com/api/v1/users/device', 0, {});
-  route('https://api.belet.tm/api/v1/users/device', 0, {});
-  route('/api/v2/home_page', 0, {});
   vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), pcSandbox, { filename: 'api.js' });
   vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), pcSandbox, { filename: 'app.js' });
   let s19 = 0;
@@ -1581,6 +1575,7 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   }
   assert(!ids.home.classList.contains('hidden'));
   assert(!ids.homeEmpty.classList.contains('hidden'));
+  assert(!calls.some(c => c.url.indexOf('https://') === 0), 'service-free 1970 TV never sends direct https:// requests');
   assert(!ids.homePcBridge.classList.contains('hidden'), 'PC Bridge button visible when clock is 1970');
 
   click(ids.homePcBridge);
@@ -1714,6 +1709,84 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   assert(launchCount >= 2, 'ClockProxy service launch retried during cold wait (launches=' + launchCount + ')');
   assert(!calls.some(c => c.url.indexOf('https://') === 0), 'never sent direct https:// request while ClockProxy was starting');
   assert(!calls.some(c => c.url.indexOf('192.168.1.99') >= 0), 'skipped unreachable auto-baked PC bridge during cold boot');
+})();
+
+/* 21. Unconfigured 2025 factory clock without session launches ClockProxy immediately and skips https:// OTP/QR calls */
+(() => {
+  const RealDate = Date;
+  const fake2025 = RealDate.UTC(2025, 0, 1, 0, 15, 0);
+  function Fake2025(arg) {
+    if (!(this instanceof Fake2025)) return new RealDate(fake2025).toString();
+    return new RealDate(arg === undefined ? fake2025 : arg);
+  }
+  Fake2025.now = () => fake2025;
+  Fake2025.UTC = RealDate.UTC;
+  Fake2025.parse = RealDate.parse;
+
+  buildDom();
+  timers.length = 0;
+  calls.length = 0;
+  delete store.neon_belet_samsung_session_v2;
+
+  let svcLaunches = 0;
+  const s21 = Object.assign({}, sandbox, {
+    document,
+    Date: Fake2025,
+    tizen: {
+      systeminfo: { getCapability: () => '10.0' },
+      ApplicationControl: function (op) { this.operation = op; },
+      application: {
+        launchAppControl: (c, id, ok) => { svcLaunches += 1; if (ok) ok(); }
+      }
+    },
+    webapis: { network: { getActiveConnectionType: () => 3 } }
+  });
+  s21.window = s21;
+  s21.global = s21;
+  s21.self = s21;
+  vm.createContext(s21);
+
+  // First boot without proxy responding -> enters login UI without firing ANY https:// OTP or QR request
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), s21, { filename: 'api.js' });
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), s21, { filename: 'app.js' });
+  route('http://127.0.0.1:18767/__ping', 0, {});
+  route('http://localhost:18767/__ping', 0, {});
+  // Wait for 18s boot loop without proxy -> login opens directly with fallback OTP, zero https:// calls
+  let g21 = 0;
+  while (timers.length && g21 < 80 && ids.login.classList.contains('hidden')) {
+    const batch = timers.splice(0, timers.length);
+    for (const item of batch) {
+      if (routes.length === 0 && !item.fn.toString().includes('tickClock')) {
+        // Queue 0 for ongoing loopback pings until boot opens login
+        route('http://127.0.0.1:18767/__ping', 0, {});
+        route('http://localhost:18767/__ping', 0, {});
+      }
+      item.fn();
+    }
+    g21 += 1;
+  }
+  routes.length = 0;
+  assert(svcLaunches >= 1, '2025 factory clock immediately launched ClockProxy');
+  assert(!ids.login.classList.contains('hidden'), 'login opens cleanly');
+  assert(!calls.some(c => c.url.indexOf('https://') === 0), 'never checked https:// OTP while clock < 2026');
+  click(ids.toQr);
+  assert(!calls.some(c => c.url.indexOf('https://') === 0), 'QR tab also skips direct https:// while clock < 2026');
+  assert(ids.qrStatus.textContent.indexOf('обход SSL') >= 0, 'QR tab shows SSL bypass status');
+
+  // Now ClockProxy responds -> recoverNetworkScreens auto-fetches QR over HTTP ClockProxy!
+  route('http://127.0.0.1:18767/__ping', 200, {
+    ok: true, mode: 'clock-proxy', port: 18767, sslClockYear: 2025,
+    serverTimeMs: new RealDate(2026, 10, 23, 20, 0, 0).getTime()
+  });
+  route('http://127.0.0.1:18767/__proxy/beletapis.com/api/v1/auth/get-qrcode', 200, {
+    code: 'qr-bypass-21',
+    qr_png: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+  });
+  runTimers();
+  assert(calls.some(c => c.url.indexOf('http://127.0.0.1:18767/__proxy/beletapis.com/api/v1/auth/get-qrcode') === 0),
+    'QR request goes through ClockProxy once active');
+  assert(ids.qrImage.src && ids.qrImage.src.indexOf('data:image/png;base64,') === 0, 'QR image renders via ClockProxy');
+  assert(!calls.some(c => c.url.indexOf('https://') === 0), 'zero direct https:// requests across entire 2025 login session');
 })();
 
 assert.strictEqual(routes.length, 0, 'all queued responses were consumed: ' + JSON.stringify(routes.map(r => r.match)));

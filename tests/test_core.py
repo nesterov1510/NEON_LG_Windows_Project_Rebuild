@@ -2846,7 +2846,17 @@ function makeIndexHarness(opts) {
     }
   };
 
+  const RealDate = Date;
+  function FakeYearDate(arg) {
+    if (!(this instanceof FakeYearDate)) return new RealDate(RealDate.UTC(opts.year, 0, 1, 1, 0, 0)).toString();
+    return arg === undefined ? new RealDate(RealDate.UTC(opts.year, 0, 1, 1, 0, 0)) : new RealDate(arg);
+  }
+  FakeYearDate.now = () => RealDate.UTC(opts.year, 0, 1, 1, 0, 0);
+  FakeYearDate.UTC = RealDate.UTC;
+  FakeYearDate.parse = RealDate.parse;
+
   const sandbox = {
+    Date: opts.year ? FakeYearDate : RealDate,
     document: {
       getElementById: (id) => els[id] || null,
       body: { appendChild() {} },
@@ -2984,6 +2994,15 @@ assert(!htmlOut.includes('https://old.example/'));
 const prevWritten = t2.getWrittenHtml();
 t2.els.beletFrame.onload();
 assert.strictEqual(t2.getWrittenHtml(), prevWritten);
+
+// 2b. When TV clock is unconfigured (year < 2026) and proxy times out, never sends direct https://belet.tm XHR
+const t2Clock1970 = makeIndexHarness({ pingOk: false, webServiceCap: false, year: 1970 });
+for (let i = 0; i < 110; i++) {
+  const p = t2Clock1970.timers.find((x) => !x.cleared && x.ms === 250);
+  if (p) { p.cleared = true; p.fn(); }
+}
+assert.strictEqual(t2Clock1970.els.errBox.style.display, 'block');
+assert(!t2Clock1970.sentXhrs.some((x) => x.url.indexOf('https://') === 0));
 
 // Tier-2 neon-xhr parent bridge runs privileged XMLHttpRequest, caches read-only JSON GET for 20s, and invalidates on POST
 const xhrReplies = [];

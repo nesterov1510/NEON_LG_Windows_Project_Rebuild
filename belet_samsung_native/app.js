@@ -455,7 +455,7 @@
   }
 
   function isClockInvalid() {
-    return new Date().getFullYear() < 2024;
+    return new Date().getFullYear() < 2026;
   }
 
   function isClockBypassed() {
@@ -871,21 +871,23 @@
 
   function clockHelpText() {
     var tz = readTizenClock();
-    var tzValid = !!(tz && tz.getFullYear && tz.getFullYear() >= 2024);
+    var tzValid = !!(tz && tz.getFullYear && tz.getFullYear() >= 2026);
     if (tzValid) {
       return 'В настройках ТВ время задано (' + formatDateObj(tz) + '), но системное время браузера осталось ' +
-        clockDateText() + ' — из-за этого HTTPS блокируется (HTTP 0). ' +
-        'Включите Настройки ТВ → Общие → Диспетчер системы → Время → Часы → «Авто» (через интернет/NTP или антенну) ' +
-        'и полностью перезапустите приложение или ТВ (удерживайте POWER 5 сек).';
+        clockDateText() + ' — из-за этого прямые HTTPS-запросы заблокированы. ' +
+        'Запущен режим ожидания обхода часов. Для системной синхронизации: Настройки ТВ → Общие → Диспетчер системы → Время → Часы → «Авто».';
     }
-    return 'Время на ТВ сброшено (' + clockDateText() + ') — браузер блокирует HTTPS (HTTP 0). ' +
-      'Откройте Настройки ТВ → Общие → Диспетчер системы → Время → Часы → «Авто» ' +
-      '(если выставляли вручную — полностью закройте приложение через удержание RETURN и откройте снова или перезагрузите ТВ).';
+    return 'Время на ТВ не настроено (' + clockDateText() + ') — прямые HTTPS-запросы отключены, ожидаем запуск локального обхода SSL или настройку часов в меню ТВ.';
   }
 
   var deviceRegistration = { state: 'не отправлена', model: '' };
 
   function registerDevice() {
+    if (isClockBlockingHttps()) {
+      deviceRegistration.state = 'ожидает обхода SSL (без прямых HTTPS)';
+      scheduleClockWatch();
+      return;
+    }
     deviceRegistration.state = 'отправляется…';
     Belet.registerDevice(function (err) {
       deviceRegistration.model = Belet.model();
@@ -1104,6 +1106,15 @@
     var select = $('methodValue');
     clearOtpTimer();
     state.login.otpFallback = false;
+    if (isClockBlockingHttps()) {
+      state.login.methods = fallbackOtpMethods();
+      state.login.otpFallback = true;
+      state.login.methodIndex = 0;
+      select.textContent = state.login.methods[0].name;
+      updatePhoneDisplay();
+      scheduleClockWatch();
+      return;
+    }
     if (!state.login.methods.length) {
       select.textContent = retryAttempt ? 'Повторяем запрос…' : 'Загружаем способы…';
     }
@@ -1282,6 +1293,19 @@
     $('loginTitle').textContent = 'Вход по QR-коду';
     $('loginHint').textContent = 'Отсканируйте код телефоном — телевизор войдёт автоматически.';
     if (retryAttempt === 0) $('qrImage').removeAttribute('src');
+    if (isClockBlockingHttps()) {
+      $('qrStatus').textContent = canProbeAnyClockBridge()
+        ? ('Время ТВ не настроено (' + clockDateText() + ') — запускаем обход SSL без прямых HTTPS…')
+        : clockHelpText();
+      state.mainFocus = $('qrRefresh');
+      setTimeout(function () {
+        if (state.screen === 'login' && !activeOverlay() && !hasClass($('loginQr'), 'hidden')) {
+          $('qrRefresh').focus();
+        }
+      }, 30);
+      scheduleClockWatch();
+      return;
+    }
     $('qrStatus').textContent = retryAttempt ? 'Повторяем запрос QR-кода…' : 'Получаем QR-код…';
     state.mainFocus = $('qrRefresh');
     setTimeout(function () {
@@ -1550,7 +1574,6 @@
     setHidden($('homeEmpty'), true);
     clear($('rows'));
     state.mainFocus = null;
-    if (showSpinner) toast('Загружаем каталог…', 1800);
 
     function focusReload() {
       state.mainFocus = $('homeReload');
@@ -1558,6 +1581,19 @@
         $('homeReload').focus();
       }
     }
+
+    if (isClockBlockingHttps()) {
+      $('homeEmpty').classList.remove('hidden');
+      updateClockBridgeButtons();
+      $('homeEmpty').querySelector('h2').textContent = 'Сбиты дата и время на телевизоре';
+      $('homeEmpty').querySelector('p').textContent = canProbeAnyClockBridge()
+        ? ('Время ТВ (' + clockDateText() + ') не настроено — прямые HTTPS не отправляются, запускаем локальный обход SSL…')
+        : clockHelpText();
+      focusReload();
+      scheduleClockWatch();
+      return;
+    }
+    if (showSpinner) toast('Загружаем каталог…', 1800);
 
     function fetchPage(offset, pagesLeft) {
       Belet.home(offset, 3, function (err, groups) {
@@ -2884,7 +2920,7 @@
       setHidden(alertBox, true);
     }
     function runProbeAndCheck() {
-      Belet.healthCheck(function (results) {
+      function renderDiag(results) {
         var labels = {
           auth: 'Авторизация (beletapis.com)',
           home: 'Каталог (homepage.belet.me)',
@@ -2893,13 +2929,13 @@
         var order = ['auth', 'home', 'film'];
         var now = new Date();
         var year = now.getFullYear();
-        var timeValid = year >= 2024;
+        var timeValid = year >= 2026;
         var bypassed = isClockBypassed();
         var tz = readTizenClock();
         var tzYear = (tz && tz.getFullYear) ? tz.getFullYear() : 0;
-        var tzValid = tzYear >= 2024;
+        var tzValid = tzYear >= 2026;
         var timeText = formatDateObj(now) +
-          (timeValid ? '' : (bypassed ? ' (обход через локальный прокси ТВ)' : ' (не синхронизировано — HTTPS блокируется)'));
+          (timeValid ? '' : (bypassed ? ' (обход через локальный прокси ТВ)' : ' (не синхронизировано — HTTPS пропущен)'));
         var netOk = isNetworkReady();
         if (alertBox) {
           if (!timeValid && !bypassed) {
@@ -2967,7 +3003,17 @@
         sessionRow.appendChild(el('span', '', Belet.hasSession() ? 'активна' : 'не выполнен вход'));
         host.appendChild(sessionRow);
         updateClockBridgeButtons();
-      });
+      }
+      if (isClockBlockingHttps()) {
+        scheduleClockWatch();
+        renderDiag({
+          auth: 'ожидает обхода SSL (HTTPS пропущен)',
+          home: 'ожидает обхода SSL (HTTPS пропущен)',
+          film: 'ожидает обхода SSL (HTTPS пропущен)'
+        });
+        return;
+      }
+      Belet.healthCheck(renderDiag);
     }
     updateClockBridgeButtons();
     if (isClockBlockingHttps() && canProbeAnyClockBridge()) {
@@ -3341,7 +3387,7 @@
   function tickClock() {
     var node = $('clock');
     var date = new Date();
-    var nowSynced = date.getFullYear() >= 2024;
+    var nowSynced = date.getFullYear() >= 2026;
     var displayDate = date;
     var tz;
     if (nowSynced && isClockBypassed()) {
@@ -3351,7 +3397,7 @@
     }
     if (!nowSynced) {
       tz = readTizenClock();
-      if (tz && tz.getFullYear && tz.getFullYear() >= 2024) displayDate = tz;
+      if (tz && tz.getFullYear && tz.getFullYear() >= 2026) displayDate = tz;
       else if (clockProxyState.serverSynced) displayDate = new Date(Date.now() + clockProxyState.serverOffsetMs);
     }
     if (node) node.textContent = pad2(displayDate.getHours()) + ':' + pad2(displayDate.getMinutes());
@@ -3392,11 +3438,11 @@
       startBootSession();
       return;
     }
-    if (netOk && !clockOk) {
+    if (!clockOk) {
       $('bootStatus').textContent = canProbeAnyClockBridge()
         ? (hasSvc && waited >= 1000
-          ? 'Время ТВ сброшено — запускаем обход SSL (' + Math.ceil(waited / 1000) + ' с)…'
-          : 'Время ТВ сброшено — запускаем обход SSL…')
+          ? 'Время ТВ не настроено — запускаем обход SSL (' + Math.ceil(waited / 1000) + ' с)…'
+          : 'Время ТВ не настроено — запускаем обход SSL…')
         : 'Ожидаем синхронизацию времени телевизора…';
       if (canProbeAnyClockBridge() && waited > 0) {
         probeClockProxy(function (ok) {
