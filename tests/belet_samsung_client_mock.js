@@ -1616,5 +1616,105 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   delete store.neon_belet_pc_bridge_v1;
 })();
 
+/* 20. Cold ClockProxy start > 4s (QA55Q8FAAKXXT Launch #1): no early 1970 abort, retries service, skips offline auto-baked PC bridge */
+(() => {
+  const RealDate = Date;
+  const fakeNow = RealDate.UTC(1970, 0, 1, 1, 2, 0);
+  function FakeDate(arg) {
+    if (!(this instanceof FakeDate)) return new RealDate(fakeNow).toString();
+    return new RealDate(arg === undefined ? fakeNow : arg);
+  }
+  FakeDate.now = () => fakeNow;
+  FakeDate.UTC = RealDate.UTC;
+  FakeDate.parse = RealDate.parse;
+
+  buildDom();
+  const autoMeta = document.createElement('meta');
+  autoMeta.setAttribute('name', 'neon-pc-bridge');
+  autoMeta.setAttribute('content', '192.168.1.99');
+  document.body.appendChild(autoMeta);
+  delete store.neon_belet_pc_bridge_v1;
+  timers.length = 0;
+  calls.length = 0;
+
+  let launchCount = 0;
+  const coldListeners = {};
+  const coldSandbox = Object.assign({}, sandbox, {
+    document,
+    Date: FakeDate,
+    addEventListener: (ev, fn) => {
+      (coldListeners[ev] = coldListeners[ev] || []).push(fn);
+    },
+    setTimeout: (fn, delay) => {
+      if (delay !== undefined && delay <= 60) { fn(); return 0; }
+      const id = ++timerSeq;
+      timers.push({ id, fn, due: (coldSandbox.__nowMs || 0) + (delay || 0), delay: delay || 0 });
+      return id;
+    },
+    tizen: {
+      systeminfo: { getCapability: () => '10.0' },
+      ApplicationControl: function (op) { this.operation = op; },
+      application: {
+        launchAppControl: (ctrl, id, onOk) => { launchCount += 1; if (onOk) onOk(); },
+        getCurrentApplication: () => ({ appInfo: { id: 'BeletFilm1.BeletClient' } })
+      },
+      time: {
+        getCurrentDateTime: () => new RealDate(fakeNow),
+        setDateTimeChangeListener: () => {}
+      }
+    },
+    webapis: { network: { getActiveConnectionType: () => 3 } }
+  });
+  coldSandbox.__nowMs = 0;
+  coldSandbox.window = coldSandbox;
+  coldSandbox.global = coldSandbox;
+  coldSandbox.self = coldSandbox;
+  vm.createContext(coldSandbox);
+
+  // Queue 15 failed cold polls (t=0 plus 350..4900ms -> past old 4000ms timeout!)
+  for (let p = 0; p < 15; p += 1) {
+    route('http://127.0.0.1:18767/__ping', 0, {});
+    route('http://localhost:18767/__ping', 0, {});
+  }
+  // Then at t=5250ms ClockProxy finishes cold startup and binds :18767
+  route('http://127.0.0.1:18767/__ping', 200, {
+    ok: true,
+    mode: 'clock-proxy',
+    port: 18767,
+    sslClockYear: 1970,
+    serverTimeMs: new RealDate(2026, 10, 23, 19, 15, 0).getTime()
+  });
+  route('http://127.0.0.1:18767/__proxy/beletapis.com/api/v1/users/device', 200, { msg: 'ok' });
+  route('http://127.0.0.1:18767/__proxy/homepage.belet.me/api/v2/home_page', 200, {
+    status: 'ok',
+    result: [{
+      id: 1, title: 'Запуск #1 без выхода', source: 'top', items: [
+        { id: 202, type_id: 1, name: 'First Launch Film 202',
+          images: { vertical: { medium: { url: 'https://img.belet.me/202.jpg' } } } }
+      ]
+    }]
+  });
+  route('http://127.0.0.1:18767/__proxy/homepage.belet.me/api/v2/home_page', 200, { status: 'ok', result: [] });
+
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), coldSandbox, { filename: 'api.js' });
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), coldSandbox, { filename: 'app.js' });
+
+  let guard = 0;
+  while (timers.length && guard < 40 && ids.home.classList.contains('hidden')) {
+    timers.sort((a, b) => a.due - b.due);
+    const next = timers.shift();
+    coldSandbox.__nowMs = next.due;
+    next.fn();
+    guard += 1;
+  }
+
+  assert(!ids.home.classList.contains('hidden'), 'Launch #1 enters home automatically even when ClockProxy takes >5s');
+  assert(ids.homeEmpty.classList.contains('hidden'), 'no 1970 SSL failure on Launch #1');
+  assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
+  assert(launchCount >= 2, 'ClockProxy service launch retried during cold wait (launches=' + launchCount + ')');
+  assert(!calls.some(c => c.url.indexOf('https://') === 0), 'never sent direct https:// request while ClockProxy was starting');
+  assert(!calls.some(c => c.url.indexOf('192.168.1.99') >= 0), 'skipped unreachable auto-baked PC bridge during cold boot');
+})();
+
 assert.strictEqual(routes.length, 0, 'all queued responses were consumed: ' + JSON.stringify(routes.map(r => r.match)));
 console.log('belet_samsung_client_mock: ok');

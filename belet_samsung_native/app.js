@@ -483,7 +483,8 @@
     diag: 'не требуется',
     launchDiag: '',
     serverOffsetMs: 0,
-    serverSynced: false
+    serverSynced: false,
+    watchTicks: 0
   };
 
   function isValidIpv4Host(value) {
@@ -503,6 +504,14 @@
       }
     } catch (e) {}
     return '';
+  }
+
+  function hasManualPcBridgeHost() {
+    var saved = '';
+    try {
+      if (window.localStorage) saved = String(window.localStorage.getItem(PC_BRIDGE_KEY) || '').replace(/^\s+|\s+$/g, '');
+    } catch (e) {}
+    return isValidIpv4Host(saved);
   }
 
   function getPcBridgeHost() {
@@ -568,17 +577,20 @@
     } catch (e) {}
   }
 
-  function getClockProxyCandidates() {
+  function getClockProxyCandidates(opts) {
     var raw = [];
     var out = [];
     var pcIp = getPcBridgeHost();
+    var includePc = !opts || opts.includePc !== false;
     var i;
     if (hasTizenServiceApi()) {
       raw.push('http://127.0.0.1:' + CLOCK_PROXY_PORT);
-      if (clockProxyState.tvIp) raw.push('http://' + clockProxyState.tvIp + ':' + CLOCK_PROXY_PORT);
       raw.push('http://localhost:' + CLOCK_PROXY_PORT);
+      if (clockProxyState.tvIp && (!opts || opts.includeTvIp !== false)) {
+        raw.push('http://' + clockProxyState.tvIp + ':' + CLOCK_PROXY_PORT);
+      }
     }
-    if (pcIp) raw.push('http://' + pcIp + ':' + CLOCK_PROXY_PORT);
+    if (pcIp && includePc) raw.push('http://' + pcIp + ':' + CLOCK_PROXY_PORT);
     for (i = 0; i < raw.length; i += 1) {
       if (out.indexOf(raw[i]) < 0) out.push(raw[i]);
     }
@@ -599,7 +611,25 @@
       return;
     }
     clockProxyState.wrtTried = true;
-    try { on(window, 'neon-wrt-ready', finish); } catch (e) {}
+    try {
+      on(window, 'neon-wrt-ready', function () {
+        if (!done) {
+          finish();
+          return;
+        }
+        if (isClockInvalid() && !isClockBypassed() && typeof window.__neonWrtService === 'function') {
+          try {
+            var lateP = new window.__neonWrtService(CLOCK_PROXY_SVC).start();
+            if (lateP && typeof lateP.then === 'function') {
+              lateP.then(
+                function () { clockProxyState.launchDiag = 'wrt_late_ok'; },
+                function () {}
+              );
+            }
+          } catch (e) {}
+        }
+      });
+    } catch (e) {}
     setTimeout(function () {
       if (done || window.__neonWrtService) return;
       try {
@@ -611,8 +641,8 @@
           (doc.head || doc.body).appendChild(sFile);
         }
       } catch (e) {}
-    }, 450);
-    setTimeout(finish, 1400);
+    }, 300);
+    setTimeout(finish, 900);
     try {
       if (doc && doc.createElement && (doc.head || doc.body)) {
         s = doc.createElement('script');
@@ -666,9 +696,9 @@
     } catch (e) { clockProxyState.launchDiag = 'launch_exc'; }
   }
 
-  function launchClockProxyService() {
+  function launchClockProxyService(forceRetry) {
     if (!isClockInvalid() || !hasTizenServiceApi()) return;
-    if (clockProxyState.launched) return;
+    if (clockProxyState.launched && !forceRetry) return;
     clockProxyState.launched = true;
     clockProxyState.diag = 'запуск локального прокси…';
     probeTvIp();
@@ -679,7 +709,10 @@
           var p = new WrtSvc(CLOCK_PROXY_SVC).start();
           if (p && typeof p.then === 'function') {
             p.then(
-              function () { clockProxyState.launchDiag = 'wrt_ok'; },
+              function () {
+                clockProxyState.launchDiag = 'wrt_ok';
+                if (forceRetry && !isClockBypassed()) launchClockProxyLegacy();
+              },
               function (e) {
                 clockProxyState.launchDiag = 'wrt_err_' + ((e && (e.message || e.name)) || 'fail');
                 launchClockProxyLegacy();
@@ -687,6 +720,7 @@
             );
           } else {
             clockProxyState.launchDiag = 'wrt_sync';
+            if (forceRetry && !isClockBypassed()) launchClockProxyLegacy();
           }
           return;
         } catch (e) {
@@ -700,6 +734,7 @@
   function pingClockProxyCandidate(baseUrl, cb) {
     var xhr = new XMLHttpRequest();
     var done = false;
+    var isLoopback = baseUrl.indexOf('127.0.0.1') >= 0 || baseUrl.indexOf('localhost') >= 0;
     function finish(ok, data) {
       if (done) return;
       done = true;
@@ -707,7 +742,7 @@
     }
     try {
       xhr.open('GET', baseUrl + '/__ping', true);
-      xhr.timeout = 700;
+      xhr.timeout = isLoopback ? 350 : 600;
       xhr.onreadystatechange = function () {
         var parsed;
         if (xhr.readyState !== 4) return;
@@ -769,8 +804,9 @@
     });
   }
 
-  function probeClockProxy(callback) {
+  function probeClockProxy(callback, options) {
     var doneCb = typeof callback === 'function' ? callback : function () {};
+    var opts = options || {};
     var candidates;
     var index = 0;
     updateClockBridgeButtons();
@@ -793,13 +829,13 @@
       return;
     }
     if (hasTizenServiceApi()) {
-      launchClockProxyService();
+      launchClockProxyService(!!opts.forceLaunch);
       probeTvIp();
     } else {
       clockProxyState.diag = 'подключение к ПК-мосту…';
     }
     clockProxyState.probing = true;
-    candidates = getClockProxyCandidates();
+    candidates = getClockProxyCandidates(opts);
     function tryNext() {
       var candidate;
       if (index >= candidates.length) {
@@ -927,6 +963,7 @@
       state.clockSyncTimer = null;
       tickClock();
       if (!state.clockSynced && !isClockBypassed()) {
+        clockProxyState.watchTicks += 1;
         probeClockProxy(function (ok, newlyActivated) {
           if (ok && newlyActivated) {
             state.clockSynced = true;
@@ -935,6 +972,8 @@
             return;
           }
           if (!state.clockSynced && !isClockBypassed()) scheduleClockWatch();
+        }, {
+          forceLaunch: hasTizenServiceApi() && (clockProxyState.watchTicks % 2 === 0)
         });
       }
     }, 2000);
@@ -3344,25 +3383,35 @@
   function waitForNetworkAtBoot(waited) {
     var netOk = isNetworkReady();
     var clockOk = !isClockBlockingHttps();
+    var hasSvc = hasTizenServiceApi();
+    var pollMs = (hasSvc && !clockOk) ? 350 : 500;
+    var clockBudget = hasSvc ? 18000 : (canProbeAnyClockBridge() ? 7000 : 4000);
+    var shouldRetryLaunch = hasSvc && waited > 0 && (waited % 2800 < pollMs);
     if (state.bootDone) return;
-    if ((netOk && clockOk) || (!netOk && waited >= 8000) || (netOk && !clockOk && waited >= 4000)) {
+    if ((netOk && clockOk) || (!netOk && waited >= 8000) || (netOk && !clockOk && waited >= clockBudget)) {
       startBootSession();
       return;
     }
     if (netOk && !clockOk) {
       $('bootStatus').textContent = canProbeAnyClockBridge()
-        ? 'Время ТВ сброшено — запускаем обход SSL…'
+        ? (hasSvc && waited >= 1000
+          ? 'Время ТВ сброшено — запускаем обход SSL (' + Math.ceil(waited / 1000) + ' с)…'
+          : 'Время ТВ сброшено — запускаем обход SSL…')
         : 'Ожидаем синхронизацию времени телевизора…';
-      if (canProbeAnyClockBridge() && waited > 0 && waited % 1000 === 0) {
+      if (canProbeAnyClockBridge() && waited > 0) {
         probeClockProxy(function (ok) {
           if (ok && isNetworkReady() && !state.bootDone) startBootSession();
+        }, {
+          includePc: hasManualPcBridgeHost() || waited >= 5600,
+          includeTvIp: waited >= 4200 && (waited % 2100 < pollMs),
+          forceLaunch: shouldRetryLaunch
         });
       }
     }
     state.bootTimer = setTimeout(function () {
       state.bootTimer = null;
-      waitForNetworkAtBoot(waited + 500);
-    }, 500);
+      waitForNetworkAtBoot(waited + pollMs);
+    }, pollMs);
   }
 
   function boot() {
@@ -3386,6 +3435,9 @@
       $('bootStatus').textContent = 'Время ТВ сброшено — запускаем обход SSL…';
       probeClockProxy(function (ok) {
         if (ok && isNetworkReady() && !state.bootDone) startBootSession();
+      }, {
+        includePc: hasManualPcBridgeHost(),
+        includeTvIp: false
       });
     } else {
       $('bootStatus').textContent = isNetworkReady()
