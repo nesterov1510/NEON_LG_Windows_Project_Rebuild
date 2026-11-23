@@ -549,6 +549,10 @@ class _SamsungTimeHttpHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if send_body and body:
             self.wfile.write(body)
+        try:
+            self.wfile.flush()
+        except OSError:
+            pass
 
     def _handle(self, send_body=True):
         parsed = urllib.parse.urlsplit(self.path or '/')
@@ -560,30 +564,30 @@ class _SamsungTimeHttpHandler(http.server.BaseHTTPRequestHandler):
         if path_low.startswith('/openapi/timesync'):
             now_ms = self.server.controller.current_utc_ms()
             payload = struct.pack('<QQ', now_ms, now_ms)
-            self._send_bytes(200, payload, 'application/octet-stream', send_body=send_body)
             self.server.controller._record_event(
                 'http_timesync', client_ip, f'{host_hdr or "time"} {path}',
             )
+            self._send_bytes(200, payload, 'application/octet-stream', send_body=send_body)
             return
 
         if path_low == '/public/network/files/check.xml':
-            self._send_bytes(200, b'ok\n', 'text/plain; charset=utf-8', send_body=send_body)
             self.server.controller._record_event(
                 'http_check', client_ip, f'{host_hdr or "cdn"} {path}',
             )
+            self._send_bytes(200, b'ok\n', 'text/plain; charset=utf-8', send_body=send_body)
             return
 
         if path_low.startswith('/openapi/zipcode/timezoneoffset'):
             offset_sec = self._local_utc_offset_seconds()
             body = f'{{"offset":{offset_sec},"utcOffsetMinutes":{offset_sec // 60}}}'.encode('utf-8')
-            self._send_bytes(200, body, 'application/json; charset=utf-8', send_body=send_body)
             self.server.controller._record_event(
                 'http_tz', client_ip, f'{host_hdr or "time"} {path}',
             )
+            self._send_bytes(200, body, 'application/json; charset=utf-8', send_body=send_body)
             return
 
-        self._send_bytes(200, b'ok\n', 'text/plain; charset=utf-8', send_body=send_body)
         self.server.controller._record_event('http_other', client_ip, f'{host_hdr} {path}')
+        self._send_bytes(200, b'ok\n', 'text/plain; charset=utf-8', send_body=send_body)
 
     def do_GET(self):  # noqa: N802
         self._handle(send_body=True)
@@ -911,21 +915,34 @@ class SamsungTimeOverrideServer:
                     )
 
             # Bind DNS UDP (required) + optional TCP DNS
-            try:
-                dns_sock, bound_dns_ip, bound_dns_port = self._bind_udp_with_fallback(
-                    dns_bind_ip, dns_port, fallback_ip=fallback_lan_ip,
-                )
-            except OSError as exc:
-                raise OSError(
-                    f'Could not bind DNS port {dns_port} ({exc}). Close any other local DNS server or check Administrator rights.'
-                )
+            dns_sock = None
+            dns_tcp_sock = None
+            bound_dns_ip = dns_bind_ip
+            bound_dns_port = int(dns_port)
+            attempts = 8 if int(dns_port) == 0 else 1
+            for attempt in range(attempts):
+                try:
+                    cand_udp, cand_ip, cand_port = self._bind_udp_with_fallback(
+                        dns_bind_ip, dns_port, fallback_ip=fallback_lan_ip,
+                    )
+                except OSError as exc:
+                    raise OSError(
+                        f'Could not bind DNS port {dns_port} ({exc}). Close any other local DNS server or check Administrator rights.'
+                    )
+                cand_tcp = self._bind_tcp_dns_optional(cand_ip, cand_port)
+                if cand_tcp is not None or attempt == attempts - 1:
+                    dns_sock, bound_dns_ip, bound_dns_port = cand_udp, cand_ip, cand_port
+                    dns_tcp_sock = cand_tcp
+                    break
+                try:
+                    cand_udp.close()
+                except OSError:
+                    pass
 
             if dns_bind_ip == '0.0.0.0' and bound_dns_ip != '0.0.0.0':
                 notes.append(
                     f'[i] 0.0.0.0:{dns_port} busy (e.g. Windows ICS on 192.168.137.1); bound LAN adapter {bound_dns_ip}:{bound_dns_port}.'
                 )
-
-            dns_tcp_sock = self._bind_tcp_dns_optional(bound_dns_ip, bound_dns_port)
             http_srv = None
             bound_http_ip = ''
             bound_http_port = 0
@@ -1246,8 +1263,8 @@ class SamsungTimeOverrideServer:
                 struct.pack_into('!II', reply, 16, ref_s, ref_f)
                 reply[24:32] = tx_origin
                 struct.pack_into('!IIII', reply, 32, rx_s, rx_f, tx_s, tx_f)
-                sock.sendto(bytes(reply), addr)
                 self._record_event('ntp_hits', addr[0], 'UDP :123 NTP')
+                sock.sendto(bytes(reply), addr)
             except OSError:
                 break
             except Exception:
