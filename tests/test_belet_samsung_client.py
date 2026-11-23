@@ -382,9 +382,10 @@ def test_clock_proxy_handles_1970_clock_tls_and_m3u8_rewriting(tmp_path):
         .sign(ca_key, hashes.SHA256())
     )
 
-    def make_leaf(host, issuer=(ca_name, ca_key), offset_days=-30, span_days=365):
+    def make_leaf(host, issuer=(ca_name, ca_key), offset_days=-30, span_days=365, extra_hosts=()):
         k = rsa.generate_private_key(65537, 2048)
         n = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+        sans = [x509.DNSName(host)] + [x509.DNSName(h) for h in extra_hosts]
         c = (
             x509.CertificateBuilder()
             .subject_name(n).issuer_name(issuer[0])
@@ -392,13 +393,13 @@ def test_clock_proxy_handles_1970_clock_tls_and_m3u8_rewriting(tmp_path):
             .serial_number(2)
             .not_valid_before(now + datetime.timedelta(days=offset_days))
             .not_valid_after(now + datetime.timedelta(days=offset_days + span_days))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName(host)]), critical=False)
+            .add_extension(x509.SubjectAlternativeName(sans), critical=False)
             .sign(issuer[1], hashes.SHA256())
         )
         return k, c
 
     k_ok, c_ok = make_leaf('beletapis.com')
-    k_cdn, c_cdn = make_leaf('cdn-media.example.org')
+    k_cdn, c_cdn = make_leaf('cdn-media.example.org', extra_hosts=('poster-cdn.example.org',))
     k_bad, c_bad = make_leaf('evil.example')
     k_exp, c_exp = make_leaf('api.belet.tm', offset_days=-400, span_days=100)
     k_self = rsa.generate_private_key(65537, 2048)
@@ -437,7 +438,12 @@ const srvOk = https.createServer({ key: fs.readFileSync(td + '/ok.key'), cert: f
   let body = ''; req.on('data', d => body += d); req.on('end', () => {
     if (req.url === '/api/v3/files/1') {
       res.writeHead(200, { 'Content-Type': 'application/json', Date: serverDateHdr });
-      res.end(JSON.stringify({ url: 'https://cdn-media.example.org/hls/1/master.m3u8', got: body }));
+      res.end('{"url":"https://cdn-media.example.org/hls/1/master.m3u8","poster":"https:\\\\u002f\\\\u002fposter-cdn.example.org\\\\u002f99.jpg","got":' + JSON.stringify(body) + '}');
+      return;
+    }
+    if (req.url === '/redir-http') {
+      res.writeHead(302, { Location: 'http://img.belet.me/p.jpg', Date: serverDateHdr });
+      res.end();
       return;
     }
     if (req.url === '/redir-rel') {
@@ -507,9 +513,13 @@ Promise.all([
     assert.strictEqual(p1.status, 200);
     assert.strictEqual(JSON.parse(p1.body).sslClockYear, 1970);
 
+    assert.strictEqual((await get('/__proxy/poster-cdn.example.org/99.jpg')).status, 403);
     const r1 = await get('/__proxy/beletapis.com/api/v3/files/1', 'POST', '{"x":1}', { Authorization: 'tok123' });
     assert.strictEqual(r1.status, 200);
     assert.strictEqual(JSON.parse(r1.body).got, '{"x":1}');
+    const rRedirHttp = await get('/__proxy/beletapis.com/redir-http');
+    assert.strictEqual(rRedirHttp.status, 302);
+    assert.strictEqual(rRedirHttp.headers.location, 'http://127.0.0.1:' + p + '/__proxy/img.belet.me/p.jpg');
     const rRedirRel = await get('/__proxy/beletapis.com/redir-rel');
     assert.strictEqual(rRedirRel.status, 302);
     assert.strictEqual(rRedirRel.headers.location, 'http://127.0.0.1:' + p + '/__proxy/beletapis.com/v2/next?x=1');
@@ -520,6 +530,8 @@ Promise.all([
     assert(JSON.parse(p2.body).serverTimeMs > 1704067200000);
 
     modePort = srvCdn.address().port;
+    const rPoster = await get('/__proxy/poster-cdn.example.org/99.jpg');
+    assert.strictEqual(rPoster.status, 200);
     const r2 = await get('/__proxy/cdn-media.example.org/hls/1/master.m3u8');
     assert.strictEqual(r2.status, 200);
     assert(r2.body.includes('http://127.0.0.1:' + p + '/__proxy/keys.belet.me/k.key'));
@@ -557,4 +569,16 @@ def test_inline_wrt_module_csp_hash_matches_config():
     assert m, 'WRT_INLINE_CODE constant missing in app.js'
     expected_hash = 'sha256-' + base64.b64encode(hashlib.sha256(m.group(1).encode('utf-8')).digest()).decode('ascii')
     assert expected_hash in config, f'CSP missing exact hash {expected_hash}'
+
+
+def test_boot_loader_and_image_rendering_contracts():
+    html = _client_source('index.html')
+    css = _client_source('style.css')
+    for token in ('boot-progress', 'boot-bar', 'boot-dots', 'id="homeLoading"', 'id="detailBackdropImg"'):
+        assert token in html, f'index.html missing {token}'
+    boot_block = html.split('<!-- Boot -->', 1)[1].split('<!-- Login -->', 1)[0]
+    assert not re.search(r'обход|SSL|прокси', boot_block, re.IGNORECASE), 'boot markup contains bypass jargon'
+    assert re.search(r'\.card\s*\{[^}]*display:\s*block\s*;', css), 'card button requires explicit display: block for Chromium grid posters'
+    assert '.detail-backdrop-img' in css, 'detail-backdrop-img rule missing in style.css'
+
 

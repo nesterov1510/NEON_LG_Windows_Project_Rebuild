@@ -275,6 +275,7 @@ function buildDom() {
   add(hero, 'button', 'heroPlay', 'primary focusable');
   add(hero, 'button', 'heroInfo', 'ghost focusable');
   add(home, 'div', 'rows', 'rows');
+  add(home, 'div', 'homeLoading', 'home-loading hidden');
   const homeEmpty = add(home, 'div', 'homeEmpty', 'empty hidden');
   add(homeEmpty, 'h2');
   add(homeEmpty, 'p');
@@ -301,7 +302,8 @@ function buildDom() {
   add(searchEmpty, 'p');
 
   const detail = add(main, 'section', 'detail', 'screen hidden');
-  add(detail, 'div', 'detailBackdrop', 'detail-backdrop');
+  const detailBackdrop = add(detail, 'div', 'detailBackdrop', 'detail-backdrop');
+  add(detailBackdrop, 'img', 'detailBackdropImg', 'detail-backdrop-img');
   const detailScroll = add(detail, 'div', null, 'detail-scroll');
   const detailTop = add(detailScroll, 'div', null, 'detail-top');
   add(detailTop, 'img', 'detailPoster', 'detail-poster');
@@ -385,9 +387,9 @@ function buildDom() {
     'phoneDisplay', 'phoneValue', 'methodPrev', 'methodDisplay', 'methodValue', 'methodNext', 'sendCode', 'toQr',
     'loginCode', 'codeDisplay', 'codeValue', 'verifyCode', 'resendCode', 'backToPhone', 'loginQr', 'qrImage',
     'qrStatus', 'qrRefresh', 'toPhone', 'loginHelp', 'home', 'hero', 'heroImage', 'heroTitle', 'heroMeta',
-    'heroText', 'heroPlay', 'heroInfo', 'rows', 'homeEmpty', 'homeReload', 'homeHelp', 'browse', 'browseTitle', 'browseChips',
+    'heroText', 'heroPlay', 'heroInfo', 'rows', 'homeLoading', 'homeEmpty', 'homeReload', 'homeHelp', 'browse', 'browseTitle', 'browseChips',
     'browseGrid', 'browseMore', 'browseMoreBtn', 'browseEmpty', 'search', 'searchField', 'searchValue',
-    'searchGrid', 'searchEmpty', 'detail', 'detailBackdrop', 'detailPoster', 'detailTitle', 'detailMeta',
+    'searchGrid', 'searchEmpty', 'detail', 'detailBackdrop', 'detailBackdropImg', 'detailPoster', 'detailTitle', 'detailMeta',
     'detailGenres', 'detailText', 'detailPlay', 'detailFav', 'detailTrailer', 'episodesSection', 'seasonChips',
     'episodeList', 'player', 'video', 'playerOsd', 'playerTitle', 'playerSubtitle', 'playerBadge', 'progress',
     'progressBuffer', 'progressFill', 'progressKnob', 'timeNow', 'timeTotal', 'playerStatus', 'playerSpinner',
@@ -1733,7 +1735,8 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   assert(!calls.some(c => c.url.indexOf('https://') === 0), 'never checked https:// OTP while clock < 2026');
   click(ids.toQr);
   assert(!calls.some(c => c.url.indexOf('https://') === 0), 'QR tab also skips direct https:// while clock < 2026');
-  assert(ids.qrStatus.textContent.indexOf('обход SSL') >= 0, 'QR tab shows SSL bypass status');
+  assert(ids.qrStatus.textContent.indexOf('Подключение к серверам Belet') >= 0, 'QR tab shows clean loading status');
+  assert(!/обход|SSL|прокси/i.test(ids.qrStatus.textContent), 'QR tab omits technical bypass wording');
 
   // Now ClockProxy responds -> recoverNetworkScreens auto-fetches QR over HTTP ClockProxy!
   route('http://127.0.0.1:18767/__ping', 200, {
@@ -2013,6 +2016,158 @@ assert.strictEqual(ids.rows.querySelectorAll('.card').length, 1);
   const updatedPoster505 = updatedCard505 && updatedCard505.querySelector('img');
   assert.strictEqual(updatedPoster505.src, 'http://127.0.0.1:18767/__proxy/img.belet.me/505.jpg',
     'late ClockProxy readiness refreshes mounted home posters through proxy');
+})();
+
+/* 25. Clean stylized boot, incremental home rendering without DOM resets, rich banner/poster shapes & detailBackdropImg */
+(() => {
+  const RealDate = Date;
+  const fakeNow = RealDate.UTC(1970, 0, 1, 1, 5, 0);
+  function Fake1970(arg) {
+    if (!(this instanceof Fake1970)) return new RealDate(fakeNow).toString();
+    return new RealDate(arg === undefined ? fakeNow : arg);
+  }
+  Fake1970.now = () => fakeNow;
+  Fake1970.UTC = RealDate.UTC;
+  Fake1970.parse = RealDate.parse;
+
+  buildDom();
+  store.neon_belet_samsung_session_v2 = JSON.stringify({
+    token: 'tok-25', refresh: 'ref-25', phone: '+99361000025', fingerprint: 'fp-25'
+  });
+  timers.length = 0;
+  calls.length = 0;
+
+  let bootHomeCb = null;
+  const s25 = Object.assign({}, sandbox, {
+    document,
+    Date: Fake1970,
+    XMLHttpRequest: function MockAsyncXhr() {
+      const base = new sandbox.XMLHttpRequest();
+      const origSend = base.send.bind(base);
+      const origOpen = base.open.bind(base);
+      let curUrl = '';
+      base.open = function (m, u, a) {
+        curUrl = u;
+        return origOpen(m, u, a);
+      };
+      base.send = function (body) {
+        if (curUrl.indexOf('/api/v2/home_page') >= 0 && curUrl.indexOf('offset=3') >= 0 && !bootHomeCb) {
+          calls.push({ method: 'GET', url: curUrl, headers: {}, body });
+          bootHomeCb = () => {
+            const index = routes.findIndex(r => curUrl.indexOf(r.match) >= 0);
+            const item = index >= 0 ? routes.splice(index, 1)[0] : null;
+            base.status = item ? item.status : 200;
+            base.responseText = JSON.stringify(item && item.json !== undefined ? item.json : { status: 'ok', result: [] });
+            base.readyState = 4;
+            if (base.onreadystatechange) base.onreadystatechange();
+          };
+          return;
+        }
+        return origSend(body);
+      };
+      return base;
+    },
+    tizen: {
+      systeminfo: { getCapability: () => '10.0' },
+      ApplicationControl: function (op) { this.operation = op; },
+      application: {
+        launchAppControl: (c, id, ok) => { if (ok) ok(); },
+        getCurrentApplication: () => ({ appInfo: { id: 'BeletFilm1.BeletClient' } })
+      }
+    },
+    webapis: { network: { getActiveConnectionType: () => 3 } }
+  });
+  s25.window = s25;
+  s25.global = s25;
+  s25.self = s25;
+  vm.createContext(s25);
+
+  route('http://127.0.0.1:18767/__ping', 0, {});
+  route('http://localhost:18767/__ping', 0, {});
+  route('http://127.0.0.1:18767/__ping', 200, {
+    ok: true, mode: 'clock-proxy', port: 18767, sslClockYear: 1970,
+    serverTimeMs: RealDate.UTC(2026, 10, 23, 22, 0, 0)
+  });
+  route('http://127.0.0.1:18767/__proxy/beletapis.com/api/v1/users/device', 200, { msg: 'ok' });
+  route('http://127.0.0.1:18767/__proxy/homepage.belet.me/api/v2/home_page', 200, {
+    status: 'ok',
+    result: [
+      {
+        id: 1, title: 'Баннеры', source: 'header', items: [
+          { movie: { id: '701', name: 'Hero Banner 701', images: { horizontal: { large: 'banners/hero 701.jpg' } } } }
+        ]
+      },
+      {
+        id: 2, title: 'Новинки', source: 'top', items: [
+          { id: 702, type_id: 1, name: 'Poster String 702', poster: 'https://img.belet.me/posters/p 702.jpg' },
+          { id: 703, type_id: 1, name: 'Array Image 703', images: [{ type: 'vertical', url: '/arr/703.jpg' }] }
+        ]
+      }
+    ]
+  });
+  route('http://127.0.0.1:18767/__proxy/homepage.belet.me/api/v2/home_page', 200, {
+    status: 'ok',
+    result: [
+      {
+        id: 3, title: 'Сериалы', source: 'series', items: [
+          { id: 704, type_id: 2, name: 'Series 704', banner: 'banners/series704.jpg' }
+        ]
+      }
+    ]
+  });
+  route('http://127.0.0.1:18767/__proxy/homepage.belet.me/api/v2/home_page', 200, { status: 'ok', result: [] });
+
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'api.js'), 'utf8'), s25, { filename: 'api.js' });
+  vm.runInContext(fs.readFileSync(path.join(srcDir, 'app.js'), 'utf8'), s25, { filename: 'app.js' });
+
+  assert(!/обход|SSL|прокси/i.test(ids.bootStatus.textContent),
+    'initial boot status omits bypass wording: ' + ids.bootStatus.textContent);
+
+  // Advance through ClockProxy ping -> page 1 opens home while page 2 is still pending
+  runTimers();
+  assert(!/обход|SSL|прокси/i.test(ids.bootStatus.textContent),
+    'boot status never prints bypass wording: ' + ids.bootStatus.textContent);
+  assert(!ids.home.classList.contains('hidden'), 'home opens as soon as page 1 renders');
+  assert(ids.homeLoading.classList.contains('hidden'), 'homeLoading hidden once rows appear');
+  assert(!ids.hero.classList.contains('hidden'), 'header banner without type_id renders hero');
+  assert.strictEqual(ids.heroImage.src, 'http://127.0.0.1:18767/__proxy/img.belet.me/banners/hero%20701.jpg',
+    'nested header movie horizontal large banner encodes spaces and routes via proxy');
+
+  const firstCardsBeforePage2 = ids.rows.querySelectorAll('.card');
+  assert.strictEqual(firstCardsBeforePage2.length, 2);
+  const card702Before = firstCardsBeforePage2[0];
+  const img702Before = card702Before.querySelector('img');
+  assert.strictEqual(img702Before.src, 'http://127.0.0.1:18767/__proxy/img.belet.me/posters/p%20702.jpg');
+  assert.strictEqual(firstCardsBeforePage2[1].querySelector('img').src,
+    'http://127.0.0.1:18767/__proxy/img.belet.me/arr/703.jpg');
+
+  // Complete page 2 -> earlier row DOM nodes & heroImage must NOT be destroyed/recreated!
+  let heroResetCalls = 0;
+  const origHeroRm = ids.heroImage.removeAttribute.bind(ids.heroImage);
+  ids.heroImage.removeAttribute = function (n) { if (n === 'src') heroResetCalls += 1; return origHeroRm(n); };
+  assert(bootHomeCb, 'offset=3 async request queued');
+  bootHomeCb();
+  const cardsAfterPage2 = ids.rows.querySelectorAll('.card');
+  assert.strictEqual(cardsAfterPage2.length, 3, 'page 2 appended cleanly');
+  assert.strictEqual(cardsAfterPage2[0], card702Before, 'incremental home render preserves earlier cards without wiping #rows');
+  assert.strictEqual(cardsAfterPage2[0].querySelector('img'), img702Before, 'in-flight poster <img> node stays untouched');
+  assert.strictEqual(heroResetCalls, 0, 'heroImage not aborted/restarted during page 2 arrival');
+  assert.strictEqual(cardsAfterPage2[2].querySelector('img').src,
+    'http://127.0.0.1:18767/__proxy/img.belet.me/banners/series704.jpg');
+
+  // Open detail and verify #detailBackdropImg loads via ClockProxy immediately and upgrades cleanly
+  route('http://127.0.0.1:18767/__proxy/film.beletapis.com/api/v3/movie/702', 200, {
+    movie: {
+      id: 702, type_id: 1, name: 'Poster String 702',
+      poster: 'https://img.belet.me/posters/p 702.jpg',
+      banner: 'https://img.belet.me/banners/backdrop702.jpg'
+    }
+  });
+  click(cardsAfterPage2[0]);
+  assert(!ids.detail.classList.contains('hidden'));
+  assert.strictEqual(ids.detailBackdropImg.src,
+    'http://127.0.0.1:18767/__proxy/img.belet.me/banners/backdrop702.jpg',
+    'detailBackdropImg renders film backdrop via ClockProxy');
 })();
 
 assert.strictEqual(routes.length, 0, 'all queued responses were consumed: ' + JSON.stringify(routes.map(r => r.match)));

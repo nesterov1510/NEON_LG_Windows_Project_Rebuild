@@ -88,6 +88,19 @@
   }
 
   function clear(node) {
+    var imgs, i;
+    if (node && node.querySelectorAll) {
+      try {
+        imgs = node.querySelectorAll('img');
+        for (i = 0; i < imgs.length; i += 1) {
+          imgs[i]._beletImgGen = (imgs[i]._beletImgGen || 0) + 1;
+          if (imgs[i]._beletRetryTimer) {
+            clearTimeout(imgs[i]._beletRetryTimer);
+            imgs[i]._beletRetryTimer = null;
+          }
+        }
+      } catch (e) {}
+    }
     while (node && node.firstChild) node.removeChild(node.firstChild);
   }
 
@@ -805,14 +818,14 @@
     var tz = readTizenClock();
     var tzValid = !!(tz && tz.getFullYear && tz.getFullYear() >= 2026);
     if (!isClockInvalid() && isBypassModeForced()) {
-      return 'Включён режим обхода SSL — ожидаем запуск локального прокси Belet.';
+      return 'Выполняется подключение к серверам Belet…';
     }
     if (tzValid) {
       return 'В настройках ТВ время задано (' + formatDateObj(tz) + '), но системное время браузера осталось ' +
         clockDateText() + ' — из-за этого прямые HTTPS-запросы заблокированы. ' +
-        'Запущен режим ожидания обхода часов. Для системной синхронизации: Настройки ТВ → Общие → Диспетчер системы → Время → Часы → «Авто».';
+        'Для системной синхронизации: Настройки ТВ → Общие → Диспетчер системы → Время → Часы → «Авто».';
     }
-    return 'Время на ТВ не настроено (' + clockDateText() + ') — прямые HTTPS-запросы отключены, ожидаем запуск локального обхода SSL или настройку часов в меню ТВ.';
+    return 'Время на ТВ не настроено (' + clockDateText() + '). Проверьте настройку часов в меню ТВ или подождите подключения.';
   }
 
   var deviceRegistration = { state: 'не отправлена', model: '' };
@@ -904,7 +917,9 @@
         probeClockProxy(function (ok, newlyActivated) {
           if (ok && newlyActivated) {
             state.clockSynced = true;
-            toast('Запущен обход SSL — подключаемся к Belet…', 3000);
+            if (state.screen !== 'boot' && (!state.homeLoaded || state.screen === 'login')) {
+              toast('Подключение к Belet установлено', 2200);
+            }
             recoverNetworkScreens(true);
             return;
           }
@@ -1144,7 +1159,7 @@
       return;
     }
     if (isClockBlockingHttps()) {
-      toast('Ожидаем запуск обхода SSL — попробуйте через пару секунд.', 3000);
+      toast('Подключение к Belet — попробуйте через пару секунд.', 2500);
       scheduleClockWatch();
       if (canProbeAnyClockBridge()) {
         probeClockProxy(function (ok) {
@@ -1243,7 +1258,7 @@
     if (retryAttempt === 0) $('qrImage').removeAttribute('src');
     if (isClockBlockingHttps()) {
       $('qrStatus').textContent = canProbeAnyClockBridge()
-        ? ('Время ТВ не настроено (' + clockDateText() + ') — запускаем обход SSL без прямых HTTPS…')
+        ? 'Подключение к серверам Belet…'
         : clockHelpText();
       state.mainFocus = $('qrRefresh');
       setTimeout(function () {
@@ -1335,15 +1350,48 @@
   var IMAGE_BASE = 'https://img.belet.me/';
   var BRAND_IMAGE = 'belet-logo.png';
 
+  function extractImageValue(node, depth) {
+    var keys;
+    var i;
+    var found;
+    if (!node || depth > 4) return null;
+    if (typeof node === 'string') return node;
+    if (Array.isArray(node)) {
+      for (i = 0; i < node.length; i += 1) {
+        found = extractImageValue(node[i], depth + 1);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (typeof node !== 'object') return null;
+    keys = [
+      'url', 'src', 'link', 'path', 'file', 'filename', 'image', 'webp', 'png', 'jpg', 'jpeg',
+      'high', 'large', 'original', 'full', 'default', 'standard', 'medium', 'small', 'low', 'thumb', 'thumbnail', 'preview', '2x', '1x'
+    ];
+    for (i = 0; i < keys.length; i += 1) {
+      if (node[keys[i]] !== undefined && node[keys[i]] !== null) {
+        found = extractImageValue(node[keys[i]], depth + 1);
+        if (found) return found;
+      }
+    }
+    keys = Object.keys(node);
+    for (i = 0; i < keys.length; i += 1) {
+      found = extractImageValue(node[keys[i]], depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
   function imageUrl(value) {
+    var raw = (value && typeof value === 'object') ? extractImageValue(value, 0) : value;
     var url;
     var resolved;
-    if (typeof value !== 'string') return null;
-    url = value.replace(/^\s+|\s+$/g, '');
+    if (typeof raw !== 'string') return null;
+    url = raw.replace(/^\s+|\s+$/g, '').replace(/ /g, '%20');
     if (!url) return null;
     if (/^(https?:|data:|file:)/i.test(url)) resolved = url;
     else if (url.indexOf('//') === 0) resolved = 'https:' + url;
-    else if (/^img\.belet\.me\//i.test(url)) resolved = 'https://' + url;
+    else if (/^[a-z0-9.-]*belet\.[a-z]+\//i.test(url)) resolved = 'https://' + url;
     else resolved = IMAGE_BASE + (url.charAt(0) === '/' ? url.slice(1) : url);
     if (window.Belet && Belet.proxyUrl && /^https?:/i.test(resolved)) {
       return Belet.proxyUrl(resolved);
@@ -1351,10 +1399,20 @@
     return resolved;
   }
 
-  function setContentImage(img, source) {
-    var gen = (img._beletImgGen || 0) + 1;
+  function setContentImage(img, rawSource) {
+    var raw = (rawSource && typeof rawSource === 'object') ? extractImageValue(rawSource, 0) : rawSource;
+    var source = imageUrl(raw);
+    var gen;
     var retryCount = 0;
+    if (!img) return;
+    if (source && img._beletResolved === source && img._beletRawSource === (raw || '') &&
+        !img._beletBrandFallback && img.src === source && !(img.complete && img.naturalWidth === 0)) {
+      return;
+    }
+    gen = (img._beletImgGen || 0) + 1;
     img._beletImgGen = gen;
+    img._beletRawSource = (typeof raw === 'string') ? raw : '';
+    img._beletResolved = source || '';
     if (img._beletRetryTimer) {
       clearTimeout(img._beletRetryTimer);
       img._beletRetryTimer = null;
@@ -1373,15 +1431,19 @@
     }
 
     function handleImageError() {
+      var retryUrl;
       if (img._beletImgGen !== gen) return;
-      if (!img._beletBrandFallback && source && /^https?:\/\//i.test(source) && retryCount < 2) {
+      retryUrl = imageUrl(img._beletRawSource) || source;
+      if (!img._beletBrandFallback && retryUrl && /^https?:\/\//i.test(retryUrl) && retryCount < 2) {
         var delay = retryCount === 0 ? 350 : 900;
         retryCount += 1;
         img._beletRetryTimer = setTimeout(function () {
           img._beletRetryTimer = null;
           if (img._beletImgGen !== gen || img._beletBrandFallback) return;
+          var nextUrl = imageUrl(img._beletRawSource) || retryUrl;
+          img._beletResolved = nextUrl || '';
           if (img.removeAttribute) img.removeAttribute('src');
-          img.src = source;
+          img.src = nextUrl;
         }, delay);
         return;
       }
@@ -1404,64 +1466,195 @@
       }
     };
     img.onerror = handleImageError;
-    source = imageUrl(source);
     if (source) img.src = source;
     else showBrandFallback();
   }
 
+  function refreshVisibleImages() {
+    var imgs;
+    var i;
+    var img;
+    var nextUrl;
+    if (!doc || !doc.querySelectorAll) return;
+    imgs = doc.querySelectorAll('img');
+    for (i = 0; i < imgs.length; i += 1) {
+      img = imgs[i];
+      if (!img || !img._beletRawSource) continue;
+      nextUrl = imageUrl(img._beletRawSource);
+      if (!nextUrl) continue;
+      if (img._beletBrandFallback || img._beletResolved !== nextUrl ||
+          (img.complete && img.naturalWidth === 0)) {
+        setContentImage(img, img._beletRawSource);
+      }
+    }
+  }
+
+  function pickImageFromEntry(entry, sizes) {
+    var j;
+    var val;
+    var url;
+    var fallbackKeys = ['original', 'large', 'high', 'full', 'default', 'standard', 'medium', 'small', 'low', 'thumb', 'thumbnail', 'preview', 'webp', 'url', 'src', 'link', 'path'];
+    if (!entry) return null;
+    if (typeof entry === 'string') return imageUrl(entry);
+    if (typeof entry !== 'object') return null;
+    for (j = 0; j < sizes.length; j += 1) {
+      val = entry[sizes[j]];
+      if (val !== undefined && val !== null) {
+        url = imageUrl(val);
+        if (url) return url;
+      }
+    }
+    for (j = 0; j < fallbackKeys.length; j += 1) {
+      val = entry[fallbackKeys[j]];
+      if (val !== undefined && val !== null) {
+        url = imageUrl(val);
+        if (url) return url;
+      }
+    }
+    return imageUrl(extractImageValue(entry, 0));
+  }
+
   function pickImage(images, kind, size) {
-    var entry, sizes = size || ['medium', 'standard', 'default', 'high'];
+    var entry;
+    var sizes = size || ['medium', 'standard', 'default', 'high'];
     var order = kind === 'horizontal'
-      ? ['horizontal_with_name', 'horizontal-with-name', 'horizontal_without_name', 'horizontal-without-name', 'vertical', 'vertical_without_name', 'vertical-without-name']
-      : ['vertical', 'vertical_without_name', 'vertical-without-name', 'horizontal_without_name', 'horizontal-without-name', 'horizontal_with_name', 'horizontal-with-name'];
-    var i, j, url;
-    if (!images || typeof images !== 'object') return null;
+      ? [
+        'horizontal_with_name', 'horizontal-with-name', 'horizontal_without_name', 'horizontal-without-name', 'horizontal',
+        'banner', 'backdrop', 'header', 'landscape', 'wide', 'cover',
+        'vertical', 'vertical_without_name', 'vertical-without-name', 'vertical_with_name', 'vertical-with-name', 'poster', 'portrait', 'name'
+      ]
+      : [
+        'vertical', 'vertical_without_name', 'vertical-without-name', 'vertical_with_name', 'vertical-with-name', 'poster', 'portrait', 'cover',
+        'horizontal_without_name', 'horizontal-without-name', 'horizontal_with_name', 'horizontal-with-name', 'horizontal', 'banner', 'backdrop', 'name'
+      ];
+    var i;
+    var url;
+    if (!images) return null;
+    if (typeof images === 'string') return imageUrl(images);
+    if (Array.isArray(images)) {
+      for (i = 0; i < images.length; i += 1) {
+        entry = images[i];
+        if (entry && typeof entry === 'object' && entry.type &&
+            ((kind === 'horizontal' && /horiz|banner|back|land|wide/i.test(String(entry.type))) ||
+             (kind !== 'horizontal' && /vert|poster|port|cover/i.test(String(entry.type))))) {
+          url = pickImageFromEntry(entry, sizes);
+          if (url) return url;
+        }
+      }
+      for (i = 0; i < images.length; i += 1) {
+        url = pickImageFromEntry(images[i], sizes);
+        if (url) return url;
+      }
+      return null;
+    }
+    if (typeof images !== 'object') return null;
     for (i = 0; i < order.length; i += 1) {
       entry = images[order[i]];
-      if (!entry || typeof entry !== 'object') continue;
-      for (j = 0; j < sizes.length; j += 1) {
-        if (entry[sizes[j]] && typeof entry[sizes[j]].url === 'string') {
-          url = imageUrl(entry[sizes[j]].url);
+      if (!entry) continue;
+      url = pickImageFromEntry(entry, sizes);
+      if (url) return url;
+    }
+    return imageUrl(extractImageValue(images, 0));
+  }
+
+  function unwrapItem(item) {
+    if (item && item.movie && typeof item.movie === 'object') return item.movie;
+    if (item && item.item && typeof item.item === 'object') return item.item;
+    return item;
+  }
+
+  function posterOf(item) {
+    var inner = unwrapItem(item);
+    var fields = [
+      'poster', 'poster_url', 'posterUrl', 'vertical_image', 'verticalImage',
+      'cover', 'cover_url', 'coverUrl', 'image_url', 'imageUrl', 'image',
+      'thumb', 'thumbnail', 'img', 'photo', 'picture', 'backdrop', 'backdrop_url', 'banner', 'banner_url'
+    ];
+    var list = [inner];
+    var i, j, src, url;
+    if (item && inner !== item) list.push(item);
+    for (i = 0; i < list.length; i += 1) {
+      src = list[i];
+      if (!src || typeof src !== 'object') continue;
+      url = pickImage(src.images, 'vertical', ['medium', 'standard', 'default', 'high']);
+      if (url) return url;
+      for (j = 0; j < fields.length; j += 1) {
+        if (src[fields[j]] !== undefined && src[fields[j]] !== null) {
+          url = imageUrl(src[fields[j]]);
           if (url) return url;
         }
       }
     }
-    if (images.name && typeof images.name.url === 'string') return imageUrl(images.name.url);
     return null;
   }
 
-  function posterOf(item) {
-    return pickImage(item && item.images, 'vertical', ['medium', 'standard', 'default', 'high']) ||
-      (item && typeof item.image_url === 'string' ? imageUrl(item.image_url) : null) ||
-      (item && typeof item.image === 'string' ? imageUrl(item.image) : null);
-  }
-
   function backdropOf(item) {
-    return pickImage(item && item.images, 'horizontal', ['high', 'default', 'medium', 'standard']) ||
-      (item && typeof item.image_url === 'string' ? imageUrl(item.image_url) : null);
+    var inner = unwrapItem(item);
+    var fields = [
+      'banner', 'banner_url', 'bannerUrl', 'backdrop', 'backdrop_url', 'backdropUrl',
+      'horizontal_image', 'horizontalImage', 'header_image', 'headerImage',
+      'cover', 'cover_url', 'image_url', 'imageUrl', 'image', 'poster', 'poster_url'
+    ];
+    var list = [inner];
+    var i, j, src, url;
+    if (item && inner !== item) list.push(item);
+    for (i = 0; i < list.length; i += 1) {
+      src = list[i];
+      if (!src || typeof src !== 'object') continue;
+      url = pickImage(src.images, 'horizontal', ['high', 'large', 'original', 'default', 'medium', 'standard']);
+      if (url) return url;
+      for (j = 0; j < fields.length; j += 1) {
+        if (src[fields[j]] !== undefined && src[fields[j]] !== null) {
+          url = imageUrl(src[fields[j]]);
+          if (url) return url;
+        }
+      }
+    }
+    return null;
   }
 
   function itemsOf(group) {
     if (!group) return [];
     if (Array.isArray(group.items)) return group.items;
     if (Array.isArray(group.movies)) return group.movies;
+    if (Array.isArray(group.banners)) return group.banners;
+    if (Array.isArray(group.data)) return group.data;
+    if (Array.isArray(group.list)) return group.list;
     return [];
   }
 
   function isPlayable(item) {
-    return item && typeof item.id === 'number' && typeof item.type_id === 'number' && item.type_id > 0 && item.type_id < 6;
+    var inner = unwrapItem(item);
+    var idNum;
+    var typeNum;
+    if (!inner || typeof inner !== 'object') return false;
+    idNum = Number(inner.id);
+    if (!idNum || isNaN(idNum) || idNum <= 0) return false;
+    if (inner.type_id === undefined || inner.type_id === null || inner.type_id === '') {
+      return !!(inner.title || inner.name || inner.title_ru || inner.title_tk || inner.images || inner.image || inner.poster);
+    }
+    typeNum = Number(inner.type_id);
+    return !isNaN(typeNum) && typeNum > 0 && typeNum < 6;
+  }
+
+  function isHeroGroup(group) {
+    var src = group && group.source ? String(group.source).toLowerCase() : '';
+    return src === 'header' || src === 'banner' || src === 'banners' || src === 'slider';
   }
 
   function movieTitle(item) {
-    return (item && (item.title || item.name || item.title_ru || item.title_tk)) || 'Без названия';
+    var inner = unwrapItem(item);
+    return (inner && (inner.title || inner.name || inner.title_ru || inner.title_tk)) ||
+      (item && (item.title || item.name || item.title_ru || item.title_tk)) || 'Без названия';
   }
 
   function cardNode(item, options) {
     options = options || {};
+    var movie = unwrapItem(item);
     var card = doc.createElement('button');
     var poster = el('div', 'poster');
-    var image = posterOf(item);
-    var name = el('span', 'name', movieTitle(item));
+    var image = posterOf(movie) || posterOf(item);
+    var name = el('span', 'name', movieTitle(movie));
     var badge;
     var progress;
     var progressValue;
@@ -1471,13 +1664,13 @@
     var img = doc.createElement('img');
     setContentImage(img, image);
     poster.appendChild(img);
-    if (item && item.age) {
-      badge = el('span', 'badge', item.age + '+');
+    if (movie && movie.age) {
+      badge = el('span', 'badge', movie.age + '+');
       poster.appendChild(badge);
     }
     if (options.continueWatching) {
-      duration = parseDuration(item.duration) || parseDuration(item.episode_info && item.episode_info.duration);
-      progressValue = duration ? Math.min(100, Math.round((Number(item.watch_time || 0) / duration) * 100)) : 0;
+      duration = parseDuration(movie.duration) || parseDuration(movie.episode_info && movie.episode_info.duration);
+      progressValue = duration ? Math.min(100, Math.round((Number(movie.watch_time || 0) / duration) * 100)) : 0;
       progress = el('div', 'progress-mini');
       var fill = el('i');
       fill.style.width = Math.max(2, progressValue) + '%';
@@ -1486,110 +1679,197 @@
     }
     card.appendChild(poster);
     card.appendChild(name);
-    card.onclick = function () { openDetail(item); };
+    card.onclick = function () { openDetail(movie); };
     return card;
+  }
+
+  function buildRowBlock(group) {
+    var rawItems = itemsOf(group);
+    var items = [];
+    var i;
+    var title;
+    var row;
+    var block;
+    for (i = 0; i < rawItems.length; i += 1) {
+      if (isPlayable(rawItems[i])) items.push(unwrapItem(rawItems[i]));
+    }
+    if (!items.length) return null;
+    title = el('h2', 'row-title', group.title || group.title_ru || group.title_tk || 'Подборка');
+    row = el('div', 'row-track');
+    for (i = 0; i < items.length; i += 1) {
+      row.appendChild(cardNode(items[i], { continueWatching: group.source === 'continue_watching' }));
+    }
+    block = el('div', 'row-block');
+    block.appendChild(title);
+    block.appendChild(row);
+    return block;
   }
 
   function renderRows(groups) {
     var rows = $('rows');
     var heroGroup = null;
     var heroItem = null;
+    var firstFallback = null;
     clear(rows);
     groups.forEach(function (group) {
-      var items = itemsOf(group).filter(isPlayable);
-      var row;
-      var title;
+      var rawItems = itemsOf(group);
+      var items = rawItems.filter(isPlayable).map(unwrapItem);
+      var block;
       if (!items.length) return;
-      if (!heroGroup && group.source === 'header') {
+      if (!firstFallback) firstFallback = items[0];
+      if (!heroGroup && isHeroGroup(group)) {
         heroGroup = group;
         heroItem = items[0];
         return;
       }
-      title = el('h2', 'row-title', group.title || group.title_ru || group.title_tk || 'Подборка');
-      row = el('div', 'row-track');
-      items.forEach(function (item) {
-        row.appendChild(cardNode(item, { continueWatching: group.source === 'continue_watching' }));
-      });
-      var block = el('div', 'row-block');
-      block.appendChild(title);
-      block.appendChild(row);
-      rows.appendChild(block);
+      block = buildRowBlock(group);
+      if (block) rows.appendChild(block);
     });
-    renderHero(heroItem || (groups.length ? itemsOf(groups[0])[0] : null));
-    $('homeEmpty').classList.toggle('hidden', !!rows.children.length);
+    renderHero(heroItem || firstFallback);
+    $('homeEmpty').classList.toggle('hidden', !!rows.children.length || !hasClass($('hero'), 'hidden'));
   }
 
   function renderHero(item) {
     var hero = $('hero');
-    if (!item) {
+    var movie = unwrapItem(item);
+    if (!movie) {
       setHidden(hero, true);
       return;
     }
-    var image = backdropOf(item) || posterOf(item);
+    var image = backdropOf(movie) || posterOf(movie) || backdropOf(item) || posterOf(item);
     var meta = [];
-    state.home.hero = item;
+    state.home.hero = movie;
     setContentImage($('heroImage'), image);
-    var duration = durationText(item.duration);
-    var genres = genreNames(item.genres);
-    if (item.age) meta.push(item.age + '+');
-    if (item.rating_kp) meta.push('КП ' + item.rating_kp);
+    var duration = durationText(movie.duration);
+    var genres = genreNames(movie.genres);
+    if (movie.age) meta.push(movie.age + '+');
+    if (movie.rating_kp) meta.push('КП ' + movie.rating_kp);
     if (duration) meta.push(duration);
-    if (item.year) meta.push(item.year);
+    if (movie.year) meta.push(movie.year);
     if (genres) meta.push(genres);
-    $('heroTitle').textContent = movieTitle(item);
+    $('heroTitle').textContent = movieTitle(movie);
     $('heroMeta').textContent = meta.join('  ·  ');
-    $('heroText').textContent = item.description || '';
+    $('heroText').textContent = movie.description || '';
     setHidden(hero, false);
   }
 
-  function loadHome(showSpinner, attempt) {
+  function loadHome(showSpinner, attempt, holdBoot) {
     var retryAttempt = typeof attempt === 'number' ? attempt : 0;
+    var holdBootScreen = !!holdBoot;
     var collected = [];
     var gen;
+    var heroClaimed = false;
+    var fallbackHero = null;
+    var focusAssigned = false;
     stopQr();
     clearOtpTimer();
     clearHomeTimer();
     state.homeLoaded = false;
     state.homeGen += 1;
     gen = state.homeGen;
-    screen('home');
+    if (!holdBootScreen) screen('home');
     setHidden($('hero'), true);
     setHidden($('homeEmpty'), true);
+    setHidden($('homeLoading'), true);
     clear($('rows'));
+    state.home.hero = null;
     state.mainFocus = null;
 
+    function revealHomeScreen() {
+      if (state.screen === 'boot') screen('home');
+    }
+
     function focusReload() {
+      revealHomeScreen();
+      setHidden($('homeLoading'), true);
       state.mainFocus = $('homeReload');
       if (state.screen === 'home' && !activeOverlay() && $('homeReload')) {
         $('homeReload').focus();
       }
     }
 
+    function ensureInitialFocus() {
+      var first;
+      if (focusAssigned) return;
+      first = $('rows').querySelector('.card') || ($('hero') && !hasClass($('hero'), 'hidden') ? $('heroPlay') : null);
+      if (first) {
+        focusAssigned = true;
+        state.mainFocus = first;
+        if (state.screen === 'home' && !activeOverlay()) {
+          first.focus();
+          reveal(first);
+        }
+      }
+    }
+
     if (isClockBlockingHttps()) {
+      revealHomeScreen();
       $('homeEmpty').classList.remove('hidden');
-      $('homeEmpty').querySelector('h2').textContent = 'Сбиты дата и время на телевизоре';
-      $('homeEmpty').querySelector('p').textContent = canProbeAnyClockBridge()
-        ? ('Время ТВ (' + clockDateText() + ') не настроено — прямые HTTPS не отправляются, запускаем локальный обход SSL…')
-        : clockHelpText();
+      if (canProbeAnyClockBridge()) {
+        $('homeEmpty').querySelector('h2').textContent = 'Загрузка каталога…';
+        $('homeEmpty').querySelector('p').textContent = 'Подключение к серверам Belet… Подождите пару секунд.';
+      } else {
+        $('homeEmpty').querySelector('h2').textContent = 'Сбиты дата и время на телевизоре';
+        $('homeEmpty').querySelector('p').textContent = clockHelpText();
+      }
       focusReload();
       scheduleClockWatch();
       return;
     }
-    if (showSpinner) toast('Загружаем каталог…', 1800);
+    if (holdBootScreen) {
+      $('bootStatus').textContent = 'Вход в систему…';
+    } else {
+      setHidden($('homeLoading'), false);
+    }
+
+    function appendGroups(newGroups) {
+      var rows = $('rows');
+      var i, group, rawItems, items, block, heroCandidate;
+      for (i = 0; i < newGroups.length; i += 1) {
+        group = newGroups[i];
+        rawItems = itemsOf(group);
+        items = rawItems.filter(isPlayable).map(unwrapItem);
+        if (!heroClaimed && isHeroGroup(group)) {
+          heroCandidate = items[0] || (rawItems[0] ? unwrapItem(rawItems[0]) : null);
+          if (heroCandidate) {
+            heroClaimed = true;
+            renderHero(heroCandidate);
+          }
+          continue;
+        }
+        if (!items.length) continue;
+        if (!fallbackHero) fallbackHero = items[0];
+        block = buildRowBlock(group);
+        if (block) rows.appendChild(block);
+      }
+      if (!heroClaimed && fallbackHero && rows.children.length) {
+        heroClaimed = true;
+        renderHero(fallbackHero);
+      }
+      if (rows.children.length || !hasClass($('hero'), 'hidden')) {
+        revealHomeScreen();
+        setHidden($('homeLoading'), true);
+        setHidden($('homeEmpty'), true);
+        ensureInitialFocus();
+      }
+    }
 
     function fetchPage(offset, pagesLeft) {
       Belet.home(offset, 3, function (err, groups) {
         var delays, delay;
-        if (gen !== state.homeGen || state.screen !== 'home') return;
+        if (gen !== state.homeGen) return;
+        if (state.screen !== 'home' && !(holdBootScreen && state.screen === 'boot')) return;
         if (err) {
           if (handleAuthError(err)) return;
           if (!collected.length) {
+            revealHomeScreen();
+            setHidden($('homeLoading'), true);
             delays = [1500, 3000, 5000, 7000];
             $('homeEmpty').classList.remove('hidden');
             if (isClockBlockingHttps()) scheduleClockWatch();
             if (err.kind === 'network' && retryAttempt < delays.length) {
               delay = delays[retryAttempt];
-              $('homeEmpty').querySelector('h2').textContent = isClockBlockingHttps()
+              $('homeEmpty').querySelector('h2').textContent = (!canProbeAnyClockBridge() && isClockBlockingHttps())
                 ? 'Сбиты дата и время на телевизоре'
                 : 'Подключение к серверам Belet…';
               $('homeEmpty').querySelector('p').textContent = describeError(err) +
@@ -1598,12 +1878,12 @@
               state.homeRetryTimer = setTimeout(function () {
                 state.homeRetryTimer = null;
                 if (gen === state.homeGen && state.screen === 'home' && !state.homeLoaded && Belet.hasSession()) {
-                  loadHome(false, retryAttempt + 1);
+                  loadHome(false, retryAttempt + 1, false);
                 }
               }, delay);
               return;
             }
-            $('homeEmpty').querySelector('h2').textContent = isClockBlockingHttps()
+            $('homeEmpty').querySelector('h2').textContent = (!canProbeAnyClockBridge() && isClockBlockingHttps())
               ? 'Сбиты дата и время на телевизоре'
               : 'Каталог не загрузился';
             $('homeEmpty').querySelector('p').textContent = describeError(err);
@@ -1614,10 +1894,9 @@
           return;
         }
         collected = collected.concat(groups);
-        // Paint each page as it arrives so the TV shows content instead of a spinner.
         if (groups.length) {
           state.home.groups = collected;
-          renderRows(collected);
+          appendGroups(groups);
         }
         if (groups.length && pagesLeft > 1) return fetchPage(offset + 3, pagesLeft - 1);
         finish();
@@ -1625,21 +1904,29 @@
     }
 
     function finish() {
+      var rows = $('rows');
+      var hasContent;
       clearHomeTimer();
+      revealHomeScreen();
+      setHidden($('homeLoading'), true);
       state.home.groups = collected;
       state.homeLoaded = true;
+      if (!heroClaimed && fallbackHero) {
+        heroClaimed = true;
+        renderHero(fallbackHero);
+      }
+      hasContent = !!rows.children.length || !hasClass($('hero'), 'hidden');
       $('homeEmpty').querySelector('h2').textContent = 'Каталог пуст';
       $('homeEmpty').querySelector('p').textContent = 'Сервис ответил, но не вернул ни одного раздела. Проверьте подписку и повторите.';
-      renderRows(collected);
+      setHidden($('homeEmpty'), hasContent);
       if (deviceRegistration.state !== 'сервер принял регистрацию телевизора' &&
           deviceRegistration.state !== 'отправляется…') {
         registerDevice();
       }
-      var first = $('rows').querySelector('.card') || ($('hero') && !hasClass($('hero'), 'hidden') ? $('heroPlay') : null) || $('homeReload');
-      state.mainFocus = first;
-      if (first) {
-        first.focus();
-        reveal(first);
+      ensureInitialFocus();
+      if (!focusAssigned) {
+        state.mainFocus = $('homeReload');
+        if ($('homeReload')) $('homeReload').focus();
       }
     }
 
@@ -1878,40 +2165,42 @@
   /* ── detail ───────────────────────────────────────────────────────── */
 
   function openDetail(item) {
-    state.detail = { movie: item, seasons: [], seasonId: null, episodes: [], loadingEpisodes: false };
+    var movie = unwrapItem(item);
+    state.detail = { movie: movie, seasons: [], seasonId: null, episodes: [], loadingEpisodes: false };
     screen('detail');
     $('episodesSection').classList.add('hidden');
-    $('detailTitle').textContent = movieTitle(item);
+    $('detailTitle').textContent = movieTitle(movie);
     $('detailMeta').textContent = '';
     $('detailGenres').textContent = '';
     $('detailText').textContent = 'Загружаем описание…';
-    $('detailPoster').removeAttribute('src');
-    $('detailBackdrop').style.backgroundImage = 'none';
+    setContentImage($('detailPoster'), posterOf(movie));
+    setContentImage($('detailBackdropImg'), backdropOf(movie) || posterOf(movie));
     setHidden($('detailTrailer'), true);
     state.mainFocus = $('detailPlay');
     $('detailPlay').textContent = 'Смотреть';
     setTimeout(function () { $('detailPlay').focus(); }, 30);
 
-    Belet.movie(item.id, function (err, movie) {
+    Belet.movie(movie.id, function (err, fullMovie) {
       if (err) {
         if (handleAuthError(err)) return;
         $('detailText').textContent = describeError(err);
         return;
       }
-      renderDetail(movie);
+      renderDetail(fullMovie);
     });
   }
 
   function renderDetail(movie) {
     var detail = state.detail;
+    var prevMovie = detail && detail.movie;
     var meta = [];
-    var poster = posterOf(movie) || posterOf(detail.movie);
-    var backdrop = backdropOf(movie) || posterOf(movie);
+    var poster = posterOf(movie) || posterOf(prevMovie);
+    var backdrop = backdropOf(movie) || posterOf(movie) || backdropOf(prevMovie) || posterOf(prevMovie);
     var watch = Number(movie.watch_time || 0);
     detail.movie = movie;
 
     setContentImage($('detailPoster'), poster);
-    if (backdrop) $('detailBackdrop').style.backgroundImage = 'url("' + backdrop + '")';
+    setContentImage($('detailBackdropImg'), backdrop);
     $('detailTitle').textContent = movieTitle(movie);
     var year = movie.year || (movie.release_date ? String(movie.release_date).slice(0, 4) : '');
     var duration = durationText(movie.duration);
@@ -3298,24 +3587,39 @@
       startBootSession();
       return;
     }
+    if (state.screen === 'boot' && state.bootDone && !state.homeLoaded && Belet.hasSession() && fromClockSync) {
+      if (deviceRegistration.state !== 'сервер принял регистрацию телевизора' &&
+          deviceRegistration.state !== 'отправляется…') {
+        registerDevice();
+      }
+      loadHome(false, 0, true);
+      return;
+    }
     if (state.screen === 'home' && Belet.hasSession()) {
       if (!state.homeLoaded) {
         if (fromClockSync && deviceRegistration.state !== 'сервер принял регистрацию телевизора' &&
             deviceRegistration.state !== 'отправляется…') {
           registerDevice();
         }
-        loadHome(false, 0);
+        loadHome(false, 0, false);
         return;
       }
-      if (fromClockSync && state.home.groups && state.home.groups.length) {
-        renderRows(state.home.groups);
-        return;
+      if (fromClockSync) {
+        if ($('rows').children.length) {
+          refreshVisibleImages();
+          return;
+        }
+        if (state.home.groups && state.home.groups.length) {
+          renderRows(state.home.groups);
+          return;
+        }
       }
     }
     if (state.screen === 'detail' && fromClockSync && state.detail && state.detail.movie) {
       renderDetail(state.detail.movie);
       return;
     }
+    if (fromClockSync) refreshVisibleImages();
     if (state.screen === 'login' && !state.login.busy) {
       if (!hasClass($('loginQr'), 'hidden') && (!state.qr.code || fromClockSync)) startQr(0);
       else if (!hasClass($('loginPhone'), 'hidden') && (!state.login.methods.length || state.login.otpFallback || fromClockSync)) loadOtpMethods(0);
@@ -3404,11 +3708,11 @@
     if (shouldUseBypass() && !isClockBypassed()) scheduleClockWatch();
     session = state.bootSession;
     if (session) {
-      $('bootStatus').textContent = 'Восстанавливаем сессию…';
+      $('bootStatus').textContent = 'Вход в систему…';
       registerDevice();
-      loadHome(true);
+      loadHome(false, 0, true);
     } else {
-      $('bootStatus').textContent = 'Требуется вход в аккаунт Belet';
+      $('bootStatus').textContent = 'Подготовка входа…';
       setTimeout(function () { showLogin(); }, 350);
     }
   }
@@ -3433,8 +3737,8 @@
     if (!clockOk) {
       $('bootStatus').textContent = canProbeAnyClockBridge()
         ? (hasSvc && waited >= 1000
-          ? 'Запускаем обход SSL (' + Math.ceil(waited / 1000) + ' с)…'
-          : 'Запускаем обход SSL…')
+          ? 'Подключение к Belet (' + Math.ceil(waited / 1000) + ' с)…'
+          : 'Подключение к Belet…')
         : 'Ожидаем синхронизацию времени телевизора…';
       if (canProbeAnyClockBridge() && waited > 0) {
         probeClockProxy(function (ok) {
@@ -3468,9 +3772,7 @@
       return;
     }
     if (shouldUseBypass() && canProbeAnyClockBridge()) {
-      $('bootStatus').textContent = isClockInvalid()
-        ? 'Время ТВ сброшено — запускаем обход SSL…'
-        : 'Запускаем обход SSL Belet…';
+      $('bootStatus').textContent = 'Загрузка Belet…';
       probeClockProxy(function (ok) {
         if (ok && isNetworkReady() && !state.bootDone) startBootSession();
       }, {

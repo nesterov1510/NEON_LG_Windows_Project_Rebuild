@@ -24,10 +24,14 @@
 
     <!-- Boot -->
     <section id="boot" class="screen">
+      <div class="boot-glow" aria-hidden="true"></div>
       <div class="boot-inner">
-        <img class="boot-logo" src="belet-logo.png" alt="Bëlet">
-        <div class="boot-spinner" aria-hidden="true"></div>
-        <p id="bootStatus" class="boot-status" role="status">Подключение к Belet…</p>
+        <div class="boot-logo-wrap">
+          <img class="boot-logo" src="belet-logo.png" alt="Bëlet">
+        </div>
+        <div class="boot-progress" aria-hidden="true"><span class="boot-bar"></span></div>
+        <div class="boot-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p id="bootStatus" class="boot-status" role="status">Загрузка Belet…</p>
       </div>
     </section>
 
@@ -104,6 +108,11 @@
         </div>
       </div>
       <div id="rows" class="rows"></div>
+      <div id="homeLoading" class="home-loading hidden">
+        <div class="boot-progress" aria-hidden="true"><span class="boot-bar"></span></div>
+        <div class="boot-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="boot-status">Загрузка каталога…</p>
+      </div>
       <div id="homeEmpty" class="empty hidden">
         <h2>Каталог пуст</h2>
         <p>Сервис ответил, но не вернул ни одного раздела. Проверьте подписку и повторите.</p>
@@ -142,7 +151,7 @@
 
     <!-- Detail -->
     <section id="detail" class="screen hidden">
-      <div id="detailBackdrop" class="detail-backdrop" aria-hidden="true"></div>
+      <div id="detailBackdrop" class="detail-backdrop" aria-hidden="true"><img id="detailBackdropImg" class="detail-backdrop-img" alt=""></div>
       <div class="detail-scroll">
         <div class="detail-top">
           <img id="detailPoster" class="detail-poster" alt="">

@@ -51,8 +51,10 @@
     var host;
     var rest;
     if (!clockProxyBase || typeof targetUrl !== 'string') return targetUrl;
-    s = targetUrl;
+    s = targetUrl.replace(/^\s+|\s+$/g, '').replace(/ /g, '%20');
+    if (!s) return targetUrl;
     if (s.indexOf(clockProxyBase + '/__proxy/') === 0) return s;
+    if (s.indexOf('//') === 0) s = 'https:' + s;
     match = /^https:\/\/([^\/:?#]+)(?::443)?(.*)$/i.exec(s);
     if (!match) {
       match = /^http:\/\/([^\/:?#]+)(?::80)?(.*)$/i.exec(s);
