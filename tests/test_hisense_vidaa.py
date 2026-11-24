@@ -720,3 +720,110 @@ def test_portal_preferred_ports_tv_probe_and_hosts_fallback(tmp_path):
     finally:
         p2.stop()
         p1.stop()
+
+
+def test_get_local_ip_prefers_ics_lan_over_vless_tun(monkeypatch):
+    monkeypatch.setattr(
+        hisense_vidaa,
+        '_probe_udp_source_ip',
+        lambda target: {
+            '192.168.137.2': '192.168.137.1',
+            '192.168.1.254': '192.168.1.50',
+            '8.8.8.8': '172.19.0.1',
+            '192.168.137.55': '172.19.0.1',  # simulated skewed VPN route
+        }.get(target, '172.19.0.1'),
+    )
+    monkeypatch.setattr(hisense_vidaa.socket, 'getaddrinfo', lambda *a, **kw: [])
+    monkeypatch.setattr(hisense_vidaa.socket, 'gethostbyname', lambda *a: '172.19.0.1')
+
+    assert hisense_vidaa.get_local_ip_for_tv(None) == '192.168.137.1'
+    assert hisense_vidaa.get_local_ip_for_tv('192.168.137.55') == '192.168.137.1'
+    assert hisense_vidaa.get_local_ip_for_tv('192.168.1.77') == '192.168.1.50'
+
+
+def test_windows_firewall_recreates_rules_with_edge_and_detects_block_all(monkeypatch):
+    monkeypatch.setattr(hisense_vidaa.os, 'name', 'nt')
+    calls = []
+
+    class FakeRes:
+        def __init__(self, rc=0, stdout=''):
+            self.returncode = rc
+            self.stdout = stdout
+            self.stderr = ''
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if cmd and cmd[0] == 'powershell':
+            return FakeRes(0, json.dumps({
+                'admin': True,
+                'removed': ['Blocked NEON'],
+                'profiles': {
+                    'Public': {'enabled': True, 'allowInbound': False, 'defaultInbound': 'Block'},
+                    'Private': {'enabled': True, 'allowInbound': True, 'defaultInbound': 'Block'},
+                },
+                'net': [{'iface': 'Ethernet', 'cat': 'Public', 'idx': 4}],
+            }))
+        return FakeRes(0, 'Ok.')
+
+    monkeypatch.setattr(hisense_vidaa.subprocess, 'run', fake_run)
+    ok, info = hisense_vidaa._ensure_windows_firewall_rules([18880, 80], [53])
+    assert ok is True and info == 'ok'
+    del_cmds = [c for c in calls if 'delete' in c]
+    add_cmds = [c for c in calls if 'add' in c]
+    assert any('name=NEON-VIDAA-TCP-18880' in c for c in del_cmds)
+    assert any('name=NEON-VIDAA-TCP-80' in c for c in del_cmds)
+    tcp_adds = [c for c in add_cmds if 'name=NEON-VIDAA-TCP-18880' in c]
+    assert len(tcp_adds) == 1
+    assert 'profile=private,public,domain' in tcp_adds[0]
+    assert 'edge=yes' in tcp_adds[0]
+
+    fw = hisense_vidaa._inspect_windows_firewall_and_unblock()
+    assert fw['removed_blocks'] == ['Blocked NEON']
+    assert any('AllowInboundRules=False' in w for w in fw['warnings'])
+
+
+def test_portal_dual_port_ip_refresh_and_diagnose(monkeypatch, tmp_path):
+    monkeypatch.setenv('APPDATA', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path))
+
+    # Allocate an unprivileged port to exercise dual-HTTP listener cleanly on Linux
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    free_p80 = s.getsockname()[1]
+    s.close()
+
+    logs = []
+    portal = hisense_vidaa.HisensePortalServer(logs.append, bind_port80=True, http80_port=free_p80)
+    try:
+        i1 = portal.ensure_started(tv_ip='127.0.0.1')
+        assert i1['ok'] is True
+        assert i1['port80_active'] is True
+        assert i1['port80'] == free_p80
+        assert i1['short_url'].endswith(f':{free_p80}/')
+
+        with urllib.request.urlopen(f'http://127.0.0.1:{free_p80}/__ping', timeout=3) as resp:
+            assert resp.status == 200 and json.loads(resp.read().decode('utf-8'))['ok'] is True
+
+        # Ensure pc_ip updates if ensure_started is later called with a specific TV subnet IP
+        monkeypatch.setattr(
+            hisense_vidaa,
+            'get_local_ip_for_tv',
+            lambda tv=None: '192.168.137.1' if tv == '192.168.137.55' else '127.0.0.1',
+        )
+        i2 = portal.ensure_started(tv_ip='192.168.137.55')
+        assert i2['pc_ip'] == '192.168.137.1'
+        assert i2['url'].startswith('http://192.168.137.1:')
+
+        monkeypatch.setattr(portal, '_self_probe_http', lambda h, p: True)
+        diag = portal.diagnose_connection(tv_ip='')
+        assert diag['ok'] is True
+        assert any('Ссылки установщика' in ln for ln in diag['lines'])
+    finally:
+        portal.stop()
+
+    api = Api()
+    try:
+        res = api.diagnose_hisense_connection('')
+        assert 'lines' in res and 'urls' in res
+    finally:
+        api.close()

@@ -56,3 +56,18 @@ def test_engine_is_bundled_and_link_only_goes_to_stdin(tmp_path, monkeypatch):
     api._read_openvpn_log(proc, True)
     assert api.vpn_state == 'ERROR' and LINK not in '\n'.join(api.vpn_logs)
     api.close()
+
+
+def test_tun_excludes_lan_ics_and_ssdp_but_keeps_tun_ip():
+    import ipaddress
+
+    cfg = vless.configuration(LINK)
+    tun = cfg['inbounds'][0]
+    excludes = [ipaddress.ip_network(c) for c in tun['route_exclude_address']]
+    assert any(ipaddress.ip_address('192.168.137.1') in net for net in excludes)
+    assert any(ipaddress.ip_address('192.168.1.50') in net for net in excludes)
+    assert any(ipaddress.ip_address('10.0.0.5') in net for net in excludes)
+    assert any(ipaddress.ip_address('239.255.255.250') in net for net in excludes)
+    # Never exclude the TUN interface subnet itself
+    assert not any(ipaddress.ip_address('172.19.0.1') in net for net in excludes)
+    assert not any(ipaddress.ip_address('172.19.0.2') in net for net in excludes)

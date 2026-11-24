@@ -4723,6 +4723,15 @@ class Api:
         host = self._resolve_hisense_ip(ip)
         sess = self._hisense_store.get(host) if host else None
         pc_ip = hisense_vidaa.get_local_ip_for_tv(host)
+        all_ips = [x for x in hisense_vidaa.list_local_ipv4_addresses() if x not in hisense_vidaa._VPN_TUN_IPS]
+        alt_ips = [x for x in all_ips if x != pc_ip]
+        p_running = self._hisense_portal.running
+        p80_active = bool(p_running and self._hisense_portal._http80_server is not None)
+        p80_port = self._hisense_portal._http80_actual_port if p80_active else 0
+        short_url = (
+            (f'http://{pc_ip}/' if p80_port == 80 else f'http://{pc_ip}:{p80_port}/')
+            if (p80_active and p80_port) else ''
+        )
         return {
             'ok': True,
             'host': host,
@@ -4731,10 +4740,13 @@ class Api:
             'brand': sess.brand if sess else 'his',
             'friendly_name': sess.friendly_name if sess else '',
             'model_name': sess.model_name if sess else '',
-            'portal_running': self._hisense_portal.running,
-            'portal_url': self._hisense_portal.base_url(host) if self._hisense_portal.running else '',
+            'portal_running': p_running,
+            'portal_url': self._hisense_portal.base_url(host) if p_running else '',
+            'short_url': short_url,
+            'port80_active': p80_active,
             'vidaahub_running': self._hisense_portal.vidaahub_running,
             'pc_ip': pc_ip,
+            'alt_ips': alt_ips,
             'last_tv_probe': self._hisense_portal.last_tv_probe,
         }
 
@@ -4818,6 +4830,8 @@ class Api:
                 auto_launch=bool(launch),
             )
             res['mode'] = clean_mode
+            if getattr(self._hisense_portal, '_firewall_warnings', None):
+                res['warnings'] = list(self._hisense_portal._firewall_warnings)
             return res
         except Exception as exc:
             self._hisense_log(f'Ошибка установки Belet на {host}: {exc}')
@@ -4879,6 +4893,8 @@ class Api:
             )
             res['mode'] = clean_mode
             res['portal'] = portal
+            if getattr(self._hisense_portal, '_firewall_warnings', None):
+                res['warnings'] = list(self._hisense_portal._firewall_warnings)
             return res
         except Exception as exc:
             self._hisense_log(f'Ошибка установки Alem TV на {host}: {exc}')
@@ -4940,6 +4956,8 @@ class Api:
                 auto_launch=bool(launch),
             )
             res['mode'] = clean_mode
+            if getattr(self._hisense_portal, '_firewall_warnings', None):
+                res['warnings'] = list(self._hisense_portal._firewall_warnings)
             return res
         except Exception as exc:
             self._hisense_log(f'Ошибка установки MSB Callback на {host}: {exc}')
@@ -5032,6 +5050,8 @@ class Api:
             return info
         can_vidaahub_on_tv = bool(use_vidaahub and info.get('dns_port') and info.get('https_port'))
         target_url = 'https://vidaahub.com/' if can_vidaahub_on_tv else info['url']
+        short_url = '' if can_vidaahub_on_tv else (info.get('short_url') or '')
+        manual_urls = f'{short_url} (или {target_url})' if short_url else target_url
         launched = False
         sess = self._hisense_store.get(host) if host else None
         if host and sess and sess.is_paired:
@@ -5040,18 +5060,29 @@ class Api:
                 launched = bool(res.get('ok'))
                 if not launched:
                     err = res.get('error') or 'Браузер не запустился'
+                    if short_url and target_url in err:
+                        err = err.replace(target_url, manual_urls)
                     info['launch_error'] = err
                     self._hisense_log(
-                        f'Не удалось авто-открыть портал на ТВ {host} ({err}). Откройте {target_url} в браузере ТВ вручную.'
+                        f'Не удалось авто-открыть портал на ТВ {host} ({err}). Откройте {manual_urls} в браузере ТВ вручную.'
                     )
             except Exception as exc:
                 self._hisense_log(
-                    f'Не удалось авто-открыть портал на ТВ {host}: {exc}. Откройте {target_url} в браузере ТВ вручную.'
+                    f'Не удалось авто-открыть портал на ТВ {host}: {exc}. Откройте {manual_urls} в браузере ТВ вручную.'
                 )
         info['mode'] = 'tv_flash'
-        info['portal_url'] = target_url
+        info['portal_url'] = short_url or target_url
+        info['full_portal_url'] = target_url
         info['launched'] = launched
         return info
+
+    def diagnose_hisense_connection(self, ip=None):
+        host = self._resolve_hisense_ip(ip)
+        try:
+            return self._hisense_portal.diagnose_connection(tv_ip=host)
+        except Exception as exc:
+            self._hisense_log(f'Ошибка диагностики Hisense: {exc}')
+            return {'ok': False, 'error': str(exc), 'issues': [str(exc)], 'lines': []}
 
     def stop_hisense_portal_server(self):
         self._hisense_portal.stop()
