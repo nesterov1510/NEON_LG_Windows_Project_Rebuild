@@ -1,0 +1,523 @@
+from __future__ import annotations
+
+import ast
+import datetime
+import ipaddress
+import json
+import socket
+import ssl
+import struct
+import threading
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+import alemtv_app
+import hisense_vidaa
+import msb_callback
+from core import Api
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _make_server_ssl_context(tmp_path: Path) -> ssl.SSLContext:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, '127.0.0.1')])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=30))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = tmp_path / 'broker.crt'
+    key_path = tmp_path / 'broker.key'
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    ))
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+    return ctx
+
+
+class _MockVidaaBroker:
+    """Minimal MQTT 3.1.1 over TLS mock implementing VIDAA topics & token expiry."""
+
+    def __init__(self, tmp_path: Path, apps=None, expire_access_token: str | None = None):
+        self.ssl_ctx = _make_server_ssl_context(tmp_path)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(('127.0.0.1', 0))
+        self.sock.listen(5)
+        self.sock.settimeout(0.2)
+        self.port = self.sock.getsockname()[1]
+        self._stop = threading.Event()
+        self.apps = list(apps or [
+            {'appId': 'netflix', 'name': 'Netflix', 'url': 'https://www.netflix.com'},
+        ])
+        self.expire_access_token = expire_access_token
+        self.rejected_stale_once = False
+        self.received = []
+        self.expected_pin = 4821
+        self._conns = []
+        self._handlers = []
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self._stop.set()
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        for conn in list(self._conns):
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        for t in list(self._handlers):
+            if t.is_alive():
+                t.join(timeout=2.0)
+        for conn in list(self._conns):
+            try:
+                conn.close()
+            except OSError:
+                pass
+        self._thread.join(timeout=2.0)
+
+    def _accept_loop(self):
+        while not self._stop.is_set():
+            try:
+                raw, _ = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                conn = self.ssl_ctx.wrap_socket(raw, server_side=True)
+            except OSError:
+                raw.close()
+                continue
+            self._conns.append(conn)
+            t = threading.Thread(target=self._handle_client, args=(conn,), daemon=True)
+            self._handlers.append(t)
+            t.start()
+
+    @staticmethod
+    def _read_exact(conn, n):
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = conn.recv(n - len(buf))
+            if not chunk:
+                raise EOFError('eof')
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _read_packet(self, conn):
+        first = self._read_exact(conn, 1)[0]
+        mult = 1
+        rem = 0
+        while True:
+            b = self._read_exact(conn, 1)[0]
+            rem += (b & 0x7F) * mult
+            if (b & 0x80) == 0:
+                break
+            mult *= 128
+        body = self._read_exact(conn, rem) if rem else b''
+        return first, body
+
+    @staticmethod
+    def _send_publish(conn, topic: str, payload: bytes):
+        tb = topic.encode('utf-8')
+        vh = struct.pack('!H', len(tb)) + tb
+        body = vh + payload
+        rem = len(body)
+        enc = bytearray([0x30])
+        while True:
+            d = rem % 128
+            rem //= 128
+            if rem > 0:
+                d |= 0x80
+            enc.append(d)
+            if rem == 0:
+                break
+        conn.sendall(bytes(enc) + body)
+
+    def _handle_client(self, conn):
+        conn.settimeout(0.5)
+        cid = ''
+        try:
+            while not self._stop.is_set():
+                try:
+                    hdr, body = self._read_packet(conn)
+                except socket.timeout:
+                    continue
+                except (EOFError, OSError):
+                    break
+                ptype = (hdr >> 4) & 0x0F
+                if ptype == 1:  # CONNECT
+                    pos = 0
+                    plen = struct.unpack('!H', body[pos:pos + 2])[0]
+                    pos += 2 + plen
+                    _proto_level = body[pos]
+                    flags = body[pos + 1]
+                    pos += 4  # proto_level + flags + keepalive(2)
+                    clen = struct.unpack('!H', body[pos:pos + 2])[0]
+                    pos += 2
+                    cid = body[pos:pos + clen].decode('utf-8')
+                    pos += clen
+                    uname = pwd = ''
+                    if flags & 0x80:
+                        ulen = struct.unpack('!H', body[pos:pos + 2])[0]
+                        pos += 2
+                        uname = body[pos:pos + ulen].decode('utf-8')
+                        pos += ulen
+                    if flags & 0x40:
+                        pwlen = struct.unpack('!H', body[pos:pos + 2])[0]
+                        pos += 2
+                        pwd = body[pos:pos + pwlen].decode('utf-8')
+                        pos += pwlen
+                    if self.expire_access_token and pwd == self.expire_access_token and not self.rejected_stale_once:
+                        self.rejected_stale_once = True
+                        conn.sendall(bytes([0x20, 0x02, 0x00, 0x05]))
+                        break
+                    conn.sendall(bytes([0x20, 0x02, 0x00, 0x00]))
+                elif ptype == 8:  # SUBSCRIBE
+                    pid = struct.unpack('!H', body[:2])[0]
+                    conn.sendall(bytes([0x90, 0x03, (pid >> 8) & 0xFF, pid & 0xFF, 0x00]))
+                elif ptype == 12:  # PINGREQ
+                    conn.sendall(bytes([0xD0, 0x00]))
+                elif ptype == 14:  # DISCONNECT
+                    break
+                elif ptype == 3:  # PUBLISH
+                    tlen = struct.unpack('!H', body[:2])[0]
+                    topic = body[2:2 + tlen].decode('utf-8')
+                    pos = 2 + tlen
+                    if hdr & 0x06:
+                        pid = struct.unpack('!H', body[pos:pos + 2])[0]
+                        pos += 2
+                        conn.sendall(bytes([0x40, 0x02, (pid >> 8) & 0xFF, pid & 0xFF]))
+                    payload = body[pos:].decode('utf-8', errors='replace')
+                    self.received.append((topic, payload))
+                    self._dispatch(conn, cid, topic, payload)
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _dispatch(self, conn, cid, topic, payload):
+        if topic.endswith('/actions/gettvstate') or topic.endswith('/actions/vidaa_app_connect'):
+            self._send_publish(
+                conn,
+                f'/remoteapp/mobile/{cid}/ui_service/data/authentication',
+                json.dumps({'result': 0}).encode('utf-8'),
+            )
+        elif topic.endswith('/actions/authenticationcode'):
+            data = json.loads(payload)
+            ok = int(data.get('authNum', -1)) == self.expected_pin
+            self._send_publish(
+                conn,
+                f'/remoteapp/mobile/{cid}/ui_service/data/authenticationcode',
+                json.dumps({'result': 1 if ok else 0}).encode('utf-8'),
+            )
+        elif topic.endswith('/data/gettoken'):
+            req = json.loads(payload) if payload else {}
+            is_refresh = bool(req.get('refreshtoken'))
+            self._send_publish(
+                conn,
+                f'/remoteapp/mobile/{cid}/platform_service/data/tokenissuance',
+                json.dumps({
+                    'accesstoken': 'fresh-access-2' if is_refresh else 'initial-access-1',
+                    'refreshtoken': 'refresh-tok-2' if is_refresh else 'refresh-tok-1',
+                    'accesstoken_duration_day': 2,
+                    'refreshtoken_duration_day': 30,
+                }).encode('utf-8'),
+            )
+        elif topic.endswith('/actions/uievent'):
+            data = json.loads(payload)
+            if data.get('type') == 'app_install':
+                info = data.get('app_info', {})
+                self.apps.append({
+                    'appId': info.get('Id', ''),
+                    'name': info.get('Title', ''),
+                    'url': info.get('URL', ''),
+                })
+        elif topic.endswith('/actions/applist'):
+            self._send_publish(
+                conn,
+                f'/remoteapp/mobile/{cid}/ui_service/data/applist',
+                json.dumps(self.apps).encode('utf-8'),
+            )
+
+
+def test_vidaa_bundle_and_ssl_context():
+    cert_pem, key_pem = hisense_vidaa.load_client_pem_key()
+    assert b'BEGIN CERTIFICATE' in cert_pem
+    assert b'PRIVATE KEY' in key_pem
+    ctx = hisense_vidaa.create_vidaa_ssl_context()
+    assert isinstance(ctx, ssl.SSLContext)
+
+
+def test_session_credentials_and_profile_selection():
+    c_his, u_his, p_his = hisense_vidaa.session_credentials('AA:BB:CC:DD:EE:FF', 0, auth_profile='static', brand='his')
+    c_tos, _, _ = hisense_vidaa.session_credentials('AA:BB:CC:DD:EE:FF', 0, auth_profile='static', brand='tos')
+    c_mod, u_mod, p_mod = hisense_vidaa.session_credentials('AA:BB:CC:DD:EE:FF', 1700000000, auth_profile='modern', brand='his')
+
+    assert '$his$' in c_his and u_his == 'hisenseservice' and p_his == 'multimqttservice'
+    assert '$tos$' in c_tos
+    assert u_mod.startswith('his$') and len(p_mod) == 32
+    assert hisense_vidaa.select_profile_order('auto', brand='his') == ['static', 'modern', 'middle', 'remotenow']
+    assert hisense_vidaa.select_profile_order('auto', brand='his', transport_protocol=3300) == [
+        'modern', 'static', 'middle', 'remotenow',
+    ]
+    assert hisense_vidaa.select_profile_order('middle', brand='his')[0] == 'middle'
+
+
+def test_descriptor_xml_payloads_and_urls():
+    xml = (
+        '<root xmlns="urn:schemas-upnp-org:device-1-0">'
+        '<device><UDN>uuid:hisense-123</UDN><friendlyName>Living Room TV</friendlyName>'
+        '<modelName>55U7HQ</modelName><manufacturer>Hisense</manufacturer>'
+        '<modelDescription>brand=his\ntransport_protocol=3300\nvidaa_support=1\nmacwifi=aa:bb:cc:dd:ee:01</modelDescription>'
+        '</device></root>'
+    )
+    info = hisense_vidaa.parse_descriptor_xml('192.168.1.50', xml, tv_ts=1700000000)
+    assert info.is_vidaa is True
+    assert info.brand == 'his'
+    assert info.transport_protocol == 3300
+    assert info.friendly_name == 'Living Room TV'
+    assert info.mac == 'aa:bb:cc:dd:ee:01'
+
+    tos_xml = (
+        '<root><device><UDN>uuid:hisense-tos</UDN><friendlyName>Toshiba</friendlyName>'
+        '<modelName>50C350</modelName><manufacturer>Toshiba</manufacturer>'
+        '<modelDescription>brand=tos\nvidaa_support=1</modelDescription></device></root>'
+    )
+    tos = hisense_vidaa.parse_descriptor_xml('192.168.1.51', tos_xml)
+    assert tos.is_vidaa is True
+    assert tos.brand == 'tos'
+
+    non_vidaa = hisense_vidaa.parse_descriptor_xml('1.2.3.4', '<root><device><UDN>uuid:roku</UDN></device></root>')
+    assert non_vidaa.is_vidaa is False
+
+    raw = hisense_vidaa.install_payload('tm.belet.vidaa', 'Belet', 'https://belet.tm/', 'https://pc/icon.png')
+    payload = json.loads(raw)
+    assert payload['type'] == 'app_install'
+    assert payload['app_info']['Id'] == 'tm.belet.vidaa'
+    assert payload['app_info']['URL'] == 'https://belet.tm/'
+
+    assert hisense_vidaa.validate_app_url('https://belet.tm/') == 'https://belet.tm/'
+    assert hisense_vidaa.validate_app_url('data:text/html;base64,PGgxPk9LPC9oMT4=')
+    with pytest.raises(ValueError):
+        hisense_vidaa.validate_app_url('javascript:alert(1)')
+    assert hisense_vidaa.resolve_vidaa_key('back') == 'KEY_RETURNS'
+    assert hisense_vidaa.resolve_vidaa_key('KEY_OK') == 'KEY_OK'
+
+
+def test_real_mqtt_tls_pairing_install_token_refresh_and_keys(tmp_path, monkeypatch):
+    broker = _MockVidaaBroker(tmp_path, expire_access_token='initial-access-1')
+    monkeypatch.setattr(hisense_vidaa, 'MQTT_PORT', broker.port)
+    monkeypatch.setattr(hisense_vidaa, 'fetch_tv_descriptor', lambda ip, timeout=2.0: hisense_vidaa.VidaaTvInfo(
+        ip=ip, friendly_name='Hisense 55U7HQ', model_name='55U7HQ', brand='his', transport_protocol=3300,
+        is_vidaa=True, tv_ts=1700000000,
+    ))
+    logs = []
+    try:
+        store = hisense_vidaa.HisenseSessionStore(str(tmp_path / 'hisense_sessions.json'))
+        ctrl = hisense_vidaa.HisenseController(store, logs.append)
+
+        res = ctrl.start_pairing('127.0.0.1', auth_profile='modern')
+        assert res['ok'] and res['status'] == 'pin_required'
+        pid = res['pairing_id']
+
+        paired = ctrl.confirm_pairing(pid, '4821')
+        assert paired['ok'] and paired['status'] == 'paired'
+        assert store.get('127.0.0.1').access_token == 'initial-access-1'
+
+        # Broker rejects 'initial-access-1' once with CONNACK rc=5 -> controller refreshes via refresh_token!
+        inst = ctrl.install_tile(
+            '127.0.0.1',
+            app_id='tmalemtvvidaa',
+            title='Alem TV',
+            url='data:text/html;base64,PGgxPkFsZW08L2gxPg==',
+            icon_url='http://192.168.1.2:41731/assets/alemtv_large_icon.png',
+            wait_confirm=True,
+            auto_launch=True,
+        )
+        assert inst['ok'] is True
+        assert inst['confirmed'] is True
+        assert broker.rejected_stale_once is True
+        assert store.get('127.0.0.1').access_token == 'fresh-access-2'
+
+        assert ctrl.send_key('127.0.0.1', 'back')['key'] == 'KEY_RETURNS'
+        assert ctrl.show_toast('127.0.0.1', 'Hello VIDAA')['ok'] is True
+
+        topics_sent = [t for t, _ in broker.received]
+        assert any(t.endswith('/actions/sendkey') for t in topics_sent)
+        assert any(t.endswith('/actions/launchapp') for t in topics_sent)
+        assert any(t.endswith('/actions/showmessage') for t in topics_sent)
+        key_payload = [p for t, p in broker.received if t.endswith('/actions/sendkey')][0]
+        assert key_payload == 'KEY_RETURNS'
+    finally:
+        broker.close()
+
+
+def test_hisense_portal_server_and_dns_bridge():
+    logs = []
+    portal = hisense_vidaa.HisensePortalServer(logs.append)
+    res = portal.start_vidaahub_bridge(
+        tv_ip='127.0.0.1',
+        upstream_dns='127.0.0.1',
+        alem_portal='http://iptv.tmalem.tv',
+        dns_port=0,
+        https_port=0,
+        http80_port=0,
+    )
+    assert res['ok'] is True
+    assert res['vidaahub_running'] is True
+    base = f'http://127.0.0.1:{res["port"]}'
+    https_base = f'https://127.0.0.1:{res["https_port"]}'
+    try:
+        for path, must_contain in (
+            ('/', 'NEON · HISENSE VIDAA INSTALLER'),
+            ('/vidaa/selfinstall.html', 'Hisense_installApp'),
+            ('/vidaa/selfinstall.html', 'HiUtils_createRequest'),
+            ('/apps/msbcallback', 'Meryosab Callback'),
+            ('/apps/alemtv', 'Alem TV'),
+        ):
+            with urllib.request.urlopen(base + path, timeout=3) as resp:
+                assert resp.status == 200
+                text = resp.read().decode('utf-8')
+                assert must_contain in text
+
+        unverified = ssl._create_unverified_context()
+        with urllib.request.urlopen(https_base + '/vidaa/selfinstall.html', context=unverified, timeout=3) as resp:
+            assert resp.status == 200
+            assert 'Hisense_installApp' in resp.read().decode('utf-8')
+
+        for png_path in ('/assets/belet_large_icon.png', '/assets/msb_icon.png', '/assets/alemtv_large_icon.png'):
+            with urllib.request.urlopen(base + png_path, timeout=3) as resp:
+                assert resp.status == 200
+                assert resp.read().startswith(b'\x89PNG\r\n\x1a\n')
+
+        # Test real UDP DNS responder for vidaahub.com
+        qname = b'\x08vidaahub\x03com\x00'
+        pkt = struct.pack('!HHHHHH', 0x1234, 0x0100, 1, 0, 0, 0) + qname + struct.pack('!HH', 1, 1)
+        cli = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        cli.settimeout(2.0)
+        cli.sendto(pkt, ('127.0.0.1', res['dns_port']))
+        reply, _ = cli.recvfrom(512)
+        cli.close()
+        assert reply[:2] == b'\x12\x34'
+        assert reply[-4:] == socket.inet_aton(res['pc_ip'])
+    finally:
+        portal.stop()
+
+
+def test_core_api_hisense_installers_and_alemtv_vidaa_html(tmp_path, monkeypatch):
+    monkeypatch.setenv('APPDATA', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path))
+
+    alem_html = alemtv_app.build_alemtv_vidaa_html('http://iptv.tmalem.tv')
+    assert '<link rel="stylesheet"' not in alem_html
+    assert 'src="app.js"' not in alem_html
+    assert 'code === 8' in alem_html
+    assert 'data:image/png;base64,' in alem_html
+    alem_data = alemtv_app.build_alemtv_vidaa_data_url('http://iptv.tmalem.tv')
+    assert alem_data.startswith('data:text/html;charset=utf-8;base64,')
+
+    broker = _MockVidaaBroker(tmp_path)
+    monkeypatch.setattr(hisense_vidaa, 'MQTT_PORT', broker.port)
+    monkeypatch.setattr(hisense_vidaa, 'fetch_tv_descriptor', lambda ip, timeout=2.0: hisense_vidaa.VidaaTvInfo(
+        ip=ip, friendly_name='Hisense Test', model_name='VIDAA', brand='his', transport_protocol=3300,
+        is_vidaa=True, tv_ts=1700000000,
+    ))
+    api = Api()
+    try:
+        p1 = api.start_hisense_pairing('127.0.0.1', 'modern')
+        assert p1['ok'] and p1['status'] == 'pin_required'
+        p2 = api.confirm_hisense_pairing(p1['pairing_id'], '4821')
+        assert p2['ok'] and p2['status'] == 'paired'
+
+        belet = api.install_hisense_belet('127.0.0.1', 'https://belet.tm/', True)
+        assert belet['ok'] and belet['confirmed']
+        assert belet['url'] == 'https://belet.tm/'
+
+        alem_data_res = api.install_hisense_alemtv('127.0.0.1', 'http://iptv.tmalem.tv', 'data_url', False)
+        assert alem_data_res['ok'] and alem_data_res['url'].startswith('data:text/html;')
+
+        alem_lan_res = api.install_hisense_alemtv('127.0.0.1', 'http://iptv.tmalem.tv', 'lan_server', False)
+        assert alem_lan_res['ok'] and '/apps/alemtv' in alem_lan_res['url']
+
+        cb_data_res = api.install_hisense_callback('127.0.0.1', 'data_url', '', False)
+        assert cb_data_res['ok'] and cb_data_res['url'].startswith('data:text/html;')
+
+        cb_flash_res = api.install_hisense_callback('127.0.0.1', 'tv_flash', '', False)
+        assert cb_flash_res['ok'] and cb_flash_res['portal_url'].startswith('http://')
+
+        custom_res = api.install_hisense_custom_app('127.0.0.1', 'my.tv', 'My TV', 'https://example.com/', '', False)
+        assert custom_res['ok'] and custom_res['confirmed']
+
+        apps_res = api.list_hisense_apps('127.0.0.1')
+        assert apps_res['ok']
+        ids = {a['appId'] for a in apps_res['apps']}
+        assert {'tm.belet.vidaa', alemtv_app.ALEMTV_VIDAA_ID, msb_callback.HISENSE_ID, 'my.tv'}.issubset(ids)
+
+        logs = api.read_hisense_logs()['logs']
+        assert len(logs) > 0
+        assert api.read_hisense_logs()['logs'] == []  # drained
+    finally:
+        api.close()
+        broker.close()
+
+
+def test_desktop_ui_and_build_scripts_include_hisense_support():
+    ui_html = (ROOT / 'ui.html').read_text(encoding='utf-8')
+    for token in (
+        'tabHis', 'hisPage', 'hisIp', 'hisPinWrap', 'hisInstallBelet()',
+        'hisInstallAlem()', 'hisInstallCallback()', 'installCallbackHisense()',
+        'hisStartPortal(', 'read_hisense_logs',
+    ):
+        assert token in ui_html
+
+    # Parse TR dict from ui_qt.py via AST so test works even in headless OpenGL-less Linux runners
+    ui_qt_tree = ast.parse((ROOT / 'ui_qt.py').read_text(encoding='utf-8'))
+    tr_dict = None
+    for node in ui_qt_tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == 'TR':
+                    tr_dict = ast.literal_eval(node.value)
+    assert isinstance(tr_dict, dict)
+    for lang in ('en', 'ru'):
+        for key in ('nav_his', 'page_his_title', 'his_btn_belet_install', 'his_btn_alem_install', 'his_btn_cb_install', 'his_card_portal'):
+            assert key in tr_dict[lang], f'Missing TR[{lang}][{key}]'
+
+    legacy = (ROOT / 'app_legacy.py').read_text(encoding='utf-8')
+    for sym in (
+        'def _build_hisense_page', 'def his_start_pairing', 'def his_confirm_pin',
+        'def his_install_belet', 'def his_install_alem', 'def his_install_callback',
+        'def _install_callback_hisense', 'def his_open_portal_on_tv',
+    ):
+        assert sym in legacy
+
+    assert (ROOT / 'assets' / 'vidaa_client.bundle').is_file()

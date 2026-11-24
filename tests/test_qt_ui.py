@@ -26,11 +26,11 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     win.show()
     qt_app.processEvents()
 
-    assert win.stack.count() == 5
+    assert win.stack.count() == 6
     assert win.current_tab == 0
     assert not win.windowIcon().isNull()
 
-    # Tab switching across LG, Samsung, Conf, Diagnostics and contacts
+    # Tab switching across LG, Samsung, Hisense, Conf, Diagnostics and contacts
     win.switch_tab(1)
     assert win.current_tab == 1
     win.switch_tab(2)
@@ -38,6 +38,8 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     win.switch_tab(3)
     assert win.current_tab == 3
     win.switch_tab(4)
+    assert win.current_tab == 4
+    win.switch_tab(5)
     assert win.page_title.text() == 'MSB CALLBACK'
     win.switch_tab(0)
 
@@ -70,7 +72,7 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     api.remember_profile(str(ovpn_auth))
     api.remember_profile(str(ovpn_cert))
 
-    win.switch_tab(2)
+    win.switch_tab(3)
     win.profile_combo.addItems(['auth', 'cert'])
     win.profile_combo.setCurrentText('auth')
     qt_app.processEvents()
@@ -102,10 +104,11 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     qt_app.processEvents()
     assert win.region_code_input.text() == '22282'
 
-    # Log writes to LG, Samsung, and Conf terminals
+    # Log writes to LG, Samsung, Hisense, and Conf terminals
     win.log('[+] Test synced log line')
     assert '[+] Test synced log line' in win.tv_term.edit.toPlainText()
     assert '[+] Test synced log line' in win.sam_term.edit.toPlainText()
+    assert '[+] Test synced log line' in win.his_term.edit.toPlainText()
     assert '[+] Test synced log line' in win.vpn_term.edit.toPlainText()
 
     # Samsung TV tab controls, Local Set guide, discovery, connect, and PC arrow navigation
@@ -265,8 +268,8 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
             assert len(dlg.stream_view.toPlainText()) > 50
             dlg.close()
 
-    # Ethernet Conf sharing + Custom DNS controls on Tab 3
-    win.switch_tab(2)
+    # Ethernet Conf sharing + Custom DNS controls on Tab 3 (Conf · Wi-Fi · LAN)
+    win.switch_tab(3)
     assert win.eth_combo is not None
     assert win.btn_eth_start is not None
     assert win.btn_eth_stop is not None
@@ -369,8 +372,67 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
         'alemPortal', 'samAlemPortal', 'installAlem()', 'installSamAlem()',
         'samTimeMode', 'samTimePreset', 'samTimeTarget', 'samTimeSources',
         'samTimeChkCheck', 'samTimeUpstream', 'startSamTimeOverride()', 'stopSamTimeOverride()', 'syncSamTimeNow()',
+        'tabHis', 'hisPage', 'hisStartPairing()', 'hisInstallBelet()', 'hisInstallAlem()', 'hisInstallCallback()',
+        'installCallbackHisense()',
     ):
         assert token in ui_html
+
+    # Hisense VIDAA tab controls (Tab 2)
+    win.switch_tab(2)
+    assert win.his_ip is not None
+    assert win.btn_his_scan is not None
+    assert win.btn_his_pair is not None
+    assert win.btn_his_belet_install is not None
+    assert win.btn_his_alem_install is not None
+    assert win.btn_his_cb_install is not None
+    assert win.his_alem_combo.count() >= 7
+    with mock.patch.object(api, 'discover_hisense', return_value={
+        'ok': True,
+        'devices': [{'ip': '192.168.1.77', 'name': 'Hisense 55U7HQ', 'model': 'VIDAA', 'brand': 'his'}],
+    }):
+        win.his_scan()
+        deadline = __import__('time').time() + 2.0
+        while win.his_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        assert win.his_found_wrap.isVisible() is True
+        assert win.his_ip.text() == '192.168.1.77'
+
+    with mock.patch.object(api, 'start_hisense_pairing', return_value={
+        'ok': True,
+        'status': 'pin_required',
+        'pairing_id': 'pair-xyz',
+        'host': '192.168.1.77',
+        'auth_profile': 'modern',
+        'brand': 'his',
+    }):
+        win.his_start_pairing()
+        deadline = __import__('time').time() + 2.0
+        while win.his_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        assert win.his_pin_wrap.isVisible() is True
+        assert win._his_pairing_id == 'pair-xyz'
+
+    with mock.patch.object(api, 'install_hisense_belet', return_value={
+        'ok': True, 'confirmed': True, 'app_id': 'tm.belet.vidaa',
+    }) as m_hb:
+        win.his_install_belet()
+        deadline = __import__('time').time() + 2.0
+        while win.his_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_hb.assert_called_once()
+
+    with mock.patch.object(api, 'install_hisense_callback', return_value={
+        'ok': True, 'confirmed': True, 'app_id': 'neonmsbcallback',
+    }) as m_hcb:
+        win._install_callback_hisense()
+        deadline = __import__('time').time() + 2.0
+        while win.his_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_hcb.assert_called_once()
 
     # Check Alem TV Card portal selectors on webOS (Tab 0) and Samsung Tizen (Tab 1)
     assert win.alem_portal_combo is not None
@@ -478,6 +540,10 @@ def test_new_buttons_have_neon_styles(qt_app, tmp_path, monkeypatch):
         ('Belet TV · С обходом (1970 / TLS)', 'PrimaryBtn'),
         ('Belet TV · Без обхода (Новый клиент)', 'NormalBtn'),
         ('УСТАНОВИТЬ НА LG', 'PrimaryBtn'), ('УСТАНОВИТЬ НА SAMSUNG', 'PrimaryBtn'),
+        ('УСТАНОВИТЬ НА HISENSE', 'PrimaryBtn'),
+        ('Установить Belet на Hisense', 'PrimaryBtn'),
+        ('Установить Alem TV на Hisense', 'PrimaryBtn'),
+        ('Установить MSB Callback', 'PrimaryBtn'),
     ]:
         assert any(button.objectName() == style for button in by_text(text))
         assert 'QPushButton#' + style in win.styleSheet()

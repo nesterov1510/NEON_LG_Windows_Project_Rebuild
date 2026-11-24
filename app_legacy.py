@@ -77,12 +77,16 @@ class NeonWindow(QMainWindow):
         self.events = queue.Queue()
         self.tv_connected = False
         self.sam_connected = False
+        self.his_connected = False
         self.tv_busy = False
         self.sam_busy = False
+        self.his_busy = False
         self.net_busy = False
         self.vpn_state = 'DISCONNECTED'
         self.adapter_map = {}
         self._sam_found_devices = []
+        self._his_found_devices = []
+        self._his_pairing_id = ''
         self.current_tab = 0
         self._drag_pos = None
         self._resize_edges = None
@@ -240,7 +244,7 @@ class NeonWindow(QMainWindow):
 
         # Navigation Buttons
         self.tab_buttons = []
-        icons = ['▣', '◈', '◉', '✦', '☎']
+        icons = ['▣', '◈', '◆', '◉', '✦', '☎']
         for idx, glyph in enumerate(icons):
             btn = QPushButton(glyph)
             btn.setObjectName('SideNavBtn')
@@ -261,6 +265,7 @@ class NeonWindow(QMainWindow):
 
         self.side_tv_lbl, self.side_tv_dot = self._make_telemetry_row(tl)
         self.side_sam_lbl, self.side_sam_dot = self._make_telemetry_row(tl)
+        self.side_his_lbl, self.side_his_dot = self._make_telemetry_row(tl)
         self.side_vpn_lbl, self.side_vpn_dot = self._make_telemetry_row(tl)
         self.side_hs_lbl, self.side_hs_dot = self._make_telemetry_row(tl)
         self.side_eth_lbl, self.side_eth_dot = self._make_telemetry_row(tl)
@@ -393,6 +398,7 @@ class NeonWindow(QMainWindow):
 
         self._build_tv_page()
         self._build_samsung_page()
+        self._build_hisense_page()
         self._build_vpn_page()
         self._build_diag_page()
         self._build_callback_page()
@@ -1277,6 +1283,436 @@ class NeonWindow(QMainWindow):
         grid.addLayout(right, 1)
         self.stack.addWidget(page)
 
+    def _build_hisense_page(self):
+        page = QWidget()
+        grid = QHBoxLayout(page)
+        grid.setContentsMargins(20, 16, 20, 12)
+        grid.setSpacing(16)
+
+        left_inner = QWidget()
+        left_inner.setObjectName('ScrollContent')
+        left = QVBoxLayout(left_inner)
+        left.setContentsMargins(0, 0, 6, 0)
+        left.setSpacing(12)
+
+        # Card 1: Connection & PIN Pairing
+        c1, l1 = self._make_card('lbl_his_conn', 1)
+        self.his_lbl_ip = QLabel()
+        self.his_lbl_ip.setObjectName('FieldLabel')
+        ip_row = QHBoxLayout()
+        ip_row.setSpacing(6)
+        self.his_ip = QLineEdit()
+        self.his_ip.setPlaceholderText('192.168.1.102')
+        self.his_ip.textChanged.connect(lambda: self._refresh_hisense_status_ui())
+        self.btn_his_scan = QPushButton()
+        self.btn_his_scan.setObjectName('NormalBtn')
+        self.btn_his_scan.setCursor(Qt.PointingHandCursor)
+        self.btn_his_scan.clicked.connect(self.his_scan)
+        ip_row.addWidget(self.his_ip, 1)
+        ip_row.addWidget(self.btn_his_scan)
+        l1.addWidget(self.his_lbl_ip)
+        l1.addLayout(ip_row)
+
+        self.his_found_wrap = QWidget()
+        fw_lay = QVBoxLayout(self.his_found_wrap)
+        fw_lay.setContentsMargins(0, 2, 0, 2)
+        fw_lay.setSpacing(4)
+        self.his_lbl_found = QLabel()
+        self.his_lbl_found.setObjectName('FieldLabel')
+        self.his_found_combo = QComboBox()
+        self.his_found_combo.currentIndexChanged.connect(self._on_his_found_selected)
+        fw_lay.addWidget(self.his_lbl_found)
+        fw_lay.addWidget(self.his_found_combo)
+        self.his_found_wrap.setVisible(False)
+        l1.addWidget(self.his_found_wrap)
+
+        self.his_lbl_profile = QLabel()
+        self.his_lbl_profile.setObjectName('FieldLabel')
+        self.his_profile_combo = QComboBox()
+        self.his_profile_combo.addItem('Auto (Static → Modern → Middle → RemoteNow)', 'auto')
+        self.his_profile_combo.addItem('Static (Legacy / Toshiba)', 'static')
+        self.his_profile_combo.addItem('Modern (VIDAA 2022–2026)', 'modern')
+        self.his_profile_combo.addItem('Middle (VIDAA Mid)', 'middle')
+        self.his_profile_combo.addItem('RemoteNow (Standard)', 'remotenow')
+        l1.addWidget(self.his_lbl_profile)
+        l1.addWidget(self.his_profile_combo)
+
+        self.his_hint_pair = QLabel()
+        self.his_hint_pair.setObjectName('HintLabel')
+        self.his_hint_pair.setWordWrap(True)
+        l1.addWidget(self.his_hint_pair)
+
+        row_conn = QHBoxLayout()
+        row_conn.setSpacing(8)
+        self.btn_his_pair = QPushButton()
+        self.btn_his_pair.setObjectName('PrimaryBtn')
+        self.btn_his_pair.setCursor(Qt.PointingHandCursor)
+        self.btn_his_pair.clicked.connect(self.his_start_pairing)
+        self.btn_his_forget = QPushButton()
+        self.btn_his_forget.setObjectName('GhostBtn')
+        self.btn_his_forget.setCursor(Qt.PointingHandCursor)
+        self.btn_his_forget.clicked.connect(self.his_forget_pairing)
+        row_conn.addWidget(self.btn_his_pair, 2)
+        row_conn.addWidget(self.btn_his_forget, 1)
+        l1.addLayout(row_conn)
+
+        self.his_pin_wrap = QFrame()
+        self.his_pin_wrap.setStyleSheet('background:#0c171d;border:1px solid #2b6e52;border-radius:10px;')
+        pw_lay = QVBoxLayout(self.his_pin_wrap)
+        pw_lay.setContentsMargins(10, 9, 10, 9)
+        pw_lay.setSpacing(6)
+        self.his_lbl_pin = QLabel()
+        self.his_lbl_pin.setObjectName('FieldLabel')
+        pw_lay.addWidget(self.his_lbl_pin)
+        pin_row = QHBoxLayout()
+        pin_row.setSpacing(6)
+        self.his_pin_input = QLineEdit()
+        self.his_pin_input.setMaxLength(4)
+        self.his_pin_input.setPlaceholderText('0000')
+        self.his_pin_input.returnPressed.connect(self.his_confirm_pin)
+        self.btn_his_confirm_pin = QPushButton()
+        self.btn_his_confirm_pin.setObjectName('PrimaryBtn')
+        self.btn_his_confirm_pin.setCursor(Qt.PointingHandCursor)
+        self.btn_his_confirm_pin.clicked.connect(self.his_confirm_pin)
+        self.btn_his_cancel_pin = QPushButton()
+        self.btn_his_cancel_pin.setObjectName('GhostBtn')
+        self.btn_his_cancel_pin.setCursor(Qt.PointingHandCursor)
+        self.btn_his_cancel_pin.clicked.connect(self.his_cancel_pin)
+        pin_row.addWidget(self.his_pin_input, 1)
+        pin_row.addWidget(self.btn_his_confirm_pin, 1)
+        pin_row.addWidget(self.btn_his_cancel_pin)
+        pw_lay.addLayout(pin_row)
+        self.his_pin_wrap.setVisible(False)
+        l1.addWidget(self.his_pin_wrap)
+        left.addWidget(c1)
+
+        # Card 2: Belet TV
+        c2, l2 = self._make_card('lbl_his_belet', 2)
+        b_head = QHBoxLayout()
+        b_head.setSpacing(10)
+        b_ico = QLabel()
+        b_ico.setFixedSize(36, 36)
+        b_ico_path = resource('assets/belet_ui.png')
+        if os.path.isfile(b_ico_path):
+            b_ico.setPixmap(QPixmap(b_ico_path).scaled(36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.his_belet_desc = QLabel()
+        self.his_belet_desc.setObjectName('HintLabel')
+        self.his_belet_desc.setWordWrap(True)
+        b_head.addWidget(b_ico)
+        b_head.addWidget(self.his_belet_desc, 1)
+        l2.addLayout(b_head)
+
+        self.his_lbl_belet_url = QLabel()
+        self.his_lbl_belet_url.setObjectName('FieldLabel')
+        self.his_belet_url = QLineEdit('https://belet.tm/')
+        l2.addWidget(self.his_lbl_belet_url)
+        l2.addWidget(self.his_belet_url)
+
+        b_btns = QHBoxLayout()
+        b_btns.setSpacing(8)
+        self.btn_his_belet_install = QPushButton()
+        self.btn_his_belet_install.setObjectName('PrimaryBtn')
+        self.btn_his_belet_install.setCursor(Qt.PointingHandCursor)
+        self.btn_his_belet_install.clicked.connect(self.his_install_belet)
+        self.btn_his_belet_launch = QPushButton()
+        self.btn_his_belet_launch.setObjectName('NormalBtn')
+        self.btn_his_belet_launch.setCursor(Qt.PointingHandCursor)
+        self.btn_his_belet_launch.clicked.connect(self.his_launch_belet)
+        b_btns.addWidget(self.btn_his_belet_install, 2)
+        b_btns.addWidget(self.btn_his_belet_launch, 1)
+        l2.addLayout(b_btns)
+        left.addWidget(c2)
+
+        # Card 3: Alem TV
+        c3, l3 = self._make_card('lbl_his_alem', 3)
+        a_head = QHBoxLayout()
+        a_head.setSpacing(10)
+        a_ico = QLabel()
+        a_ico.setFixedSize(36, 36)
+        a_ico_path = resource('assets/alemtv_ui.png')
+        if os.path.isfile(a_ico_path):
+            a_ico.setPixmap(QPixmap(a_ico_path).scaled(36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.his_alem_desc = QLabel()
+        self.his_alem_desc.setObjectName('HintLabel')
+        self.his_alem_desc.setWordWrap(True)
+        a_head.addWidget(a_ico)
+        a_head.addWidget(self.his_alem_desc, 1)
+        l3.addLayout(a_head)
+
+        self.his_lbl_alem_portal = QLabel()
+        self.his_lbl_alem_portal.setObjectName('FieldLabel')
+        self.his_alem_combo = QComboBox()
+        for portal in ALEMTV_PORTALS:
+            self.his_alem_combo.addItem(portal['name'], portal['url'])
+        self.his_alem_combo.addItem('Свой адрес (URL / IP)', 'custom')
+        def_alem_idx = self.his_alem_combo.findData(ALEMTV_DEFAULT_PORTAL)
+        if def_alem_idx >= 0:
+            self.his_alem_combo.setCurrentIndex(def_alem_idx)
+        self.his_alem_combo.currentIndexChanged.connect(self._on_his_alem_portal_changed)
+        self.his_alem_custom = QLineEdit()
+        self.his_alem_custom.setPlaceholderText('http://192.168.1.50:8080 или http://portal.my.tm')
+        self.his_alem_custom.setVisible(False)
+        l3.addWidget(self.his_lbl_alem_portal)
+        l3.addWidget(self.his_alem_combo)
+        l3.addWidget(self.his_alem_custom)
+
+        self.his_lbl_alem_mode = QLabel()
+        self.his_lbl_alem_mode.setObjectName('FieldLabel')
+        self.his_alem_mode_combo = QComboBox()
+        self.his_alem_mode_combo.addItem('Offline Data URI (Без ПК / HTML5)', 'data_url')
+        self.his_alem_mode_combo.addItem('TV Flash / Браузер ТВ (Память ТВ)', 'tv_flash')
+        self.his_alem_mode_combo.addItem('Локальный сервер NEON (LAN)', 'lan_server')
+        self.his_alem_mode_combo.addItem('Прямой URL портала', 'portal_url')
+        l3.addWidget(self.his_lbl_alem_mode)
+        l3.addWidget(self.his_alem_mode_combo)
+
+        a_btns = QHBoxLayout()
+        a_btns.setSpacing(8)
+        self.btn_his_alem_install = QPushButton()
+        self.btn_his_alem_install.setObjectName('PrimaryBtn')
+        self.btn_his_alem_install.setCursor(Qt.PointingHandCursor)
+        self.btn_his_alem_install.clicked.connect(self.his_install_alemtv)
+        self.btn_his_alem_launch = QPushButton()
+        self.btn_his_alem_launch.setObjectName('NormalBtn')
+        self.btn_his_alem_launch.setCursor(Qt.PointingHandCursor)
+        self.btn_his_alem_launch.clicked.connect(self.his_launch_alemtv)
+        a_btns.addWidget(self.btn_his_alem_install, 2)
+        a_btns.addWidget(self.btn_his_alem_launch, 1)
+        l3.addLayout(a_btns)
+        left.addWidget(c3)
+
+        # Card 4: MSB Callback
+        c4, l4 = self._make_card('lbl_his_cb', 4)
+        self.his_cb_desc = QLabel()
+        self.his_cb_desc.setObjectName('HintLabel')
+        self.his_cb_desc.setWordWrap(True)
+        l4.addWidget(self.his_cb_desc)
+
+        self.his_lbl_cb_mode = QLabel()
+        self.his_lbl_cb_mode.setObjectName('FieldLabel')
+        self.his_cb_mode_combo = QComboBox()
+        self.his_cb_mode_combo.addItem('Offline Data URI (Без ПК и интернета)', 'data_url')
+        self.his_cb_mode_combo.addItem('TV Flash / Браузер ТВ (Память ТВ)', 'tv_flash')
+        self.his_cb_mode_combo.addItem('Локальный сервер NEON (LAN)', 'lan_server')
+        self.his_cb_mode_combo.addItem('Свой HTTPS / LAN URL', 'custom_url')
+        self.his_cb_mode_combo.currentIndexChanged.connect(self._on_his_cb_mode_changed)
+        l4.addWidget(self.his_lbl_cb_mode)
+        l4.addWidget(self.his_cb_mode_combo)
+
+        self.his_cb_url_wrap = QWidget()
+        cb_uw = QVBoxLayout(self.his_cb_url_wrap)
+        cb_uw.setContentsMargins(0, 0, 0, 0)
+        cb_uw.setSpacing(4)
+        self.his_lbl_cb_url = QLabel()
+        self.his_lbl_cb_url.setObjectName('FieldLabel')
+        self.his_cb_custom_url = QLineEdit()
+        self.his_cb_custom_url.setPlaceholderText('https://tvrepair.meryosab.com/callback.html')
+        cb_uw.addWidget(self.his_lbl_cb_url)
+        cb_uw.addWidget(self.his_cb_custom_url)
+        self.his_cb_url_wrap.setVisible(False)
+        l4.addWidget(self.his_cb_url_wrap)
+
+        cb_btns = QHBoxLayout()
+        cb_btns.setSpacing(8)
+        self.btn_his_cb_install = QPushButton()
+        self.btn_his_cb_install.setObjectName('PrimaryBtn')
+        self.btn_his_cb_install.setCursor(Qt.PointingHandCursor)
+        self.btn_his_cb_install.clicked.connect(self.his_install_callback)
+        self.btn_his_cb_launch = QPushButton()
+        self.btn_his_cb_launch.setObjectName('NormalBtn')
+        self.btn_his_cb_launch.setCursor(Qt.PointingHandCursor)
+        self.btn_his_cb_launch.clicked.connect(self.his_launch_callback)
+        cb_btns.addWidget(self.btn_his_cb_install, 2)
+        cb_btns.addWidget(self.btn_his_cb_launch, 1)
+        l4.addLayout(cb_btns)
+        left.addWidget(c4)
+
+        # Card 5: Custom App & Installed Apps
+        c5, l5 = self._make_card('lbl_his_custom', 5)
+        self.his_lbl_custom_id = QLabel()
+        self.his_lbl_custom_id.setObjectName('FieldLabel')
+        self.his_custom_id = QLineEdit('neon.customapp')
+        self.his_lbl_custom_title = QLabel()
+        self.his_lbl_custom_title.setObjectName('FieldLabel')
+        self.his_custom_title = QLineEdit('My TV App')
+        self.his_lbl_custom_url = QLabel()
+        self.his_lbl_custom_url.setObjectName('FieldLabel')
+        self.his_custom_url = QLineEdit()
+        self.his_custom_url.setPlaceholderText('https://example.com/')
+        self.his_lbl_custom_icon = QLabel()
+        self.his_lbl_custom_icon.setObjectName('FieldLabel')
+        self.his_custom_icon = QLineEdit()
+        self.his_custom_icon.setPlaceholderText('https://example.com/icon.png')
+        l5.addWidget(self.his_lbl_custom_id)
+        l5.addWidget(self.his_custom_id)
+        l5.addWidget(self.his_lbl_custom_title)
+        l5.addWidget(self.his_custom_title)
+        l5.addWidget(self.his_lbl_custom_url)
+        l5.addWidget(self.his_custom_url)
+        l5.addWidget(self.his_lbl_custom_icon)
+        l5.addWidget(self.his_custom_icon)
+
+        cu_btns = QHBoxLayout()
+        cu_btns.setSpacing(8)
+        self.btn_his_custom_install = QPushButton()
+        self.btn_his_custom_install.setObjectName('NormalBtn')
+        self.btn_his_custom_install.setCursor(Qt.PointingHandCursor)
+        self.btn_his_custom_install.clicked.connect(self.his_install_custom)
+        self.btn_his_custom_launch = QPushButton()
+        self.btn_his_custom_launch.setObjectName('GhostBtn')
+        self.btn_his_custom_launch.setCursor(Qt.PointingHandCursor)
+        self.btn_his_custom_launch.clicked.connect(self.his_launch_custom)
+        cu_btns.addWidget(self.btn_his_custom_install, 2)
+        cu_btns.addWidget(self.btn_his_custom_launch, 1)
+        l5.addLayout(cu_btns)
+
+        self.his_apps_combo = QComboBox()
+        l5.addWidget(self.his_apps_combo)
+        ap_btns = QHBoxLayout()
+        ap_btns.setSpacing(8)
+        self.btn_his_list_apps = QPushButton()
+        self.btn_his_list_apps.setObjectName('NormalBtn')
+        self.btn_his_list_apps.setCursor(Qt.PointingHandCursor)
+        self.btn_his_list_apps.clicked.connect(self.his_list_apps)
+        self.btn_his_launch_sel = QPushButton()
+        self.btn_his_launch_sel.setObjectName('GhostBtn')
+        self.btn_his_launch_sel.setCursor(Qt.PointingHandCursor)
+        self.btn_his_launch_sel.clicked.connect(self.his_launch_selected_app)
+        ap_btns.addWidget(self.btn_his_list_apps, 1)
+        ap_btns.addWidget(self.btn_his_launch_sel, 1)
+        l5.addLayout(ap_btns)
+        left.addWidget(c5)
+
+        # Card 6: Browser Self-Installer & vidaahub.com Bridge
+        c6, l6 = self._make_card('lbl_his_portal', 6)
+        self.his_portal_desc = QLabel()
+        self.his_portal_desc.setObjectName('HintLabel')
+        self.his_portal_desc.setWordWrap(True)
+        l6.addWidget(self.his_portal_desc)
+
+        self.his_portal_status_lbl = QLabel()
+        self.his_portal_status_lbl.setStyleSheet('color:#7de8ff;font-family:"Consolas",monospace;font-size:11px;')
+        self.his_portal_status_lbl.setWordWrap(True)
+        self.his_portal_status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        l6.addWidget(self.his_portal_status_lbl)
+
+        pt_row1 = QHBoxLayout()
+        pt_row1.setSpacing(8)
+        self.btn_his_portal_start = QPushButton()
+        self.btn_his_portal_start.setObjectName('NormalBtn')
+        self.btn_his_portal_start.setCursor(Qt.PointingHandCursor)
+        self.btn_his_portal_start.clicked.connect(lambda: self.his_start_portal(False))
+        self.btn_his_portal_vidaahub = QPushButton()
+        self.btn_his_portal_vidaahub.setObjectName('NormalBtn')
+        self.btn_his_portal_vidaahub.setCursor(Qt.PointingHandCursor)
+        self.btn_his_portal_vidaahub.clicked.connect(lambda: self.his_start_portal(True))
+        pt_row1.addWidget(self.btn_his_portal_start, 1)
+        pt_row1.addWidget(self.btn_his_portal_vidaahub, 1)
+        l6.addLayout(pt_row1)
+
+        pt_row2 = QHBoxLayout()
+        pt_row2.setSpacing(8)
+        self.btn_his_portal_open_tv = QPushButton()
+        self.btn_his_portal_open_tv.setObjectName('PrimaryBtn')
+        self.btn_his_portal_open_tv.setCursor(Qt.PointingHandCursor)
+        self.btn_his_portal_open_tv.clicked.connect(self.his_open_portal_on_tv)
+        self.btn_his_portal_stop = QPushButton()
+        self.btn_his_portal_stop.setObjectName('DangerBtn')
+        self.btn_his_portal_stop.setCursor(Qt.PointingHandCursor)
+        self.btn_his_portal_stop.clicked.connect(self.his_stop_portal)
+        pt_row2.addWidget(self.btn_his_portal_open_tv, 2)
+        pt_row2.addWidget(self.btn_his_portal_stop, 1)
+        l6.addLayout(pt_row2)
+        left.addWidget(c6)
+
+        left.addStretch(1)
+        grid.addWidget(self._wrap_scroll(left_inner, fixed_width=490))
+
+        # Right Column: KPIs + VIDAA Remote + Terminal
+        right = QVBoxLayout()
+        right.setSpacing(12)
+
+        kpi_row = QHBoxLayout()
+        kpi_row.setSpacing(12)
+        self.kpi_his_tv = KpiCard('')
+        self.kpi_his_pair = KpiCard('')
+        self.kpi_his_portal = KpiCard('')
+        kpi_row.addWidget(self.kpi_his_tv)
+        kpi_row.addWidget(self.kpi_his_pair)
+        kpi_row.addWidget(self.kpi_his_portal)
+        right.addLayout(kpi_row)
+
+        rem_card = QFrame()
+        rem_card.setObjectName('GlassCard')
+        add_elevation(rem_card, blur=20, alpha=70)
+        rem_lay = QVBoxLayout(rem_card)
+        rem_lay.setContentsMargins(14, 10, 14, 12)
+        rem_lay.setSpacing(8)
+        r_head = QHBoxLayout()
+        r_badge = QLabel('◆')
+        r_badge.setObjectName('StepBadge')
+        r_badge.setAlignment(Qt.AlignCenter)
+        self.his_remote_title = QLabel()
+        self.his_remote_title.setObjectName('CardTitle')
+        r_head.addWidget(r_badge)
+        r_head.addWidget(self.his_remote_title)
+        r_head.addStretch(1)
+        rem_lay.addLayout(r_head)
+
+        pad_split = QHBoxLayout()
+        pad_split.setSpacing(14)
+        dpad = QGridLayout()
+        dpad.setSpacing(5)
+        for r, c, lbl, kcode, obj in [
+            (0, 0, 'MENU', 'KEY_MENU', 'SamKeyBtn'),
+            (0, 1, '▲', 'KEY_UP', 'SamKeyPrimary'),
+            (0, 2, 'INFO', 'KEY_INFO', 'SamKeyBtn'),
+            (1, 0, '◀', 'KEY_LEFT', 'SamKeyPrimary'),
+            (1, 1, 'OK', 'KEY_OK', 'SamKeyPrimary'),
+            (1, 2, '▶', 'KEY_RIGHT', 'SamKeyPrimary'),
+            (2, 0, 'BACK', 'KEY_RETURNS', 'SamKeyBtn'),
+            (2, 1, '▼', 'KEY_DOWN', 'SamKeyPrimary'),
+            (2, 2, 'EXIT', 'KEY_EXIT', 'SamKeyBtn'),
+        ]:
+            b = QPushButton(lbl)
+            b.setObjectName(obj)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _c=False, k=kcode: self.his_send_key(k))
+            dpad.addWidget(b, r, c)
+
+        svc_pad = QGridLayout()
+        svc_pad.setSpacing(5)
+        for r, c, lbl, kcode, obj in [
+            (0, 0, 'HOME', 'KEY_HOME', 'SamKeyPrimary'),
+            (0, 1, 'APPS', 'KEY_APPS', 'SamKeyBtn'),
+            (0, 2, 'MUTE', 'KEY_MUTE', 'SamKeyBtn'),
+            (1, 0, 'VOL +', 'KEY_VOLUMEUP', 'SamKeyBtn'),
+            (1, 1, 'VOL -', 'KEY_VOLUMEDOWN', 'SamKeyBtn'),
+            (1, 2, 'CH +', 'KEY_CHANNELUP', 'SamKeyBtn'),
+            (2, 0, 'PLAY', 'KEY_PLAY', 'SamKeyBtn'),
+            (2, 1, 'PAUSE', 'KEY_PAUSE', 'SamKeyBtn'),
+            (2, 2, 'CH -', 'KEY_CHANNELDOWN', 'SamKeyBtn'),
+            (3, 0, 'SOURCE', 'KEY_SOURCE', 'SamKeyBtn'),
+            (3, 1, 'STOP', 'KEY_STOP', 'SamKeyBtn'),
+            (3, 2, 'POWER', 'KEY_POWER', 'SamKeyWarn'),
+        ]:
+            b = QPushButton(lbl)
+            b.setObjectName(obj)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _c=False, k=kcode: self.his_send_key(k))
+            svc_pad.addWidget(b, r, c)
+
+        pad_split.addLayout(dpad, 1)
+        pad_split.addLayout(svc_pad, 1)
+        rem_lay.addLayout(pad_split)
+        right.addWidget(rem_card)
+
+        self.his_term = NeonTerminal(on_save=self._save_log_dialog)
+        right.addWidget(self.his_term, 1)
+
+        grid.addLayout(right, 1)
+        self.stack.addWidget(page)
+
     def _build_vpn_page(self):
         page = QWidget()
         grid = QHBoxLayout(page)
@@ -1719,6 +2155,19 @@ class NeonWindow(QMainWindow):
         self._run_async('sam', lambda: self.api.install_samsung_callback(ip),
                         lambda r: self.toast.show_toast('MSB Callback установлен на Samsung', 'info') if r.get('ok') else None)
 
+    def _install_callback_hisense(self):
+        ip = self.his_ip.text().strip()
+        if not ip:
+            self.toast.show_toast('Введите IP Hisense на странице Hisense VIDAA', 'warn')
+            return
+        mode = self.his_cb_mode_combo.currentData() or 'data_url'
+        custom_url = self.his_cb_custom_url.text().strip()
+        self._run_async(
+            'his',
+            lambda: self.api.install_hisense_callback(ip, mode=mode, custom_url=custom_url, launch=True),
+            lambda r: self.toast.show_toast('MSB Callback установлен на Hisense VIDAA', 'info') if r.get('ok') else None,
+        )
+
     def _build_callback_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1731,7 +2180,11 @@ class NeonWindow(QMainWindow):
         subtitle.setStyleSheet('color:#9fb7aa;font-size:15px;margin-bottom:10px;')
         layout.addWidget(subtitle)
         actions = QHBoxLayout()
-        for label, handler in [('УСТАНОВИТЬ НА LG', self._install_callback_lg), ('УСТАНОВИТЬ НА SAMSUNG', self._install_callback_samsung)]:
+        for label, handler in [
+            ('УСТАНОВИТЬ НА LG', self._install_callback_lg),
+            ('УСТАНОВИТЬ НА SAMSUNG', self._install_callback_samsung),
+            ('УСТАНОВИТЬ НА HISENSE', self._install_callback_hisense),
+        ]:
             button = QPushButton(label)
             button.setObjectName('PrimaryBtn')
             button.setCursor(Qt.PointingHandCursor)
@@ -1806,12 +2259,14 @@ class NeonWindow(QMainWindow):
         self.brand_sub.setText(self.t('app_sub'))
         self.tab_buttons[0].setText('▣   ' + self.t('nav_tv'))
         self.tab_buttons[1].setText('◈   ' + self.t('nav_sam'))
-        self.tab_buttons[2].setText('◉   ' + self.t('nav_vpn'))
-        self.tab_buttons[3].setText('✦   ' + self.t('nav_diag'))
-        self.tab_buttons[4].setText('☎   MSB CALLBACK')
+        self.tab_buttons[2].setText('◆   ' + self.t('nav_his'))
+        self.tab_buttons[3].setText('◉   ' + self.t('nav_vpn'))
+        self.tab_buttons[4].setText('✦   ' + self.t('nav_diag'))
+        self.tab_buttons[5].setText('☎   MSB CALLBACK')
         self.side_status_cap.setText(self.t('side_status'))
         self.side_tv_lbl.setText(self.t('side_tv'))
         self.side_sam_lbl.setText(self.t('side_sam'))
+        self.side_his_lbl.setText(self.t('side_his'))
         self.side_vpn_lbl.setText(self.t('side_vpn'))
         self.side_hs_lbl.setText(self.t('side_hs'))
         self.side_eth_lbl.setText(self.t('side_eth'))
@@ -1880,8 +2335,63 @@ class NeonWindow(QMainWindow):
         else:
             self._on_region_changed()
 
-        for term in (self.tv_term, self.sam_term, self.vpn_term):
+        for term in (self.tv_term, self.sam_term, self.his_term, self.vpn_term):
             term.set_labels(self.t('term_title'), self.t('btn_copy'), self.t('btn_save'), self.t('btn_clear'))
+
+        self.lbl_his_conn.setText(self.t('his_card_conn'))
+        self.his_lbl_ip.setText(self.t('his_lbl_ip'))
+        self.btn_his_scan.setText(self.t('his_btn_scan'))
+        self.his_lbl_found.setText(self.t('his_lbl_found'))
+        self.his_lbl_profile.setText(self.t('his_lbl_profile'))
+        self.his_hint_pair.setText(self.t('his_hint_pair'))
+        self.btn_his_pair.setText(self.t('his_btn_pair'))
+        self.btn_his_forget.setText(self.t('his_btn_forget'))
+        self.his_lbl_pin.setText(self.t('his_lbl_pin'))
+        self.btn_his_confirm_pin.setText(self.t('his_btn_confirm_pin'))
+        self.btn_his_cancel_pin.setText(self.t('his_btn_cancel_pin'))
+
+        self.lbl_his_belet.setText(self.t('his_card_belet'))
+        self.his_belet_desc.setText(self.t('his_belet_desc'))
+        self.his_lbl_belet_url.setText(self.t('his_lbl_belet_url'))
+        self.btn_his_belet_install.setText(self.t('his_btn_belet_install'))
+        self.btn_his_belet_launch.setText(self.t('his_btn_belet_launch'))
+
+        self.lbl_his_alem.setText(self.t('his_card_alem'))
+        self.his_alem_desc.setText(self.t('his_alem_desc'))
+        self.his_lbl_alem_portal.setText(self.t('his_lbl_alem_portal'))
+        self.his_lbl_alem_mode.setText(self.t('his_lbl_alem_mode'))
+        self.btn_his_alem_install.setText(self.t('his_btn_alem_install'))
+        self.btn_his_alem_launch.setText(self.t('his_btn_alem_launch'))
+
+        self.lbl_his_cb.setText(self.t('his_card_cb'))
+        self.his_cb_desc.setText(self.t('his_cb_desc'))
+        self.his_lbl_cb_mode.setText(self.t('his_lbl_cb_mode'))
+        self.his_lbl_cb_url.setText(self.t('his_lbl_cb_url'))
+        self.btn_his_cb_install.setText(self.t('his_btn_cb_install'))
+        self.btn_his_cb_launch.setText(self.t('his_btn_cb_launch'))
+
+        self.lbl_his_custom.setText(self.t('his_card_custom'))
+        self.his_lbl_custom_id.setText(self.t('his_lbl_custom_id'))
+        self.his_lbl_custom_title.setText(self.t('his_lbl_custom_title'))
+        self.his_lbl_custom_url.setText(self.t('his_lbl_custom_url'))
+        self.his_lbl_custom_icon.setText(self.t('his_lbl_custom_icon'))
+        self.btn_his_custom_install.setText(self.t('his_btn_custom_install'))
+        self.btn_his_custom_launch.setText(self.t('his_btn_custom_launch'))
+        self.btn_his_list_apps.setText(self.t('his_btn_list_apps'))
+        self.btn_his_launch_sel.setText(self.t('his_btn_launch_sel'))
+
+        self.lbl_his_portal.setText(self.t('his_card_portal'))
+        self.his_portal_desc.setText(self.t('his_portal_desc'))
+        self.btn_his_portal_start.setText(self.t('his_btn_portal_start'))
+        self.btn_his_portal_vidaahub.setText(self.t('his_btn_portal_vidaahub'))
+        self.btn_his_portal_open_tv.setText(self.t('his_btn_portal_open_tv'))
+        self.btn_his_portal_stop.setText(self.t('his_btn_portal_stop'))
+
+        self.kpi_his_tv.lbl.setText(self.t('his_kpi_tv'))
+        self.kpi_his_pair.lbl.setText(self.t('his_kpi_pair'))
+        self.kpi_his_portal.lbl.setText(self.t('his_kpi_portal'))
+        self.his_remote_title.setText(self.t('his_remote_title'))
+        self._refresh_hisense_status_ui()
 
         self.lbl_sam_conn.setText(self.t('sam_card_conn'))
         self.sam_lbl_ip.setText(self.t('sam_lbl_ip'))
@@ -2084,10 +2594,11 @@ class NeonWindow(QMainWindow):
         titles = [
             ('page_tv_title', 'page_tv_sub'),
             ('page_sam_title', 'page_sam_sub'),
+            ('page_his_title', 'page_his_sub'),
             ('page_vpn_title', 'page_vpn_sub'),
             ('page_diag_title', 'page_diag_sub'),
         ]
-        if self.current_tab == 4:
+        if self.current_tab == 5:
             self.page_title.setText('MSB CALLBACK')
             self.page_sub.setText('Meryosab Callback · Ашхабад')
             return
@@ -2099,6 +2610,32 @@ class NeonWindow(QMainWindow):
         self.tv_ip.setText(self.settings.get('tv_ip', '192.168.1.100'))
         self.chk_os26.setChecked(bool(self.settings.get('webos26', False)))
         self.sam_ip.setText(self.settings.get('samsung_ip', '192.168.1.101'))
+        self.his_ip.setText(self.settings.get('hisense_ip', '192.168.1.102'))
+        hp_idx = self.his_profile_combo.findData(str(self.settings.get('hisense_auth_profile', 'auto') or 'auto'))
+        if hp_idx >= 0:
+            self.his_profile_combo.setCurrentIndex(hp_idx)
+        self.his_belet_url.setText(str(self.settings.get('hisense_belet_url') or 'https://belet.tm/'))
+        saved_ha_portal = str(self.settings.get('hisense_alem_portal') or ALEMTV_DEFAULT_PORTAL)
+        ha_idx = self.his_alem_combo.findData(saved_ha_portal)
+        if ha_idx >= 0:
+            self.his_alem_combo.setCurrentIndex(ha_idx)
+        else:
+            self.his_alem_combo.setCurrentIndex(self.his_alem_combo.count() - 1)
+            self.his_alem_custom.setText(saved_ha_portal)
+            self.his_alem_custom.setVisible(True)
+        ham_idx = self.his_alem_mode_combo.findData(str(self.settings.get('hisense_alem_mode') or 'data_url'))
+        if ham_idx >= 0:
+            self.his_alem_mode_combo.setCurrentIndex(ham_idx)
+        hcb_idx = self.his_cb_mode_combo.findData(str(self.settings.get('hisense_callback_mode') or 'data_url'))
+        if hcb_idx >= 0:
+            self.his_cb_mode_combo.setCurrentIndex(hcb_idx)
+        self.his_cb_custom_url.setText(str(self.settings.get('hisense_callback_custom_url') or ''))
+        self._on_his_cb_mode_changed()
+        self.his_custom_id.setText(str(self.settings.get('hisense_custom_id') or 'neon.customapp'))
+        self.his_custom_title.setText(str(self.settings.get('hisense_custom_title') or 'My TV App'))
+        self.his_custom_url.setText(str(self.settings.get('hisense_custom_url') or ''))
+        self.his_custom_icon.setText(str(self.settings.get('hisense_custom_icon') or ''))
+        self._refresh_hisense_status_ui()
         saved_sam_port = str(self.settings.get('samsung_port', 'auto') or 'auto')
         p_idx = self.sam_port_combo.findData(saved_sam_port)
         if p_idx >= 0:
@@ -2362,6 +2899,7 @@ class NeonWindow(QMainWindow):
         for line in str(msg).splitlines():
             self.tv_term.append_line(line, kind=kind)
             self.sam_term.append_line(line, kind=kind)
+            self.his_term.append_line(line, kind=kind)
             self.vpn_term.append_line(line, kind=kind)
 
     def _save_log_dialog(self, text):
@@ -2379,6 +2917,8 @@ class NeonWindow(QMainWindow):
             return
         if channel == 'sam' and self.sam_busy:
             return
+        if channel == 'his' and self.his_busy:
+            return
         if channel == 'net' and self.net_busy:
             return
         if channel == 'tv':
@@ -2387,6 +2927,9 @@ class NeonWindow(QMainWindow):
         elif channel == 'sam':
             self.sam_busy = True
             self.sam_term.scanner.start(scan_title or self.t('scanner_title'), self.t('scanner_tag'))
+        elif channel == 'his':
+            self.his_busy = True
+            self.his_term.scanner.start(scan_title or self.t('scanner_title'), self.t('scanner_tag'))
         elif channel == 'net':
             self.net_busy = True
             self.vpn_term.scanner.start(scan_title or self.t('scanner_title'), self.t('scanner_tag'))
@@ -2412,6 +2955,9 @@ class NeonWindow(QMainWindow):
                 elif channel == 'sam':
                     self.sam_busy = False
                     self.sam_term.scanner.stop()
+                elif channel == 'his':
+                    self.his_busy = False
+                    self.his_term.scanner.stop()
                 elif channel == 'net':
                     self.net_busy = False
                     self.vpn_term.scanner.stop()
@@ -2442,6 +2988,13 @@ class NeonWindow(QMainWindow):
             sam = self.api.read_samsung_logs()
             for line in sam.get('logs', []):
                 self.sam_term.append_line(line)
+        except Exception:
+            pass
+
+        try:
+            his = self.api.read_hisense_logs()
+            for line in his.get('logs', []):
+                self.his_term.append_line(line)
         except Exception:
             pass
 
@@ -2490,7 +3043,7 @@ class NeonWindow(QMainWindow):
     def _sync_status_badges(self):
         hs = getattr(self.api, 'hotspot_active', False)
         eth = getattr(self.api, 'ethernet_active', False)
-        if self.tv_busy or self.sam_busy or self.net_busy:
+        if self.tv_busy or self.sam_busy or self.his_busy or self.net_busy:
             self.status_pill.set_state('CONNECTING', self.t('status_conn_ing'))
         elif eth:
             self.status_pill.set_state('ETHERNET', self.t('status_eth'))
@@ -2502,7 +3055,7 @@ class NeonWindow(QMainWindow):
             self.status_pill.set_state('CONNECTING', self.t('status_vpn_ing'))
         elif self.vpn_state == 'ERROR':
             self.status_pill.set_state('ERROR', self.t('status_err'))
-        elif self.tv_connected or self.sam_connected:
+        elif self.tv_connected or self.sam_connected or self.his_connected:
             self.status_pill.set_state('CONNECTED', self.t('status_conn'))
         else:
             self.status_pill.set_state('DISCONNECTED', self.t('status_disc'))
@@ -2513,6 +3066,9 @@ class NeonWindow(QMainWindow):
         )
         self.side_sam_dot.setStyleSheet(
             f'color:{"#36e2ff" if self.sam_connected else "#5a6e7a"};font-size:9px;background:transparent;'
+        )
+        self.side_his_dot.setStyleSheet(
+            f'color:{"#ffba5a" if self.his_connected else "#5a6e7a"};font-size:9px;background:transparent;'
         )
         vpn_dot_c = {
             'CONNECTED': '#5bff9d',
@@ -3682,6 +4238,258 @@ class NeonWindow(QMainWindow):
             self._on_profile_changed(self.profile_combo.currentText())
 
         self._run_async('net', self.api.list_profiles, done)
+
+    # ------------------------------------------------------------------
+    # Hisense VIDAA Smart TV Actions
+    # ------------------------------------------------------------------
+    def _refresh_hisense_status_ui(self):
+        if not hasattr(self, 'his_ip'):
+            return
+        ip = self.his_ip.text().strip()
+        try:
+            st = self.api.get_hisense_status(ip)
+        except Exception:
+            return
+        paired = bool(st.get('paired'))
+        self.his_connected = paired
+        if paired:
+            title = st.get('friendly_name') or st.get('model_name') or ip
+            self.kpi_his_tv.set_data(title, '#5ef2a0', ip)
+            self.kpi_his_pair.set_data(
+                (st.get('auth_profile') or 'paired').upper(),
+                '#36e2ff',
+                f"brand={st.get('brand', 'his')}",
+            )
+        else:
+            self.kpi_his_tv.set_data(self.t('his_kpi_idle'), '#edf5fa', ip or 'MQTT :36669')
+            self.kpi_his_pair.set_data(self.t('his_kpi_pair_idle'), '#8fa4b2', 'PIN 4 digits')
+
+        if st.get('portal_running'):
+            purl = st.get('portal_url') or ''
+            vh = st.get('vidaahub_running')
+            self.kpi_his_portal.set_data(
+                'VIDAAHUB + LAN' if vh else 'LAN ACTIVE',
+                '#5ef2a0',
+                'https://vidaahub.com' if vh else purl,
+            )
+            self.his_portal_status_lbl.setText(
+                f'LAN: {purl}' + ('\nvidaahub.com: https://vidaahub.com (DNS -> ' + str(st.get('pc_ip')) + ')' if vh else '')
+            )
+        else:
+            self.kpi_his_portal.set_data(self.t('his_kpi_portal_idle'), '#8fa4b2', 'HTTP / vidaahub')
+            self.his_portal_status_lbl.setText(f"PC IP: {st.get('pc_ip', '192.168.1.x')}")
+        self._sync_status_badges()
+
+    def _on_his_found_selected(self, idx):
+        ip = self.his_found_combo.itemData(idx)
+        if ip:
+            self.his_ip.setText(str(ip))
+
+    def _on_his_alem_portal_changed(self):
+        val = self.his_alem_combo.currentData()
+        self.his_alem_custom.setVisible(val == 'custom')
+
+    def _selected_his_alem_portal(self):
+        val = self.his_alem_combo.currentData()
+        if val == 'custom':
+            return self.his_alem_custom.text().strip() or ALEMTV_DEFAULT_PORTAL
+        return str(val or ALEMTV_DEFAULT_PORTAL)
+
+    def _on_his_cb_mode_changed(self):
+        mode = self.his_cb_mode_combo.currentData()
+        self.his_cb_url_wrap.setVisible(mode == 'custom_url')
+
+    def his_scan(self):
+        def done(r):
+            devs = r.get('devices') or []
+            self._his_found_devices = devs
+            self.his_found_combo.blockSignals(True)
+            self.his_found_combo.clear()
+            for d in devs:
+                self.his_found_combo.addItem(f"{d['name']} ({d['model']}) · {d['ip']}", d['ip'])
+            self.his_found_combo.blockSignals(False)
+            self.his_found_wrap.setVisible(bool(devs))
+            if devs:
+                self.his_ip.setText(devs[0]['ip'])
+                self.toast.show_toast(
+                    f'Найдено Hisense VIDAA: {len(devs)}' if self.lang == 'ru' else f'Found {len(devs)} VIDAA TV(s)',
+                    'info',
+                )
+            else:
+                self.toast.show_toast(
+                    'Hisense VIDAA по SSDP не ответил — введите IP вручную.' if self.lang == 'ru' else 'No VIDAA TV answered SSDP — enter IP manually.',
+                    'warn',
+                )
+        self._run_async('his', self.api.discover_hisense, done, 'Поиск Hisense VIDAA')
+
+    def his_start_pairing(self):
+        ip = self.his_ip.text().strip()
+        prof = self.his_profile_combo.currentData() or 'auto'
+        def done(r):
+            if r.get('ok'):
+                if r.get('status') == 'paired':
+                    self.his_pin_wrap.setVisible(False)
+                    self._refresh_hisense_status_ui()
+                    self.toast.show_toast('Hisense VIDAA сопряжён!' if self.lang == 'ru' else 'Hisense paired!', 'info')
+                else:
+                    self._his_pairing_id = r.get('pairing_id', '')
+                    self.his_pin_wrap.setVisible(True)
+                    self.his_pin_input.clear()
+                    self.his_pin_input.setFocus()
+                    self.toast.show_toast(
+                        'Введите 4-значный PIN с экрана телевизора' if self.lang == 'ru' else 'Enter 4-digit PIN from TV screen',
+                        'info',
+                    )
+        self._run_async('his', lambda: self.api.start_hisense_pairing(ip, prof), done, 'Запрос PIN Hisense')
+
+    def his_confirm_pin(self):
+        pin = self.his_pin_input.text().strip()
+        pid = self._his_pairing_id
+        def done(r):
+            if r.get('ok'):
+                self.his_pin_wrap.setVisible(False)
+                self._his_pairing_id = ''
+                self._refresh_hisense_status_ui()
+                self.toast.show_toast('Hisense VIDAA успешно подключён!' if self.lang == 'ru' else 'Hisense VIDAA paired!', 'info')
+        self._run_async('his', lambda: self.api.confirm_hisense_pairing(pid, pin), done, 'Подтверждение PIN')
+
+    def his_cancel_pin(self):
+        pid = self._his_pairing_id
+        self._his_pairing_id = ''
+        self.his_pin_wrap.setVisible(False)
+        self.api.cancel_hisense_pairing(pid)
+
+    def his_forget_pairing(self):
+        ip = self.his_ip.text().strip()
+        self.api.forget_hisense_pairing(ip)
+        self._refresh_hisense_status_ui()
+        self.toast.show_toast('Сессия Hisense удалена' if self.lang == 'ru' else 'Hisense pairing cleared', 'info')
+
+    def his_install_belet(self):
+        ip = self.his_ip.text().strip()
+        url = self.his_belet_url.text().strip() or 'https://belet.tm/'
+        def done(r):
+            self._refresh_hisense_status_ui()
+            if r.get('ok'):
+                self.toast.show_toast('Belet установлен на Hisense!' if self.lang == 'ru' else 'Belet installed on Hisense!', 'info')
+        self._run_async('his', lambda: self.api.install_hisense_belet(ip, target_url=url, launch=True), done, 'Установка Belet')
+
+    def his_launch_belet(self):
+        ip = self.his_ip.text().strip()
+        url = self.his_belet_url.text().strip() or 'https://belet.tm/'
+        self._run_async('his', lambda: self.api.launch_hisense_belet(ip, target_url=url))
+
+    def his_install_alemtv(self):
+        ip = self.his_ip.text().strip()
+        portal = self._selected_his_alem_portal()
+        mode = self.his_alem_mode_combo.currentData() or 'data_url'
+        def done(r):
+            self._refresh_hisense_status_ui()
+            if r.get('ok'):
+                self.toast.show_toast('Alem TV отправлен на Hisense!' if self.lang == 'ru' else 'Alem TV installed on Hisense!', 'info')
+        self._run_async('his', lambda: self.api.install_hisense_alemtv(ip, target_url=portal, mode=mode, launch=True), done, 'Установка Alem TV')
+
+    def his_launch_alemtv(self):
+        ip = self.his_ip.text().strip()
+        portal = self._selected_his_alem_portal()
+        mode = self.his_alem_mode_combo.currentData() or 'data_url'
+        self._run_async('his', lambda: self.api.launch_hisense_alemtv(ip, target_url=portal, mode=mode))
+
+    def his_install_callback(self):
+        ip = self.his_ip.text().strip()
+        mode = self.his_cb_mode_combo.currentData() or 'data_url'
+        c_url = self.his_cb_custom_url.text().strip()
+        def done(r):
+            self._refresh_hisense_status_ui()
+            if r.get('ok'):
+                self.toast.show_toast('MSB Callback установлен на Hisense!' if self.lang == 'ru' else 'MSB Callback installed!', 'info')
+        self._run_async('his', lambda: self.api.install_hisense_callback(ip, mode=mode, custom_url=c_url, launch=True), done, 'Установка MSB Callback')
+
+    def his_launch_callback(self):
+        ip = self.his_ip.text().strip()
+        mode = self.his_cb_mode_combo.currentData() or 'data_url'
+        c_url = self.his_cb_custom_url.text().strip()
+        self._run_async('his', lambda: self.api.launch_hisense_callback(ip, mode=mode, custom_url=c_url))
+
+    def his_install_custom(self):
+        ip = self.his_ip.text().strip()
+        app_id = self.his_custom_id.text().strip()
+        title = self.his_custom_title.text().strip()
+        url = self.his_custom_url.text().strip()
+        icon = self.his_custom_icon.text().strip()
+        self._run_async(
+            'his',
+            lambda: self.api.install_hisense_custom_app(ip, app_id=app_id, title=title, url=url, icon_url=icon, launch=True),
+            lambda r: self.toast.show_toast('Приложение установлено на Hisense!' if self.lang == 'ru' else 'Custom app installed!', 'info') if r.get('ok') else None,
+            'Установка приложения',
+        )
+
+    def his_launch_custom(self):
+        ip = self.his_ip.text().strip()
+        app_id = self.his_custom_id.text().strip()
+        title = self.his_custom_title.text().strip()
+        url = self.his_custom_url.text().strip()
+        self._run_async('his', lambda: self.api.launch_hisense_app(ip, app_id=app_id, title=title, url=url))
+
+    def his_list_apps(self):
+        ip = self.his_ip.text().strip()
+        def done(r):
+            apps = r.get('apps') or []
+            self.his_apps_combo.clear()
+            for a in apps:
+                self.his_apps_combo.addItem(f"{a.get('name') or a.get('appId')} ({a.get('appId')})", a)
+            if r.get('ok'):
+                self.toast.show_toast(
+                    f'Загружено приложений: {len(apps)}' if self.lang == 'ru' else f'Loaded {len(apps)} apps',
+                    'info',
+                )
+        self._run_async('his', lambda: self.api.list_hisense_apps(ip), done, 'Список приложений Hisense')
+
+    def his_launch_selected_app(self):
+        data = self.his_apps_combo.currentData()
+        if not isinstance(data, dict):
+            return
+        ip = self.his_ip.text().strip()
+        self._run_async(
+            'his',
+            lambda: self.api.launch_hisense_app(ip, app_id=data.get('appId', ''), title=data.get('name', ''), url=data.get('url', '')),
+        )
+
+    def his_start_portal(self, vidaahub=False):
+        ip = self.his_ip.text().strip()
+        portal = self._selected_his_alem_portal()
+        def done(r):
+            self._refresh_hisense_status_ui()
+            for w in (r.get('warnings') or []):
+                self.log('[!] ' + w, 'bad')
+            if r.get('ok'):
+                self.toast.show_toast(
+                    'Портал Hisense запущен: ' + (r.get('vidaahub_url') if r.get('vidaahub_running') else r.get('url', '')),
+                    'info',
+                )
+        self._run_async('his', lambda: self.api.start_hisense_portal_server(ip, start_vidaahub=vidaahub, alem_portal=portal), done, 'Запуск установщика VIDAA')
+
+    def his_open_portal_on_tv(self):
+        ip = self.his_ip.text().strip()
+        portal = self._selected_his_alem_portal()
+        def done(r):
+            self._refresh_hisense_status_ui()
+            if r.get('ok'):
+                msg = (
+                    'Установщик открыт на ТВ!' if r.get('launched')
+                    else ('Откройте в браузере ТВ: ' + str(r.get('portal_url', '')))
+                )
+                self.toast.show_toast(msg, 'info')
+        self._run_async('his', lambda: self.api.open_hisense_portal_on_tv(ip, alem_portal=portal), done, 'Открытие на ТВ')
+
+    def his_stop_portal(self):
+        self.api.stop_hisense_portal_server()
+        self._refresh_hisense_status_ui()
+        self.toast.show_toast('Сервер Hisense остановлен' if self.lang == 'ru' else 'Hisense server stopped', 'info')
+
+    def his_send_key(self, key):
+        ip = self.his_ip.text().strip()
+        self._run_async('his', lambda: self.api.hisense_send_key(ip, key))
 
     def connect_vless(self):
         link = self.vless_link.text().strip()

@@ -8,6 +8,7 @@ Provides:
 - Samsung Tizen .wgt builder (AlemTV0001.wgt) with W3C XML-DSig signature support.
 """
 
+import base64
 import io
 import json
 import os
@@ -21,6 +22,7 @@ from xml.sax.saxutils import escape as xml_escape
 ALEMTV_WEBOS_ID = 'tm.alemtv.webos'
 ALEMTV_PKG_ID = 'AlemTV0001'
 ALEMTV_APP_ID = 'AlemTV0001.AlemTV'
+ALEMTV_VIDAA_ID = 'tmalemtvvidaa'
 ALEMTV_DEFAULT_PORTAL = 'http://iptv.tmalem.tv'
 
 ALEMTV_PORTALS = [
@@ -2609,8 +2611,8 @@ __TV_SIGN_OUT_JS__  // Settings Screen
           activateFocused();
         }
       }
-    } else if (code === 10009 || code === 461 || code === 27 || key === "Escape" || key === "Return" || key === "Back") {
-      // Samsung Tizen 10009 / webOS 461 / Escape — close overlay, then exit.
+    } else if (code === 10009 || code === 461 || code === 27 || (!inputTarget && code === 8) || key === "Escape" || key === "Return" || key === "Back") {
+      // Samsung Tizen 10009 / webOS 461 / VIDAA Back / Escape — close overlay, then exit.
       e.preventDefault();
       var frame = document.getElementById("portalIframe");
       if (frame && frame.style.display !== "none") {
@@ -3133,3 +3135,21 @@ def build_alemtv_wgt(target_url=ALEMTV_DEFAULT_PORTAL, pkg_id=ALEMTV_PKG_ID, app
         if splash_bytes:
             zf.writestr('splash.png', splash_bytes)
     return buf.getvalue()
+
+
+def build_alemtv_vidaa_html(default_portal=ALEMTV_DEFAULT_PORTAL):
+    """Build single-file self-contained Alem TV HTML for Hisense VIDAA (no external asset requests)."""
+    html = build_alemtv_html(default_portal=default_portal)
+    html = html.replace('<link rel="stylesheet" href="style.css">\n', '')
+    icon_bytes = get_alemtv_assets().get('icon')
+    if icon_bytes:
+        b64 = base64.b64encode(icon_bytes).decode('ascii')
+        html = html.replace('src="icon.png"', f'src="data:image/png;base64,{b64}"')
+    return html
+
+
+def build_alemtv_vidaa_data_url(default_portal=ALEMTV_DEFAULT_PORTAL):
+    """Build data:text/html;base64 URL for Alem TV on Hisense VIDAA."""
+    raw = build_alemtv_vidaa_html(default_portal=default_portal).encode('utf-8')
+    return 'data:text/html;charset=utf-8;base64,' + base64.b64encode(raw).decode('ascii')
+

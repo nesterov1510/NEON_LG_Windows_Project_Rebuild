@@ -1,4 +1,5 @@
-"""Standalone offline MSB Callback packages for webOS and Tizen."""
+"""Standalone offline MSB Callback packages for webOS, Tizen, and Hisense VIDAA."""
+import base64
 import io
 import json
 import os
@@ -11,6 +12,8 @@ from alemtv_app import _ar_member
 LG_ID = 'com.neon.msbcallback'
 SAMSUNG_PKG_ID = 'MSBCall001'
 SAMSUNG_APP_ID = SAMSUNG_PKG_ID + '.Callback'
+HISENSE_ID = 'neonmsbcallback'
+HISENSE_TITLE = 'MSB Callback'
 
 HTML = r'''<!DOCTYPE html>
 <html lang="ru">
@@ -836,7 +839,82 @@ body{
     try { ua = String(navigator.userAgent || ''); } catch (e) {}
     if (window.PalmSystem || /Web0S|webOS/i.test(ua)) return 'LG webOS TV';
     if (window.tizen || /Tizen/i.test(ua)) return 'Samsung Tizen TV';
+    if (window.Hisense_GetModelName || window.Hisense_GetBrand || window.Hisense_GetCountryCode || window.HiUtils_createRequest || /VIDAA|Hisense|WebViewer|WebNavigator|Odin/i.test(ua)) {
+      return 'Hisense VIDAA TV';
+    }
     return 'Smart TV';
+  }
+
+  function hasHisenseApi() {
+    var ua = '';
+    try { ua = String(navigator.userAgent || ''); } catch (e) {}
+    return !!(window.Hisense_GetModelName || window.Hisense_GetBrand || window.Hisense_GetCountryCode ||
+      window.Hisense_GetMacAddress || window.Hisense_GetIpAddress || window.Hisense_GetNetWorkType ||
+      window.HiUtils_createRequest || /VIDAA|Hisense|WebViewer|WebNavigator|Odin/i.test(ua));
+  }
+
+  function safeHisenseCall(name) {
+    try {
+      var fn = window[name];
+      if (typeof fn === 'function') return fn();
+    } catch (e) {}
+    return null;
+  }
+
+  function probeHisense() {
+    var brand = cleanStr(safeHisenseCall('Hisense_GetBrand'));
+    var model = cleanStr(safeHisenseCall('Hisense_GetModelName'));
+    var fw = cleanStr(safeHisenseCall('Hisense_GetFirmWareVersion'));
+    var labelBrand = (!brand || brand.toLowerCase() === 'his') ? 'Hisense' : (brand.toLowerCase() === 'tos' ? 'Toshiba VIDAA' : brand);
+    if (model) state.model = labelBrand + ' ' + model;
+    else if (brand || fw) state.model = labelBrand + (fw ? ' (' + fw + ')' : ' VIDAA TV');
+
+    var netType = cleanStr(safeHisenseCall('Hisense_GetNetWorkType') || safeHisenseCall('Hisense_GetNetworkType')).toLowerCase();
+    var netStatus = cleanStr(safeHisenseCall('Hisense_GetNetStatus'));
+    var ip = validIp(safeHisenseCall('Hisense_GetIpAddress') || safeHisenseCall('Hisense_GetIP'));
+    var mask = validIp(safeHisenseCall('Hisense_GetSubnetMask') || safeHisenseCall('Hisense_GetNetMask'));
+    var gw = validIp(safeHisenseCall('Hisense_GetGateway'));
+    var dns = validIp(safeHisenseCall('Hisense_GetDns') || safeHisenseCall('Hisense_GetDNS'));
+    var macAny = validMac(safeHisenseCall('Hisense_GetMacAddress'));
+    var macLan = validMac(safeHisenseCall('Hisense_GetWiredMacAddress')) || macAny;
+    var macWifi = validMac(safeHisenseCall('Hisense_GetWifiMacAddress') || safeHisenseCall('Hisense_GetWiFiMacAddress')) || macAny;
+    var ssid = cleanStr(safeHisenseCall('Hisense_GetWifiSSID') || safeHisenseCall('Hisense_GetWiFiSSID'));
+
+    var isWired = /eth|wired|lan|cable|^1$/.test(netType);
+    var isWifi = /wifi|wlan|wireless|^2$/.test(netType) || !!ssid;
+    var onlineHint = (netStatus === '1' || netStatus.toLowerCase() === 'true' || netStatus.toLowerCase() === 'connected');
+
+    if (isWired || (!isWifi && macLan && (ip || onlineHint))) {
+      mergeAdapter(state.wired, {
+        connected: !!(ip || onlineHint),
+        ip: ip,
+        mask: mask,
+        gw: gw,
+        dns: dns,
+        mac: macLan
+      }, false);
+    } else if (macLan) {
+      mergeAdapter(state.wired, { mac: macLan }, false);
+    }
+
+    if (isWifi) {
+      mergeAdapter(state.wifi, {
+        connected: !!(ip || onlineHint || ssid),
+        ip: ip,
+        mask: mask,
+        gw: gw,
+        dns: dns,
+        mac: macWifi,
+        ssid: ssid
+      }, false);
+    } else if (macWifi && macWifi !== macLan) {
+      mergeAdapter(state.wifi, { mac: macWifi }, false);
+    }
+
+    state.wired.known = true;
+    state.wifi.known = true;
+    if (ip && !isWired && !isWifi) state.fallbackIp = ip;
+    render();
   }
 
   function parseWebosConnection(res) {
@@ -1052,7 +1130,8 @@ body{
       loadTizenWebApis();
       probeTizen();
     }
-    if (!window.PalmSystem && !window.PalmServiceBridge && !window.tizen && !window.webapis) {
+    if (hasHisenseApi()) probeHisense();
+    if (!window.PalmSystem && !window.PalmServiceBridge && !window.tizen && !window.webapis && !hasHisenseApi()) {
       state.wired.known = true;
       state.wifi.known = true;
     }
@@ -1164,3 +1243,26 @@ def build_wgt():
         for name, data in _files().items():
             z.writestr(name, data)
     return out.getvalue()
+
+
+def icon_bytes():
+    return _asset('msb_icon.png')
+
+
+def build_hisense_html(inline_assets=True):
+    """Build standalone HTML for Hisense VIDAA (optionally with inline base64 QR images)."""
+    html = HTML
+    if not inline_assets:
+        return html
+    web_b64 = base64.b64encode(_asset('msb_website_qr.png')).decode('ascii')
+    cnt_b64 = base64.b64encode(_asset('msb_contact_qr.png')).decode('ascii')
+    html = html.replace('src="website.png"', 'src="data:image/png;base64,' + web_b64 + '"')
+    html = html.replace('src="contact.png"', 'src="data:image/png;base64,' + cnt_b64 + '"')
+    return html
+
+
+def build_hisense_data_url():
+    """Build self-contained offline data:text/html URL for VIDAA launcher tiles."""
+    raw = build_hisense_html(inline_assets=True).encode('utf-8')
+    return 'data:text/html;charset=utf-8;base64,' + base64.b64encode(raw).decode('ascii')
+

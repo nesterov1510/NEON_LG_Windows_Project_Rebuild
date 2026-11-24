@@ -292,6 +292,32 @@ const IDS = [
   assert.ok(dom.nodes.netSummary.textContent.includes('192.168.50.9'));
   assert.ok(dom.nodes.netUpdated.textContent.includes('192.168.50.9'));
 })();
+// 4. Hisense / Toshiba VIDAA global functions (Hisense_Get*)
+(function testHisenseVidaa() {
+  const dom = makeDom(IDS);
+  const win = {
+    navigator: { userAgent: 'Mozilla/5.0 (Linux; VIDAA) Hisense-TV/9.0' },
+    Hisense_GetBrand() { return 'Hisense'; },
+    Hisense_GetModelName() { return '55U7HQ'; },
+    Hisense_GetNetWorkType() { return 1; },
+    Hisense_GetIpAddress() { return '192.168.1.99'; },
+    Hisense_GetMacAddress() { return 'aa:11:22:33:44:55'; },
+    Hisense_GetWifiSSID() { return 'Home-5G'; },
+    setInterval() { return 1; },
+    setTimeout() { return 1; }
+  };
+  win.window = win;
+  win.document = dom.doc;
+  vm.runInNewContext(SCRIPT, {
+    window: win, document: dom.doc, navigator: win.navigator,
+    setInterval: win.setInterval, setTimeout: win.setTimeout,
+    Date, Math, JSON, String, RegExp
+  });
+  assert.strictEqual(dom.nodes.tvModel.textContent, 'Hisense 55U7HQ');
+  assert.strictEqual(dom.nodes.wifiIp.textContent, '192.168.1.99');
+  assert.strictEqual(dom.nodes.wifiMac.textContent, 'AA:11:22:33:44:55');
+  assert.ok(dom.nodes.wifiSsid.textContent.includes('Home-5G'));
+})();
 console.log('msb_callback_tv_ok');
 '''.replace('__SCRIPT__', json.dumps(script))
 
@@ -344,3 +370,23 @@ def test_samsung_installer_uses_own_package(monkeypatch):
     result = api.install_samsung_callback('192.168.1.3')
     assert result['ok']
     assert result['app_id'] == msb_callback.SAMSUNG_APP_ID
+
+
+def test_hisense_callback_data_url_and_desktop_buttons():
+    html = msb_callback.build_hisense_html(inline_assets=True)
+    assert 'data:image/png;base64,' in html
+    assert 'probeHisense' in html
+    assert 'fetch(' not in html
+    data_url = msb_callback.build_hisense_data_url()
+    assert data_url.startswith('data:text/html;charset=utf-8;base64,')
+    import base64
+    decoded = base64.b64decode(data_url.split(',', 1)[1]).decode('utf-8')
+    assert 'Meryosab Callback' in decoded
+    assert 'data:image/png;base64,' in decoded
+
+    ui_html = (ROOT / 'ui.html').read_text(encoding='utf-8')
+    assert 'installCallbackHisense()' in ui_html
+    assert 'УСТАНОВИТЬ НА HISENSE' in ui_html
+    legacy = (ROOT / 'app_legacy.py').read_text(encoding='utf-8')
+    assert 'УСТАНОВИТЬ НА HISENSE' in legacy
+    assert '_install_callback_hisense' in legacy

@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -68,10 +69,13 @@ from alemtv_app import (
     ALEMTV_APP_ID,
     ALEMTV_DEFAULT_PORTAL,
     ALEMTV_PKG_ID,
+    ALEMTV_VIDAA_ID,
     ALEMTV_WEBOS_ID,
     build_alemtv_ipk,
+    build_alemtv_vidaa_data_url,
     build_alemtv_wgt,
 )
+import hisense_vidaa
 
 REGION_CODES = {'22282', '3642', '19461', '13741', '13869', '19345', '18362', '18789', '4837'}
 
@@ -131,6 +135,16 @@ class Api:
         self._samsung_auth_stop = threading.Event()
         self._samsung_time_server = SamsungTimeOverrideServer(log_cb=self._sam_log)
         self._logger = self._setup_logger()
+        self._hisense_logs = []
+        self._hisense_log_lock = threading.Lock()
+        self._hisense_store = hisense_vidaa.HisenseSessionStore(
+            os.path.join(self._data_dir(), 'hisense_sessions.json')
+        )
+        self._hisense_ctrl = hisense_vidaa.HisenseController(
+            store=self._hisense_store,
+            log_fn=self._hisense_log,
+        )
+        self._hisense_portal = hisense_vidaa.HisensePortalServer(log_fn=self._hisense_log)
 
     def _data_dir(self):
         base = os.environ.get('APPDATA') or os.path.join(os.path.expanduser('~'), '.config')
@@ -187,6 +201,17 @@ class Api:
             'samsung_time_remote_host': '',
             'samsung_time_remote_user': 'root',
             'samsung_time_remote_port': 22,
+            'hisense_ip': '192.168.1.102',
+            'hisense_auth_profile': 'auto',
+            'hisense_alem_portal': ALEMTV_DEFAULT_PORTAL,
+            'hisense_alem_mode': 'data_url',
+            'hisense_callback_mode': 'data_url',
+            'hisense_callback_custom_url': '',
+            'hisense_belet_url': 'https://belet.tm/',
+            'hisense_custom_id': 'neon.customapp',
+            'hisense_custom_title': 'My TV App',
+            'hisense_custom_url': '',
+            'hisense_custom_icon': '',
         }
         try:
             with open(self._settings_path(), 'r', encoding='utf-8') as f:
@@ -3322,6 +3347,14 @@ class Api:
             self._samsung_time_server.stop()
         except Exception:
             pass
+        try:
+            self._hisense_ctrl.close()
+        except Exception:
+            pass
+        try:
+            self._hisense_portal.stop()
+        except Exception:
+            pass
         self.disconnect_tv()
         self.disconnect_lg_remote()
         self.disconnect_samsung()
@@ -4645,3 +4678,336 @@ class Api:
             )
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': f'[!] Remote deploy failed: {exc}'}
+
+    # ------------------------------------------------------------------
+    # Hisense / Toshiba VIDAA Smart TV
+    # ------------------------------------------------------------------
+
+    def _hisense_log(self, msg):
+        line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+        with self._hisense_log_lock:
+            self._hisense_logs.append(line)
+            if len(self._hisense_logs) > 400:
+                self._hisense_logs = self._hisense_logs[-300:]
+        try:
+            self._logger.info('[HISENSE] %s', msg)
+        except Exception:
+            pass
+
+    def read_hisense_logs(self):
+        with self._hisense_log_lock:
+            out = list(self._hisense_logs)
+            self._hisense_logs.clear()
+            return {'logs': out}
+
+    def _resolve_hisense_ip(self, ip=None):
+        val = str(ip if ip is not None else '').strip()
+        if not val:
+            val = str(self.load_settings().get('hisense_ip') or '').strip()
+        return val
+
+    def discover_hisense(self):
+        try:
+            self._hisense_log('Сканирование сети (SSDP/UPnP) на наличие Hisense/Toshiba VIDAA…')
+            tvs = hisense_vidaa.discover_vidaa_tvs(timeout=2.5)
+            devices = [t.to_dict() for t in tvs]
+            self._hisense_log(f'Найдено устройств VIDAA: {len(devices)}')
+            return {'ok': True, 'devices': devices}
+        except Exception as exc:
+            self._hisense_log(f'Ошибка поиска VIDAA: {exc}')
+            return {'ok': False, 'devices': [], 'error': str(exc)}
+
+    def get_hisense_status(self, ip=None):
+        host = self._resolve_hisense_ip(ip)
+        sess = self._hisense_store.get(host) if host else None
+        pc_ip = hisense_vidaa.get_local_ip_for_tv(host)
+        return {
+            'ok': True,
+            'host': host,
+            'paired': bool(sess and sess.is_paired),
+            'auth_profile': sess.auth_profile if sess else '',
+            'brand': sess.brand if sess else 'his',
+            'friendly_name': sess.friendly_name if sess else '',
+            'model_name': sess.model_name if sess else '',
+            'portal_running': self._hisense_portal.running,
+            'portal_url': self._hisense_portal.base_url(host) if self._hisense_portal.running else '',
+            'vidaahub_running': self._hisense_portal.vidaahub_running,
+            'pc_ip': pc_ip,
+        }
+
+    def start_hisense_pairing(self, ip=None, auth_profile=None):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        prof = str(auth_profile or self.load_settings().get('hisense_auth_profile') or 'auto').strip()
+        self.save_settings({'hisense_ip': host, 'hisense_auth_profile': prof})
+        return self._hisense_ctrl.start_pairing(host, auth_profile=prof)
+
+    def confirm_hisense_pairing(self, pairing_id, pin):
+        return self._hisense_ctrl.confirm_pairing(pairing_id, pin)
+
+    def cancel_hisense_pairing(self, pairing_id=None):
+        return self._hisense_ctrl.cancel_pairing(pairing_id)
+
+    def forget_hisense_pairing(self, ip=None):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес ТВ.'}
+        removed = self._hisense_store.delete(host)
+        self._hisense_log(f'Удалена сохранённая сессия для {host}' if removed else f'Сессия для {host} не найдена')
+        return {'ok': True, 'removed': removed}
+
+    def list_hisense_apps(self, ip=None):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'apps': [], 'error': 'Укажите IP-адрес ТВ.'}
+        try:
+            apps = self._hisense_ctrl.list_apps(host)
+            return {'ok': True, 'apps': apps}
+        except Exception as exc:
+            self._hisense_log(f'Ошибка получения списка приложений {host}: {exc}')
+            return {'ok': False, 'apps': [], 'error': str(exc)}
+
+    def _hisense_asset_url(self, host, asset_name):
+        try:
+            self._hisense_portal.ensure_started(tv_ip=host)
+            return self._hisense_portal.icon_url(asset_name, tv_ip=host)
+        except Exception:
+            return ''
+
+    def install_hisense_belet(self, ip=None, target_url=None, launch=True):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        url = str(target_url or self.load_settings().get('hisense_belet_url') or 'https://belet.tm/').strip()
+        self.save_settings({'hisense_ip': host, 'hisense_belet_url': url})
+        preset = hisense_vidaa.APP_PRESETS['belet']
+        icon = self._hisense_asset_url(host, preset['icon_asset'])
+        try:
+            res = self._hisense_ctrl.install_tile(
+                host,
+                preset['app_id'],
+                preset['title'],
+                url,
+                icon_url=icon,
+                auto_launch=bool(launch),
+            )
+            return res
+        except Exception as exc:
+            self._hisense_log(f'Ошибка установки Belet на {host}: {exc}')
+            return {'ok': False, 'error': str(exc)}
+
+    def launch_hisense_belet(self, ip=None, target_url=None):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        url = str(target_url or self.load_settings().get('hisense_belet_url') or 'https://belet.tm/').strip()
+        preset = hisense_vidaa.APP_PRESETS['belet']
+        try:
+            return self._hisense_ctrl.launch_app(host, preset['app_id'], preset['title'], url)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def _resolve_hisense_alemtv_url(self, host, target_url, mode):
+        clean_mode = (mode or 'data_url').strip().lower()
+        portal = (target_url or ALEMTV_DEFAULT_PORTAL).strip()
+        if clean_mode == 'portal_url':
+            return portal
+        if clean_mode == 'lan_server':
+            self._hisense_portal.ensure_started(tv_ip=host, alem_portal=portal)
+            q = urllib.parse.urlencode({'portal': portal})
+            return f"{self._hisense_portal.base_url(host)}/apps/alemtv?{q}"
+        return build_alemtv_vidaa_data_url(default_portal=portal)
+
+    def install_hisense_alemtv(self, ip=None, target_url=None, mode=None, launch=True):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        s = self.load_settings()
+        portal = str(target_url or s.get('hisense_alem_portal') or ALEMTV_DEFAULT_PORTAL).strip()
+        clean_mode = str(mode or s.get('hisense_alem_mode') or 'data_url').strip().lower()
+        self.save_settings({'hisense_ip': host, 'hisense_alem_portal': portal, 'hisense_alem_mode': clean_mode})
+
+        if clean_mode == 'tv_flash':
+            return self.open_hisense_portal_on_tv(host, alem_portal=portal)
+
+        preset = hisense_vidaa.APP_PRESETS['alemtv']
+        icon = self._hisense_asset_url(host, preset['icon_asset'])
+        app_url = self._resolve_hisense_alemtv_url(host, portal, clean_mode)
+        try:
+            res = self._hisense_ctrl.install_tile(
+                host,
+                ALEMTV_VIDAA_ID,
+                preset['title'],
+                app_url,
+                icon_url=icon,
+                auto_launch=bool(launch),
+            )
+            res['mode'] = clean_mode
+            res['portal'] = portal
+            return res
+        except Exception as exc:
+            self._hisense_log(f'Ошибка установки Alem TV на {host}: {exc}')
+            return {'ok': False, 'error': str(exc)}
+
+    def launch_hisense_alemtv(self, ip=None, target_url=None, mode=None):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        s = self.load_settings()
+        portal = str(target_url or s.get('hisense_alem_portal') or ALEMTV_DEFAULT_PORTAL).strip()
+        clean_mode = str(mode or s.get('hisense_alem_mode') or 'data_url').strip().lower()
+        app_url = self._resolve_hisense_alemtv_url(host, portal, clean_mode)
+        try:
+            return self._hisense_ctrl.launch_app(host, ALEMTV_VIDAA_ID, 'Alem TV', app_url)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def _resolve_hisense_callback_url(self, host, mode, custom_url=''):
+        clean_mode = (mode or 'data_url').strip().lower()
+        if clean_mode == 'custom_url':
+            url = (custom_url or '').strip()
+            if not url:
+                raise ValueError('Укажите URL для режима Custom URL')
+            return url
+        if clean_mode == 'lan_server':
+            self._hisense_portal.ensure_started(tv_ip=host)
+            return f"{self._hisense_portal.base_url(host)}/apps/msbcallback"
+        return msb_callback.build_hisense_data_url()
+
+    def install_hisense_callback(self, ip=None, mode=None, custom_url=None, launch=True):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        s = self.load_settings()
+        clean_mode = str(mode or s.get('hisense_callback_mode') or 'data_url').strip().lower()
+        c_url = str(custom_url if custom_url is not None else s.get('hisense_callback_custom_url') or '').strip()
+        self.save_settings({
+            'hisense_ip': host,
+            'hisense_callback_mode': clean_mode,
+            'hisense_callback_custom_url': c_url,
+        })
+
+        if clean_mode == 'tv_flash':
+            return self.open_hisense_portal_on_tv(host)
+
+        preset = hisense_vidaa.APP_PRESETS['msbcallback']
+        icon = self._hisense_asset_url(host, preset['icon_asset'])
+        try:
+            app_url = self._resolve_hisense_callback_url(host, clean_mode, c_url)
+            res = self._hisense_ctrl.install_tile(
+                host,
+                msb_callback.HISENSE_ID,
+                msb_callback.HISENSE_TITLE,
+                app_url,
+                icon_url=icon,
+                auto_launch=bool(launch),
+            )
+            res['mode'] = clean_mode
+            return res
+        except Exception as exc:
+            self._hisense_log(f'Ошибка установки MSB Callback на {host}: {exc}')
+            return {'ok': False, 'error': str(exc)}
+
+    def launch_hisense_callback(self, ip=None, mode=None, custom_url=None):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        s = self.load_settings()
+        clean_mode = str(mode or s.get('hisense_callback_mode') or 'data_url').strip().lower()
+        c_url = str(custom_url if custom_url is not None else s.get('hisense_callback_custom_url') or '').strip()
+        try:
+            app_url = self._resolve_hisense_callback_url(host, clean_mode, c_url)
+            return self._hisense_ctrl.launch_app(
+                host, msb_callback.HISENSE_ID, msb_callback.HISENSE_TITLE, app_url
+            )
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def install_hisense_custom_app(self, ip=None, app_id='', title='', url='', icon_url='', launch=True):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        clean_title = (title or '').strip() or 'Custom App'
+        clean_url = (url or '').strip()
+        clean_id = hisense_vidaa.sanitize_app_id(app_id, clean_title)
+        clean_icon = (icon_url or '').strip()
+        self.save_settings({
+            'hisense_ip': host,
+            'hisense_custom_id': clean_id,
+            'hisense_custom_title': clean_title,
+            'hisense_custom_url': clean_url,
+            'hisense_custom_icon': clean_icon,
+        })
+        try:
+            return self._hisense_ctrl.install_tile(
+                host, clean_id, clean_title, clean_url, icon_url=clean_icon, auto_launch=bool(launch)
+            )
+        except Exception as exc:
+            self._hisense_log(f'Ошибка установки кастомного приложения на {host}: {exc}')
+            return {'ok': False, 'error': str(exc)}
+
+    def launch_hisense_app(self, ip=None, app_id='', title='', url=''):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        try:
+            return self._hisense_ctrl.launch_app(host, app_id, title=title, url=url)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def hisense_send_key(self, ip=None, key='KEY_OK'):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        try:
+            return self._hisense_ctrl.send_key(host, key)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def hisense_show_toast(self, ip=None, text='', title='NEON'):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        try:
+            return self._hisense_ctrl.show_toast(host, text or 'NEON connected', title=title)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def start_hisense_portal_server(self, ip=None, start_vidaahub=False, upstream_dns='8.8.8.8', alem_portal=None):
+        host = self._resolve_hisense_ip(ip)
+        try:
+            if start_vidaahub:
+                return self._hisense_portal.start_vidaahub_bridge(
+                    tv_ip=host, upstream_dns=upstream_dns, alem_portal=alem_portal
+                )
+            return self._hisense_portal.ensure_started(tv_ip=host, alem_portal=alem_portal)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def open_hisense_portal_on_tv(self, ip=None, use_vidaahub=False, alem_portal=None):
+        host = self._resolve_hisense_ip(ip)
+        info = self.start_hisense_portal_server(
+            ip=host, start_vidaahub=bool(use_vidaahub), alem_portal=alem_portal
+        )
+        if not info.get('ok'):
+            return info
+        target_url = 'https://vidaahub.com/' if (use_vidaahub and info.get('vidaahub_running')) else info['url']
+        launched = False
+        sess = self._hisense_store.get(host) if host else None
+        if host and sess and sess.is_paired:
+            try:
+                self._hisense_ctrl.launch_app(host, 'neon.vidaa.installer', 'NEON Installer', target_url)
+                launched = True
+            except Exception as exc:
+                self._hisense_log(f'Не удалось авто-открыть портал на ТВ {host}: {exc}')
+        info['mode'] = 'tv_flash'
+        info['portal_url'] = target_url
+        info['launched'] = launched
+        return info
+
+    def stop_hisense_portal_server(self):
+        self._hisense_portal.stop()
+        self._hisense_log('Локальный сервер / мост Hisense VIDAA остановлен')
+        return {'ok': True}
+

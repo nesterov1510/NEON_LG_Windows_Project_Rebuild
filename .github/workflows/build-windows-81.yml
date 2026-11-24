@@ -81,6 +81,9 @@ jobs:
             throw "Embedded LG IPK differs from tested release file"
           }
           Write-Host "Verified bundled Belet LG client: $beletIpk"
+          $vidaa = Get-ChildItem -Path "dist\NeonLGControl81" -Filter "vidaa_client.bundle" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $vidaa) { throw "Bundled Hisense VIDAA TLS client bundle missing" }
+          Write-Host "Verified bundled VIDAA TLS bundle: $vidaa"
 
       - name: Locate or install NSIS 3.x
         shell: pwsh

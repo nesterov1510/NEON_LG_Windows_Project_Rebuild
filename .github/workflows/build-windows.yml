@@ -20,7 +20,7 @@ jobs:
         shell: pwsh
         run: |
           foreach ($attempt in 1, 2) {
-            cmd /c "python -m pytest -v --tb=short tests/test_core.py tests/test_alemtv.py tests/test_lg_remote.py tests/test_belet_catalog_proxy.py tests/test_belet_ui_cleanup.py tests/test_local_tv_packages.py tests/test_belet_samsung_client.py tests/test_msb_callback.py tests/test_msb_tv_app.py tests/test_samsung_time_override.py > pytest_report.txt 2>&1"
+            cmd /c "python -m pytest -v --tb=short tests/test_core.py tests/test_alemtv.py tests/test_lg_remote.py tests/test_belet_catalog_proxy.py tests/test_belet_ui_cleanup.py tests/test_local_tv_packages.py tests/test_belet_samsung_client.py tests/test_msb_callback.py tests/test_msb_tv_app.py tests/test_samsung_time_override.py tests/test_hisense_vidaa.py > pytest_report.txt 2>&1"
             $code = $LASTEXITCODE
             if (Test-Path pytest_report.txt) {
               Get-Content pytest_report.txt | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
@@ -37,12 +37,15 @@ jobs:
         run: python scripts/prepare_vless.py --check
 
       - run: python -m PyInstaller --noconfirm --clean --windowed --name NeonLGControl --icon "assets\neon.ico" --version-file "assets\version_info.txt" --add-data "change_region.sh;." --add-data "ui.html;." --add-data "assets;assets" --add-data "lg-belet;lg-belet" --add-data "samsung-belet/BeletSamsungClient-unsigned.wgt;samsung-belet" --uac-admin app.py
-      - name: Verify bundled Samsung Belet client
+      - name: Verify bundled Samsung Belet client & VIDAA TLS bundle
         shell: pwsh
         run: |
           $wgt = Get-ChildItem -Path "dist\NeonLGControl" -Filter "BeletSamsungClient-unsigned.wgt" -Recurse | Select-Object -First 1 -ExpandProperty FullName
           if (-not $wgt) { throw "Bundled Belet Samsung client WGT missing" }
           Write-Host "Verified bundled Belet Samsung client: $wgt"
+          $vidaa = Get-ChildItem -Path "dist\NeonLGControl" -Filter "vidaa_client.bundle" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $vidaa) { throw "Bundled Hisense VIDAA TLS client bundle missing" }
+          Write-Host "Verified bundled VIDAA TLS bundle: $vidaa"
 
       - name: Package portable application
         shell: pwsh
