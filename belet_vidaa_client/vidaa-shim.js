@@ -340,6 +340,43 @@
     if (doc && doc.addEventListener) doc.addEventListener('DOMContentLoaded', wireBeletProxyHook, true);
     global.addEventListener('DOMContentLoaded', wireBeletProxyHook, false);
     setTimeout(wireBeletProxyHook, 0);
+
+    /* Non-blocking TV telemetry + error report only over live http(s) LAN portal. */
+    (function () {
+      var locProto = '';
+      var errCount = 0;
+      try { locProto = String((global.location && global.location.protocol) || '').toLowerCase(); } catch (e) {}
+      if (locProto !== 'http:' && locProto !== 'https:') return;
+      function sendProbe(extra) {
+        try {
+          if (typeof global.XMLHttpRequest !== 'function') return;
+          var x = new global.XMLHttpRequest();
+          x.open('POST', proxyBase + '/__tv_probe', true);
+          x.setRequestHeader('Content-Type', 'application/json');
+          var payload = {
+            page: 'belet',
+            ua: (global.navigator && global.navigator.userAgent) || '',
+            href: String((global.location && global.location.href) || '')
+          };
+          try { if (typeof global.Hisense_GetModelName === 'function') payload.model = global.Hisense_GetModelName(); } catch (e2) {}
+          try { if (typeof global.Hisense_GetOSVersion === 'function') payload.osVersion = global.Hisense_GetOSVersion(); } catch (e3) {}
+          if (extra) {
+            if (extra.error) payload.error = String(extra.error);
+          }
+          x.send(JSON.stringify(payload));
+        } catch (e) {}
+      }
+      setTimeout(function () { sendProbe(); }, 50);
+      if (typeof global.addEventListener === 'function') {
+        global.addEventListener('error', function (ev) {
+          if (errCount >= 3) return;
+          errCount += 1;
+          var msg = (ev && (ev.message || (ev.error && ev.error.message))) || 'script error';
+          if (ev && ev.filename) msg += ' @ ' + ev.filename + ':' + (ev.lineno || 0);
+          sendProbe({ error: msg });
+        }, false);
+      }
+    }());
   }
 
   /* ── VIDAA remote control key normalization + air-mouse focus ── */

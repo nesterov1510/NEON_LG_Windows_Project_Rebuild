@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import base64
 from dataclasses import dataclass, field
 import email.utils
@@ -18,6 +19,7 @@ import secrets
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -295,16 +297,21 @@ def install_payload(app_id: str, name: str, url: str, image: str = '') -> str:
     }, ensure_ascii=False)
 
 
-def launch_payload(app_id: str, name: str, url: str, store_type: int = 99) -> str:
-    return json.dumps({
+def launch_payload(app_id: str, name: str, url: str, store_type: int | None = None) -> str:
+    payload = {
         'appId': app_id,
         'name': name,
         'url': url,
         'urlType': 37,
-        'storeType': store_type,
         'appName': name,
         'appUrl': url,
-    }, ensure_ascii=False)
+    }
+    if store_type is not None:
+        try:
+            payload['storeType'] = int(store_type)
+        except (TypeError, ValueError):
+            pass
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def parse_applist(payload: str) -> list[dict] | None:
@@ -319,7 +326,7 @@ def parse_applist(payload: str) -> list[dict] | None:
         if not isinstance(item, dict):
             continue
         out.append({
-            'appId': str(item.get('appId') or item.get('id') or item.get('Id') or ''),
+            'appId': str(item.get('appId') or item.get('id') or item.get('Id') or item.get('mediaId') or ''),
             'name': str(item.get('name') or item.get('appName') or item.get('Title') or ''),
             'url': str(item.get('url') or item.get('appUrl') or item.get('URL') or ''),
             'icon': str(item.get('icon') or item.get('iconUrl') or item.get('Image') or ''),
@@ -360,11 +367,27 @@ def normalize_tile_url(url: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme.lower(), netloc, path, parsed.query, parsed.fragment))
 
 
-def tile_matches_request(tile: dict, app_id: str, url: str) -> bool:
+def tile_ids(tile: dict) -> list[str]:
+    if not isinstance(tile, dict):
+        return []
+    raw = tile.get('raw') if isinstance(tile.get('raw'), dict) else {}
+    ids: list[str] = []
+    for src in (tile, raw):
+        for key in ('appId', 'Id', 'id', 'mediaId'):
+            val = src.get(key)
+            if isinstance(val, (str, int)) and str(val).strip():
+                clean = str(val).strip().lower()
+                if clean not in ids:
+                    ids.append(clean)
+    return ids
+
+
+def tile_matches_request(
+    tile: dict, app_id: str, url: str, allow_hidden_url: bool = False
+) -> bool:
     if not isinstance(tile, dict):
         return False
-    tid = str(tile.get('appId') or tile.get('Id') or '').lower()
-    if tid != app_id.lower():
+    if app_id.strip().lower() not in tile_ids(tile):
         return False
     wanted = normalize_tile_url(url)
     if not wanted:
@@ -375,7 +398,30 @@ def tile_matches_request(tile: dict, app_id: str, url: str) -> bool:
         for k in ('url', 'appUrl', 'URL')
         if isinstance(raw.get(k), str) and raw.get(k).strip()
     ]
-    return bool(addrs) and all(normalize_tile_url(a) == wanted for a in addrs)
+    if not addrs or all(a.upper().startswith('HTTP_APP_DEFAULT_URL') for a in addrs):
+        return bool(allow_hidden_url)
+    return all(normalize_tile_url(a) == wanted for a in addrs)
+
+
+def find_browser_app(apps: list[dict] | None) -> dict | None:
+    """Return the built-in TV Browser entry from a VIDAA applist, if present."""
+    if not apps:
+        return None
+    for entry in apps:
+        if not isinstance(entry, dict):
+            continue
+        eid = str(entry.get('appId') or '').strip()
+        eurl = str(entry.get('url') or '').strip().lower()
+        if eid == '16' or eurl in ('browser', 'url16'):
+            return entry
+    for entry in apps:
+        if not isinstance(entry, dict):
+            continue
+        ename = str(entry.get('name') or '').strip().lower()
+        eurl = str(entry.get('url') or '').strip().lower()
+        if 'browser' in ename and not eurl.startswith(('http://', 'https://', 'data:')):
+            return entry
+    return None
 
 
 def resolve_vidaa_key(key: str) -> str:
@@ -1412,6 +1458,7 @@ class HisenseController:
         icon_url: str = '',
         wait_confirm: bool = True,
         auto_launch: bool = False,
+        poll_delays: tuple[float, float] = (1.5, 3.5),
     ) -> dict:
         clean_url = validate_app_url(url)
         clean_id = sanitize_app_id(app_id, title)
@@ -1425,27 +1472,73 @@ class HisenseController:
                 install_payload(clean_id, clean_title, clean_url, icon_url or ''),
             )
             confirmed = False
+            matched_tile: dict | None = None
             apps: list[dict] = []
             if wait_confirm:
-                time.sleep(1.5)
+                time.sleep(poll_delays[0])
                 for attempt in range(2):
                     since = len(cli.messages)
                     cli.publish(topics['ui'] + 'actions/applist', '0')
                     raw = cli.wait_for('ui_service/data/applist', 6.0, since)
                     apps = parse_applist(raw) or []
-                    if any(tile_matches_request(a, clean_id, clean_url) for a in apps):
-                        confirmed = True
+                    allow_hidden = (attempt == 1)
+                    for item in apps:
+                        if tile_matches_request(item, clean_id, clean_url, allow_hidden_url=allow_hidden):
+                            matched_tile = item
+                            confirmed = True
+                            break
+                    if confirmed:
                         break
-                    if attempt == 0:
-                        time.sleep(1.2)
+                    if attempt == 0 and poll_delays[1] > 0:
+                        time.sleep(poll_delays[1])
             launched = False
+            launched_via = ''
+            launch_skipped_reason = ''
+            browser = find_browser_app(apps)
             if auto_launch:
-                cli.publish(
-                    topics['ui'] + 'actions/launchapp',
-                    launch_payload(clean_id, clean_title, clean_url),
-                )
-                launched = True
-                time.sleep(0.5)
+                if confirmed and matched_tile is not None:
+                    m_id = matched_tile.get('appId') or clean_id
+                    m_name = matched_tile.get('name') or clean_title
+                    m_url = matched_tile.get('url') or clean_url
+                    if str(m_url).upper().startswith('HTTP_APP_DEFAULT_URL'):
+                        m_url = clean_url
+                    m_store = matched_tile.get('storeType')
+                    cli.publish(
+                        topics['ui'] + 'actions/launchapp',
+                        launch_payload(m_id, m_name, m_url, store_type=m_store),
+                    )
+                    launched = True
+                    launched_via = 'tile'
+                    time.sleep(0.5)
+                elif not wait_confirm and not clean_url.lower().startswith('data:'):
+                    cli.publish(
+                        topics['ui'] + 'actions/launchapp',
+                        launch_payload(clean_id, clean_title, clean_url),
+                    )
+                    launched = True
+                    launched_via = 'direct'
+                    time.sleep(0.5)
+                elif clean_url.lower().startswith(('http://', 'https://')) and browser is not None:
+                    b_url = str(browser.get('url') or '').strip().lower()
+                    if b_url != 'url16':
+                        cli.publish(
+                            topics['ui'] + 'actions/launchapp',
+                            launch_payload(
+                                browser.get('appId') or '16',
+                                browser.get('name') or 'TV Browser',
+                                clean_url,
+                                store_type=browser.get('storeType'),
+                            ),
+                        )
+                        launched = True
+                        launched_via = 'tv_browser'
+                        time.sleep(0.5)
+                    else:
+                        launch_skipped_reason = 'tv_browser_ignores_mqtt_url'
+                elif clean_url.lower().startswith('data:'):
+                    launch_skipped_reason = 'data_uri_rejected_by_tv'
+                else:
+                    launch_skipped_reason = 'tile_not_confirmed'
             return {
                 'ok': True,
                 'confirmed': confirmed,
@@ -1454,51 +1547,175 @@ class HisenseController:
                 'title': clean_title,
                 'url': clean_url,
                 'launched': launched,
+                'launched_via': launched_via,
+                'browser_opened': (launched_via == 'tv_browser'),
+                'launch_skipped_reason': launch_skipped_reason,
                 'apps_count': len(apps),
+                'browser_info': (
+                    {'appId': browser.get('appId'), 'url': browser.get('url'), 'storeType': browser.get('storeType')}
+                    if browser else None
+                ),
             }
 
         res = self._run_authenticated(host, op)
         if res['confirmed']:
             self._log(f'Плитка «{clean_title}» ({clean_id}) подтверждена в списке приложений ТВ')
         else:
+            if res.get('launched_via') == 'tv_browser':
+                self._log(
+                    f'Плитка «{clean_title}» не добавлена в applist по MQTT, но страница открыта через встроенный Браузер ТВ'
+                )
+            else:
+                self._log(
+                    f'ТВ не подтвердил установку плитки «{clean_title}» по MQTT '
+                    '(чтобы избежать чёрного экрана, автозапуск отменён; откройте «Браузер ТВ» или /vidaa/selfinstall.html)'
+                )
+        return res
+
+    def open_browser_url(self, host: str, url: str) -> dict:
+        clean_url = validate_app_url(url)
+        if not clean_url.lower().startswith(('http://', 'https://')):
+            return {
+                'ok': False,
+                'launched': False,
+                'browser_opened': False,
+                'reason': 'requires_http_url',
+                'error': 'Требуется http:// или https:// URL для Браузера ТВ',
+                'url': clean_url,
+            }
+
+        def op(cli: MqttTlsClient, topics: dict[str, str], _sess: VidaaSession):
+            cli.subscribe([topics['applist_reply']])
+            time.sleep(0.2)
+            since = len(cli.messages)
+            cli.publish(topics['ui'] + 'actions/applist', '0')
+            raw = cli.wait_for('data/applist', 6.0, since)
+            apps = parse_applist(raw) or []
+            browser = find_browser_app(apps)
+            if not browser:
+                return {
+                    'ok': False,
+                    'launched': False,
+                    'browser_opened': False,
+                    'reason': 'browser_not_in_applist',
+                    'error': f'Встроенный Браузер ТВ не найден в applist; откройте вручную на ТВ: {clean_url}',
+                    'url': clean_url,
+                }
+            if str(browser.get('url') or '').strip().lower() == 'url16':
+                return {
+                    'ok': False,
+                    'launched': False,
+                    'browser_opened': False,
+                    'reason': 'tv_browser_url_ignored',
+                    'error': f'Эта прошивка VIDAA (url16) не открывает URL по MQTT; откройте Браузер ТВ пультом и перейдите на {clean_url}',
+                    'url': clean_url,
+                    'browser': {'appId': browser.get('appId'), 'url': browser.get('url'), 'storeType': browser.get('storeType')},
+                }
+            cli.publish(
+                topics['ui'] + 'actions/launchapp',
+                launch_payload(
+                    browser.get('appId') or '16',
+                    browser.get('name') or 'TV Browser',
+                    clean_url,
+                    store_type=browser.get('storeType'),
+                ),
+            )
+            time.sleep(0.4)
+            return {
+                'ok': True,
+                'launched': True,
+                'browser_opened': True,
+                'url': clean_url,
+                'browser': {'appId': browser.get('appId'), 'url': browser.get('url'), 'storeType': browser.get('storeType')},
+            }
+
+        res = self._run_authenticated(host, op)
+        if res.get('launched'):
+            self._log(f'Открыт Браузер ТВ ({res["browser"].get("appId")}) -> {clean_url}')
+        else:
             self._log(
-                f'Команда установки «{clean_title}» отправлена, но ТВ не подтвердил её в applist сразу '
-                '(переоткройте «Мои приложения» на ТВ или используйте режим Браузера ТВ / vidaahub.com)'
+                f'Не удалось авто-открыть URL в Браузере ТВ ({res.get("reason")}): откройте вручную на ТВ {clean_url}'
             )
         return res
 
     def launch_app(self, host: str, app_id: str, title: str = '', url: str = '') -> dict:
         def op(cli: MqttTlsClient, topics: dict[str, str], _sess: VidaaSession):
-            target_id = app_id
-            target_title = title or app_id
-            target_url = url
-            target_store = 99
-            if not target_url:
-                cli.subscribe([topics['applist_reply']])
-                time.sleep(0.2)
-                since = len(cli.messages)
-                cli.publish(topics['ui'] + 'actions/applist', '0')
-                raw = cli.wait_for('data/applist', 6.0, since)
-                apps = parse_applist(raw) or []
-                for a in apps:
-                    if (
-                        (target_id and a['appId'].lower() == target_id.lower())
-                        or (title and a['name'].lower() == title.lower())
-                    ):
-                        target_id = a['appId']
-                        target_title = a['name'] or target_title
-                        target_url = a['url']
-                        target_store = int(a.get('storeType') or 99)
-                        break
-            cli.publish(
-                topics['ui'] + 'actions/launchapp',
-                launch_payload(target_id, target_title, target_url, store_type=target_store),
-            )
-            time.sleep(0.4)
-            return {'ok': True, 'app_id': target_id, 'title': target_title, 'url': target_url}
+            cli.subscribe([topics['applist_reply']])
+            time.sleep(0.2)
+            since = len(cli.messages)
+            cli.publish(topics['ui'] + 'actions/applist', '0')
+            raw = cli.wait_for('data/applist', 6.0, since)
+            apps = parse_applist(raw) or []
+
+            matched = None
+            target_low = (app_id or '').strip().lower()
+            title_low = (title or '').strip().lower()
+            for a in apps:
+                if (target_low and target_low in tile_ids(a)) or (
+                    title_low and str(a.get('name') or '').strip().lower() == title_low
+                ):
+                    matched = a
+                    break
+
+            if matched is not None:
+                t_id = matched.get('appId') or app_id
+                t_title = matched.get('name') or title or t_id
+                t_url = matched.get('url') or url
+                if url and not str(url).lower().startswith('data:') and str(t_url).upper().startswith('HTTP_APP_DEFAULT_URL'):
+                    t_url = url
+                elif url and str(matched.get('storeType')) in ('99', '100', '98', '') and not matched.get('url'):
+                    t_url = url
+                t_store = matched.get('storeType')
+                cli.publish(
+                    topics['ui'] + 'actions/launchapp',
+                    launch_payload(t_id, t_title, t_url or url, store_type=t_store),
+                )
+                time.sleep(0.4)
+                return {'ok': True, 'launched': True, 'launched_via': 'tile', 'app_id': t_id, 'title': t_title, 'url': t_url}
+
+            if url and str(url).lower().startswith(('http://', 'https://')):
+                browser = find_browser_app(apps)
+                if browser and str(browser.get('url') or '').strip().lower() != 'url16':
+                    cli.publish(
+                        topics['ui'] + 'actions/launchapp',
+                        launch_payload(
+                            browser.get('appId') or '16',
+                            browser.get('name') or 'TV Browser',
+                            url,
+                            store_type=browser.get('storeType'),
+                        ),
+                    )
+                    time.sleep(0.4)
+                    return {
+                        'ok': True,
+                        'launched': True,
+                        'launched_via': 'tv_browser',
+                        'browser_opened': True,
+                        'app_id': browser.get('appId') or '16',
+                        'title': browser.get('name') or 'TV Browser',
+                        'url': url,
+                    }
+                return {
+                    'ok': False,
+                    'launched': False,
+                    'error': f'Приложение «{title or app_id}» не установлено на ТВ; откройте вручную в браузере ТВ: {url}',
+                    'url': url,
+                }
+
+            if url and str(url).lower().startswith('data:'):
+                return {
+                    'ok': False,
+                    'launched': False,
+                    'error': f'Плитка «{title or app_id}» не установлена в списке ТВ; запуск Data URI без установки приводит к чёрному экрану. Используйте «Сервер NEON (LAN)» или Браузер ТВ.',
+                }
+
+            return {'ok': False, 'launched': False, 'error': f'Приложение «{title or app_id}» не найдено на ТВ.'}
 
         res = self._run_authenticated(host, op)
-        self._log(f'Отправлен запуск приложения «{res["title"]}»')
+        if res.get('ok'):
+            self._log(f'Отправлен запуск «{res["title"]}» ({res.get("launched_via", "tile")})')
+        else:
+            self._log(res.get('error') or f'Не удалось запустить «{title or app_id}»')
         return res
 
     def send_key(self, host: str, key: str) -> dict:
@@ -1710,7 +1927,7 @@ body{{padding:28px 36px}}
 <div class="hdr">
   <div>
     <div class="logo">NEON · HISENSE VIDAA INSTALLER</div>
-    <div class="sub">Автономная установка приложений через ТВ-браузер, TV Flash и мост Hisense</div>
+    <div class="sub">Запуск и установка приложений через ТВ-браузер, Appinfo.json и мост Hisense</div>
   </div>
   <div class="badges" id="envInfo">Определение среды VIDAA…</div>
 </div>
@@ -1718,28 +1935,28 @@ body{{padding:28px 36px}}
 <div class="grid">
   <div class="card">
     <h2>MSB Callback</h2>
-    <p>Офлайн-визитка с диагностикой сети, LAN/Wi-Fi IP и QR-кодами. В режиме TV Flash работает без ПК и интернета.</p>
-    <button class="btn btn-prim" onclick="installOfflineFlash('neonmsbcallback','MSB Callback','/apps/msbcallback/index.html','/assets/msb_icon.png')">Установить в память ТВ (Offline)</button>
-    <button class="btn" onclick="installBridgeApp('neonmsbcallback','MSB Callback',ORIGIN+'/apps/msbcallback','/assets/msb_icon.png')">Плитка через Hisense API</button>
-    <button class="btn" onclick="openUrl('/apps/msbcallback')">Открыть сейчас</button>
+    <p>Офлайн-визитка с диагностикой сети, LAN/Wi-Fi IP и QR-кодами.</p>
+    <button class="btn btn-prim" onclick="openUrl('/apps/msbcallback')">Открыть сейчас</button>
+    <button class="btn" onclick="installLanTile('neonmsbcallback','MSB Callback',ORIGIN+'/apps/msbcallback','/assets/msb_icon.png')">Установить плитку (LAN)</button>
+    <button class="btn" onclick="installOfflineFlash('neonmsbcallback','MSB Callback','/apps/msbcallback/index.html','/assets/msb_icon.png')">В память ТВ (Offline)</button>
     <button class="btn btn-danger" onclick="uninstallApp('neonmsbcallback','MSB Callback')">Удалить</button>
   </div>
 
   <div class="card">
     <h2>Alem TV</h2>
     <p>Standalone Smart TV клиент Alem TV с EPG, архивом и порталом оператора.</p>
-    <button class="btn btn-prim" onclick="installOfflineFlash('tmalemtvvidaa','Alem TV','/apps/alemtv/index.html','/assets/alemtv_large_icon.png')">Установить в память ТВ (Offline)</button>
-    <button class="btn" onclick="installBridgeApp('tmalemtvvidaa','Alem TV',ORIGIN+'/apps/alemtv','/assets/alemtv_large_icon.png')">Через Hisense API (LAN)</button>
-    <button class="btn" onclick="openUrl('/apps/alemtv')">Открыть сейчас</button>
+    <button class="btn btn-prim" onclick="openUrl('/apps/alemtv')">Открыть сейчас</button>
+    <button class="btn" onclick="installLanTile('tmalemtvvidaa','Alem TV',ORIGIN+'/apps/alemtv','/assets/alemtv_large_icon.png')">Установить плитку (LAN)</button>
+    <button class="btn" onclick="installOfflineFlash('tmalemtvvidaa','Alem TV','/apps/alemtv/index.html','/assets/alemtv_large_icon.png')">В память ТВ (Offline)</button>
     <button class="btn btn-danger" onclick="uninstallApp('tmalemtvvidaa','Alem TV')">Удалить</button>
   </div>
 
   <div class="card">
     <h2>Belet TV</h2>
     <p>Полноценный Smart TV клиент Bëlet (QR/SMS-вход, каталог, поиск, сериалы, HLS-плеер — на общей базе с LG и Samsung).</p>
-    <button class="btn btn-prim" onclick="installOfflineFlash('tm.belet.vidaa','Belet','/apps/belet/standalone.html','/assets/belet_large_icon.png','/apps/belet/standalone.html?nofonts=1')">Установить в память ТВ (Offline)</button>
-    <button class="btn" onclick="installBridgeApp('tm.belet.vidaa','Belet',ORIGIN+'/apps/belet/','/assets/belet_large_icon.png')">Установить (LAN + Прокси)</button>
-    <button class="btn" onclick="openUrl('/apps/belet/')">Открыть сейчас</button>
+    <button class="btn btn-prim" onclick="openUrl('/apps/belet/')">Открыть сейчас</button>
+    <button class="btn" onclick="installLanTile('tm.belet.vidaa','Belet',ORIGIN+'/apps/belet/','/assets/belet_large_icon.png')">Установить плитку (LAN + Прокси)</button>
+    <button class="btn" onclick="installOfflineFlash('tm.belet.vidaa','Belet','/apps/belet/standalone.html','/assets/belet_large_icon.png','/apps/belet/standalone.html?nofonts=1')">В память ТВ (старые ТВ)</button>
     <button class="btn btn-danger" onclick="uninstallApp('tm.belet.vidaa','Belet')">Удалить</button>
   </div>
 </div>
@@ -1760,11 +1977,28 @@ body{{padding:28px 36px}}
   var hasHiUtils = (typeof window.HiUtils_createRequest === 'function');
   var hasBridge = (typeof window.Hisense_installApp === 'function');
   var model = '';
+  var osVer = '';
   try {{ if (typeof Hisense_GetModelName === 'function') model = Hisense_GetModelName(); }} catch(e){{}}
-  var envText = 'Модель: ' + (model || 'Браузер / Smart TV') +
-    '<br>HiUtils TV Flash: ' + (hasHiUtils ? 'ДОСТУПЕН' : 'нет (нужен https://vidaahub.com или браузер ТВ)') +
-    '<br>Hisense_installApp: ' + (hasBridge ? 'ДОСТУПЕН' : 'нет');
+  try {{ if (typeof Hisense_GetOSVersion === 'function') osVer = Hisense_GetOSVersion(); }} catch(e){{}}
+  var envText = 'Модель: ' + (model || 'Браузер / Smart TV') + (osVer ? ' (' + osVer + ')' : '') +
+    '<br>HiUtils (Appinfo.json): ' + (hasHiUtils ? 'ДОСТУПЕН' : 'нет (нужен https://vidaahub.com)') +
+    '<br>Hisense_installApp: ' + (hasBridge ? 'ДОСТУПЕН' : 'нет (нужен https://vidaahub.com)');
   document.getElementById('envInfo').innerHTML = envText;
+
+  try {{
+    var probe = new XMLHttpRequest();
+    probe.open('POST', ORIGIN + '/__tv_probe', true);
+    probe.setRequestHeader('Content-Type', 'application/json');
+    probe.send(JSON.stringify({{
+      page: 'selfinstall',
+      model: model,
+      osVersion: osVer,
+      ua: navigator.userAgent || '',
+      href: String(window.location.href || ''),
+      hasHiUtils: hasHiUtils,
+      hasInstallApp: hasBridge
+    }}));
+  }} catch(e) {{}}
 
   function fetchText(path, cb) {{
     var x = new XMLHttpRequest();
@@ -1792,18 +2026,31 @@ body{{padding:28px 36px}}
 
   function readAppInfo() {{
     var cur = HiUtils_createRequest('fileRead', {{ path: 'websdk/Appinfo.json', mode: 6 }});
-    if (cur && cur.ret) {{
+    if (!cur || !cur.ret) return null;
+    try {{
+      if (!cur.msg) return {{ AppInfo: [] }};
       var data = (typeof cur.msg === 'string') ? JSON.parse(cur.msg) : cur.msg;
-      if (data && data.AppInfo) return data;
+      if (data && typeof data === 'object' && Array.isArray(data.AppInfo)) return data;
+      return null;
+    }} catch(e) {{
+      return null;
     }}
-    return {{ AppInfo: [] }};
+  }}
+
+  function hasRegistryEntry(reg, appId) {{
+    if (!reg || !Array.isArray(reg.AppInfo)) return false;
+    for (var i = 0; i < reg.AppInfo.length; i++) {{
+      if (reg.AppInfo[i] && reg.AppInfo[i].Id === appId) return true;
+    }}
+    return false;
   }}
 
   function upsertAppInfo(appId, title, appUrl, iconUrl) {{
     var reg = readAppInfo();
+    if (!reg) return {{ ret: false, msg: 'Appinfo.json недоступен для чтения (отказ во избежание затирания списка)' }};
     var kept = [];
     for (var i = 0; i < reg.AppInfo.length; i++) {{
-      if (reg.AppInfo[i].Id !== appId) kept.push(reg.AppInfo[i]);
+      if (reg.AppInfo[i] && reg.AppInfo[i].Id !== appId) kept.push(reg.AppInfo[i]);
     }}
     kept.push({{
       Id: appId, AppName: title, Title: title,
@@ -1813,21 +2060,43 @@ body{{padding:28px 36px}}
       RunTimes: 0, StoreType: 'custom', PreInstall: false
     }});
     reg.AppInfo = kept;
-    return HiUtils_createRequest('fileWrite', {{ path: 'websdk/Appinfo.json', mode: 6, writedata: JSON.stringify(reg) }});
+    var w = HiUtils_createRequest('fileWrite', {{ path: 'websdk/Appinfo.json', mode: 6, writedata: JSON.stringify(reg) }});
+    if (w && w.ret) {{
+      var verify = readAppInfo();
+      if (verify && hasRegistryEntry(verify, appId)) {{
+        w.verifiedOnDisk = true;
+      }}
+    }}
+    return w;
   }}
+
+  window.installLanTile = function(appId, title, appUrl, iconPath) {{
+    if (hasHiUtils) {{
+      var w = upsertAppInfo(appId, title, appUrl, ORIGIN + iconPath);
+      if (w && w.ret) {{
+        log('УСПЕХ! «' + title + '» записан в websdk/Appinfo.json (' + (w.verifiedOnDisk ? 'проверено на диске' : 'записано') + '). ПОЛНОСТЬЮ ПЕРЕЗАГРУЗИТЕ ТВ (выньте вилку из розетки на 10 сек), чтобы плитка появилась в меню.');
+        return;
+      }}
+      log('Запись Appinfo.json не удалась (' + (w && w.msg ? w.msg : 'ошибка') + ') — пробую Hisense_installApp…');
+    }}
+    if (hasBridge) {{
+      installBridgeApp(appId, title, appUrl, iconPath);
+      return;
+    }}
+    log('На текущем адресе установка плиток заблокирована прошивкой. Нажмите «Открыть сейчас» — приложение запустится прямо здесь! Либо откройте https://vidaahub.com/.');
+  }};
 
   window.installOfflineFlash = function(appId, title, htmlPath, iconPath, fallbackHtmlPath) {{
     if (!hasHiUtils) {{
-      log('HiUtils_createRequest недоступен на этом домене — пробую data:/Hisense API…');
-      if (hasBridge) {{
+      if (hasBridge && htmlPath.indexOf('belet') < 0) {{
         fetchText(fallbackHtmlPath || htmlPath, function(err, body){{
           if (err) return log('Ошибка загрузки: ' + err);
           var durl = 'data:text/html;charset=utf-8;base64,' + btoa(unescape(encodeURIComponent(body)));
           installBridgeApp(appId, title, durl, iconPath);
         }});
-      }} else {{
-        log('Откройте эту страницу через режим vidaahub.com (DNS на ПК) или установите по MQTT из программы NEON.');
+        return;
       }}
+      log('Для записи в память ТВ нужна страница https://vidaahub.com/. Либо нажмите «Открыть сейчас» прямо в браузере ТВ.');
       return;
     }}
     log('Загрузка ' + title + ' и запись во внутреннюю память ТВ…');
@@ -1847,8 +2116,7 @@ body{{padding:28px 36px}}
         var fullIcon = ORIGIN + iconPath;
         var w2 = upsertAppInfo(appId, title, localUrl, fullIcon);
         if (w2 && w2.ret) {{
-          refreshLauncher(appId);
-          log('ГОТОВО! «' + title + '» записан в память ТВ (' + localUrl + '). Переоткройте список приложений или перезагрузите ТВ.');
+          log('Записано (' + localUrl + '). Перезагрузите ТВ (вынуть вилку на 10 сек). Если при открытии будет чёрный экран — ваша прошивка блокирует file://, используйте «Установить плитку (LAN)».');
         }} else {{
           log('Ошибка записи Appinfo.json: ' + JSON.stringify(w2));
         }}
@@ -1860,19 +2128,19 @@ body{{padding:28px 36px}}
   window.installUrlFlash = function(appId, title, appUrl, iconPath) {{
     if (!hasHiUtils) return log('HiUtils_createRequest недоступен на этом домене');
     var w = upsertAppInfo(appId, title, appUrl, ORIGIN + iconPath);
-    if (w && w.ret) {{ refreshLauncher(appId); log('Сохранено в Appinfo.json: ' + title); }}
+    if (w && w.ret) {{ log('Сохранено в Appinfo.json: ' + title + '. Полностью перезагрузите ТВ (вилка из розетки на 10 сек).'); }}
     else log('Ошибка записи Appinfo.json: ' + JSON.stringify(w));
   }};
 
   window.installBridgeApp = function(appId, title, appUrl, iconPath) {{
-    if (!hasBridge) return log('Hisense_installApp недоступен. Для его активации включите режим vidaahub.com.');
+    if (!hasBridge) return log('Hisense_installApp недоступен. Для его активации включите режим vidaahub.com или нажмите «Открыть сейчас».');
     var icon = ORIGIN + iconPath;
     log('Установка через Hisense_installApp: ' + title + '…');
     try {{
       Hisense_installApp(appId, title, icon, icon, icon, appUrl, 'store', function(status){{
         if (!status) {{
           refreshLauncher(appId);
-          log('УСПЕХ: ' + title + ' установлен в меню приложений ТВ!');
+          log('УСПЕХ: ' + title + ' установлен! Полностью перезагрузите ТВ, если плитка не появилась сразу.');
         }} else {{
           log('Hisense_installApp вернул статус ошибки: ' + status);
         }}
@@ -1888,12 +2156,13 @@ body{{padding:28px 36px}}
       Hisense_uninstallApp(title + 'debug', function(ok){{ log('Hisense_uninstallApp(' + title + 'debug): ' + ok); refreshLauncher(); }});
     }}
     if (hasHiUtils) {{
-      did = true;
       var reg = readAppInfo();
-      reg.AppInfo = reg.AppInfo.filter(function(a){{ return a.Id !== appId; }});
-      var w = HiUtils_createRequest('fileWrite', {{ path: 'websdk/Appinfo.json', mode: 6, writedata: JSON.stringify(reg) }});
-      refreshLauncher();
-      log('Удалено из websdk/Appinfo.json (' + appId + '): ' + JSON.stringify(w));
+      if (reg) {{
+        did = true;
+        reg.AppInfo = reg.AppInfo.filter(function(a){{ return a.Id !== appId; }});
+        var w = HiUtils_createRequest('fileWrite', {{ path: 'websdk/Appinfo.json', mode: 6, writedata: JSON.stringify(reg) }});
+        log('Удалено из websdk/Appinfo.json (' + appId + '): ' + JSON.stringify(w) + ' (перезагрузите ТВ)');
+      }}
     }}
     if (!did) log('API удаления недоступен в текущем окне. Нажмите и удерживайте OK на плитке в меню ТВ.');
   }};
@@ -2030,11 +2299,182 @@ def _rewrite_m3u8(text: str, proxy_origin: str, up_host: str, register_fn) -> st
     return '\n'.join(out_lines) + ('\n' if text.endswith('\n') else '')
 
 
+_VIDAA_HTTP_PREFERRED_PORTS = tuple(range(18880, 18896))
+_HOSTS_BEGIN_MARKER = '# BEGIN NEON VIDAAHUB'
+_HOSTS_END_MARKER = '# END NEON VIDAAHUB'
+_HOSTS_VIDAAHUB_DOMAINS = (
+    'vidaahub.com',
+    'www.vidaahub.com',
+    'portal.vidaahub.com',
+    'app.vidaahub.com',
+    'api.vidaahub.com',
+    'store.vidaahub.com',
+    'tv.vidaahub.com',
+)
+_HOSTS_ATEXIT_REGISTERED = False
+
+
+class _VidaaHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that disables SO_REUSEADDR on Windows to prevent silent port hijack."""
+    allow_reuse_address = (os.name != 'nt')
+    daemon_threads = True
+
+
+def _default_windows_hosts_path() -> str:
+    sys_root = os.environ.get('SystemRoot') or r'C:\Windows'
+    return os.path.join(sys_root, 'System32', 'drivers', 'etc', 'hosts')
+
+
+def _strip_neon_hosts_block(content: str) -> str:
+    out: list[str] = []
+    inside = False
+    for line in content.splitlines():
+        s = line.strip()
+        if s == _HOSTS_BEGIN_MARKER:
+            inside = True
+            continue
+        if s == _HOSTS_END_MARKER:
+            inside = False
+            continue
+        if not inside:
+            out.append(line)
+    res = '\n'.join(out)
+    if content.endswith('\n') and res and not res.endswith('\n'):
+        res += '\n'
+    elif res and not res.endswith('\n'):
+        res += '\n'
+    return res
+
+
+def _hosts_set_vidaahub(ip: str, hosts_path: str | None = None) -> tuple[bool, str]:
+    """Write reversible vidaahub.com override into Windows hosts (or custom test path)."""
+    global _HOSTS_ATEXIT_REGISTERED
+    if hosts_path is None:
+        if os.name != 'nt':
+            return False, 'hosts fallback is only applicable on Windows'
+        hosts_path = _default_windows_hosts_path()
+    try:
+        ip_obj = ipaddress.ip_address((ip or '').strip())
+        clean_ip = str(ip_obj)
+    except ValueError:
+        return False, f'invalid IP: {ip!r}'
+
+    try:
+        existing = ''
+        if os.path.exists(hosts_path):
+            with open(hosts_path, 'r', encoding='utf-8', errors='replace') as f:
+                existing = f.read()
+        cleaned = _strip_neon_hosts_block(existing)
+        block_lines = [_HOSTS_BEGIN_MARKER] + [f'{clean_ip} {dom}' for dom in _HOSTS_VIDAAHUB_DOMAINS] + [_HOSTS_END_MARKER]
+        new_content = cleaned + '\n'.join(block_lines) + '\n'
+        with open(hosts_path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+        if not _HOSTS_ATEXIT_REGISTERED and hosts_path == _default_windows_hosts_path():
+            atexit.register(_hosts_clear_vidaahub)
+            _HOSTS_ATEXIT_REGISTERED = True
+        if os.name == 'nt':
+            try:
+                cflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+                subprocess.run(['ipconfig', '/flushdns'], capture_output=True, timeout=5, creationflags=cflags)
+            except Exception:
+                pass
+        return True, hosts_path
+    except OSError as exc:
+        return False, str(exc)
+
+
+def _hosts_clear_vidaahub(hosts_path: str | None = None) -> bool:
+    """Remove any NEON VIDAAHUB block from hosts file."""
+    if hosts_path is None:
+        if os.name != 'nt':
+            return False
+        hosts_path = _default_windows_hosts_path()
+    try:
+        if not os.path.exists(hosts_path):
+            return False
+        with open(hosts_path, 'r', encoding='utf-8', errors='replace') as f:
+            existing = f.read()
+        if _HOSTS_BEGIN_MARKER not in existing:
+            return False
+        cleaned = _strip_neon_hosts_block(existing)
+        with open(hosts_path, 'w', encoding='utf-8') as f:
+            f.write(cleaned)
+        if os.name == 'nt':
+            try:
+                cflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+                subprocess.run(['ipconfig', '/flushdns'], capture_output=True, timeout=5, creationflags=cflags)
+            except Exception:
+                pass
+        return True
+    except OSError:
+        return False
+
+
+def _ensure_windows_firewall_rules(tcp_ports: list[int] | tuple[int, ...] = (), udp_ports: list[int] | tuple[int, ...] = ()) -> tuple[bool, str]:
+    """Ensure idempotent Windows Firewall allow rules (profile=any) for NEON VIDAA ports & app."""
+    if os.name != 'nt':
+        return False, 'not windows'
+    cflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    cmds: list[tuple[str, list[str]]] = []
+
+    exe_path = os.path.abspath(sys.executable or '')
+    if exe_path and os.path.exists(exe_path):
+        rule_app = 'NEON-VIDAA-App'
+        cmds.append((
+            rule_app,
+            ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
+             f'name={rule_app}', 'dir=in', 'action=allow',
+             f'program={exe_path}', 'enable=yes', 'profile=any'],
+        ))
+
+    for port in sorted({int(p) for p in tcp_ports if int(p) > 0}):
+        rname = f'NEON-VIDAA-TCP-{port}'
+        cmds.append((
+            rname,
+            ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
+             f'name={rname}', 'dir=in', 'action=allow', 'protocol=TCP',
+             f'localport={port}', 'enable=yes', 'profile=any'],
+        ))
+    for port in sorted({int(p) for p in udp_ports if int(p) > 0}):
+        rname = f'NEON-VIDAA-UDP-{port}'
+        cmds.append((
+            rname,
+            ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
+             f'name={rname}', 'dir=in', 'action=allow', 'protocol=UDP',
+             f'localport={port}', 'enable=yes', 'profile=any'],
+        ))
+
+    if not cmds:
+        return True, 'no ports'
+
+    any_ok = False
+    errors: list[str] = []
+    for rname, add_cmd in cmds:
+        try:
+            chk = subprocess.run(
+                ['netsh', 'advfirewall', 'firewall', 'show', 'rule', f'name={rname}'],
+                capture_output=True, text=True, timeout=5, creationflags=cflags,
+            )
+            if chk.returncode == 0 and rname in (chk.stdout or ''):
+                any_ok = True
+                continue
+            res = subprocess.run(add_cmd, capture_output=True, text=True, timeout=8, creationflags=cflags)
+            if res.returncode == 0:
+                any_ok = True
+            else:
+                err_txt = (res.stderr or res.stdout or f'rc={res.returncode}').strip()
+                errors.append(f'{rname}: {err_txt}')
+        except Exception as exc:
+            errors.append(f'{rname}: {exc}')
+    return any_ok, '; '.join(errors) if errors else 'ok'
+
+
 class HisensePortalServer:
     """Serves tile PNG icons, self-contained HTML5 apps, Belet proxy, and optional vidaahub.com DNS/HTTPS."""
 
-    def __init__(self, log_fn=None):
+    def __init__(self, log_fn=None, preferred_ports: tuple[int, ...] = _VIDAA_HTTP_PREFERRED_PORTS):
         self._log_fn = log_fn or (lambda _m: None)
+        self._preferred_ports = tuple(preferred_ports)
         self._lock = threading.RLock()
         self._proxy_hosts: set[str] = set()
         self._proxy_lock = threading.Lock()
@@ -2042,6 +2482,9 @@ class HisensePortalServer:
         self._https_server: ThreadingHTTPServer | None = None
         self._http80_server: ThreadingHTTPServer | None = None
         self._dns_server: _DnsBridgeServer | None = None
+        self._firewall_ports: set[tuple[str, int]] = set()
+        self._hosts_active: bool = False
+        self.last_tv_probe: dict | None = None
         self.port: int = 0
         self.https_port: int = 0
         self.dns_port: int = 0
@@ -2320,7 +2763,49 @@ class HisensePortalServer:
                 self.send_header('Connection', 'close')
                 self.end_headers()
 
+            def _handle_tv_probe(self) -> None:
+                try:
+                    raw_len = int(self.headers.get('Content-Length') or '0')
+                except ValueError:
+                    raw_len = 0
+                raw_len = max(0, min(raw_len, 16384))
+                body = self.rfile.read(raw_len) if raw_len else b'{}'
+                try:
+                    data = json.loads(body.decode('utf-8', errors='replace') or '{}')
+                except Exception:
+                    data = {'raw': body.decode('utf-8', errors='replace')[:512]}
+                if not isinstance(data, dict):
+                    data = {'value': data}
+                peer = self.client_address[0] if self.client_address else ''
+                data['remoteIp'] = peer
+                data['ts'] = int(time.time())
+                portal_ref.last_tv_probe = data
+                page = str(data.get('page') or '')
+                model = str(data.get('model') or '')
+                os_ver = str(data.get('osVersion') or '')
+                ua = str(data.get('ua') or self.headers.get('User-Agent') or '')
+                err = str(data.get('error') or '')
+                hi = data.get('hasHiUtils')
+                inst = data.get('hasInstallApp')
+                parts = [f'[TV PROBE {peer}]']
+                if page:
+                    parts.append(f'page={page}')
+                if model or os_ver:
+                    parts.append(f'tv={model} {os_ver}'.strip())
+                if hi is not None or inst is not None:
+                    parts.append(f'HiUtils={bool(hi)} installApp={bool(inst)}')
+                if err:
+                    parts.append(f'ERR={err[:200]}')
+                if ua:
+                    parts.append(f'UA={ua[:140]}')
+                portal_ref._log(' '.join(parts))
+                self._send(200, b'{"ok":true}', 'application/json; charset=utf-8', cache='no-store')
+
             def do_POST(self):  # noqa: N802
+                path = urllib.parse.urlsplit(self.path).path
+                if path == '/__tv_probe':
+                    self._handle_tv_probe()
+                    return
                 if self.path.startswith('/__proxy/'):
                     self._handle_proxy_request('POST')
                     return
@@ -2349,6 +2834,12 @@ class HisensePortalServer:
                 path = parsed.path
                 qs = urllib.parse.parse_qs(parsed.query)
                 origin = self._origin()
+                peer = self.client_address[0] if self.client_address else ''
+                if peer and peer not in ('127.0.0.1', '::1') and (
+                    path in ('/', '/index.html', '/vidaa/selfinstall.html', '/apps/alemtv', '/apps/alemtv/', '/apps/alemtv/index.html', '/apps/belet', '/apps/belet/', '/apps/belet/index.html', '/apps/belet/standalone.html', '/apps/msbcallback', '/apps/msbcallback/', '/apps/msbcallback/index.html')
+                ):
+                    ua = (self.headers.get('User-Agent') or '')[:100]
+                    portal_ref._log(f'[TV HTTP] {peer} GET {path}' + (f' ({ua})' if ua else ''))
 
                 if path == '/__ping':
                     payload = json.dumps({
@@ -2432,18 +2923,52 @@ class HisensePortalServer:
 
         return Handler
 
+    def _ensure_firewall(self, tcp_ports: list[int] | tuple[int, ...] = (), udp_ports: list[int] | tuple[int, ...] = ()) -> None:
+        if os.name != 'nt':
+            return
+        new_tcp = [int(p) for p in tcp_ports if int(p) > 0 and ('tcp', int(p)) not in self._firewall_ports]
+        new_udp = [int(p) for p in udp_ports if int(p) > 0 and ('udp', int(p)) not in self._firewall_ports]
+        if not new_tcp and not new_udp:
+            return
+        ok, info = _ensure_windows_firewall_rules(new_tcp, new_udp)
+        if ok:
+            for p in new_tcp:
+                self._firewall_ports.add(('tcp', p))
+            for p in new_udp:
+                self._firewall_ports.add(('udp', p))
+            self._log(
+                f'Брандмауэр Windows: открыты порты TCP={new_tcp or "-"} UDP={new_udp or "-"} (все профили сети)'
+            )
+        elif info and info != 'not windows':
+            self._log(
+                f'Внимание: не удалось автоматически открыть Брандмауэр Windows ({info}). '
+                f'Разрешите входящие TCP {new_tcp} в профиле «Общедоступная сеть» или запустите NEON от администратора.'
+            )
+
+    def _bind_preferred_http(self, handler_cls) -> _VidaaHTTPServer:
+        for port in self._preferred_ports:
+            try:
+                srv = _VidaaHTTPServer(('0.0.0.0', int(port)), handler_cls)
+                return srv
+            except OSError:
+                continue
+        return _VidaaHTTPServer(('0.0.0.0', 0), handler_cls)
+
     def ensure_started(self, tv_ip: str | None = None, alem_portal: str | None = None) -> dict:
         with self._lock:
             if alem_portal:
                 self.alem_portal = alem_portal
-            self.pc_ip = get_local_ip_for_tv(tv_ip)
+            if tv_ip:
+                self.pc_ip = get_local_ip_for_tv(tv_ip)
+            elif not self.pc_ip or self.pc_ip == '127.0.0.1':
+                self.pc_ip = get_local_ip_for_tv(None)
             if self._http_server is None:
-                srv = ThreadingHTTPServer(('0.0.0.0', 0), self._make_handler())
-                srv.daemon_threads = True
+                srv = self._bind_preferred_http(self._make_handler())
                 self.port = srv.server_address[1]
                 self._http_server = srv
                 threading.Thread(target=srv.serve_forever, daemon=True, name='neon-vidaa-http').start()
                 self._log(f'Локальный сервер Hisense VIDAA запущен: http://{self.pc_ip}:{self.port}/')
+                self._ensure_firewall(tcp_ports=[self.port])
             return {
                 'ok': True,
                 'port': self.port,
@@ -2468,6 +2993,10 @@ class HisensePortalServer:
             base = self.ensure_started(tv_ip=tv_ip, alem_portal=alem_portal)
             self.warnings = []
             handler_cls = self._make_handler()
+            self._ensure_firewall(
+                tcp_ports=[p for p in (self.port, https_port, http80_port) if p > 0],
+                udp_ports=[p for p in (dns_port,) if p > 0],
+            )
 
             if self._dns_server is None:
                 try:
@@ -2476,8 +3005,18 @@ class HisensePortalServer:
                     self._dns_server = dns
                     self._log(f'DNS-мост vidaahub.com запущен (UDP :{self.dns_port} -> {self.pc_ip})')
                 except OSError as e:
+                    hosts_note = ''
+                    if os.name == 'nt' and dns_port == 53:
+                        ok_h, info_h = _hosts_set_vidaahub(self.pc_ip)
+                        if ok_h:
+                            self._hosts_active = True
+                            hosts_note = (
+                                f' Записан временный маршрут vidaahub.com -> {self.pc_ip} в hosts ПК '
+                                f'(работает, если общий доступ ICS перенаправляет DNS через этот ПК).'
+                            )
                     self.warnings.append(
-                        f'Не удалось занять UDP:{dns_port} ({e}). Запустите от администратора или направьте vidaahub.com -> {self.pc_ip} на роутере.'
+                        f'Не удалось занять UDP:{dns_port} ({e} — обычно порт занят Windows ICS / общим интернетом). '
+                        f'Для простого запуска без DNS используйте прямую ссылку http://{self.pc_ip}:{self.port}/ в браузере ТВ.{hosts_note}'
                     )
 
             if self._https_server is None:
@@ -2492,8 +3031,7 @@ class HisensePortalServer:
                         with open(kp, 'wb') as f:
                             f.write(key_pem)
                         ctx.load_cert_chain(cp, kp)
-                    srv_tls = ThreadingHTTPServer(('0.0.0.0', https_port), handler_cls)
-                    srv_tls.daemon_threads = True
+                    srv_tls = _VidaaHTTPServer(('0.0.0.0', https_port), handler_cls)
                     srv_tls.socket = ctx.wrap_socket(srv_tls.socket, server_side=True)
                     self.https_port = srv_tls.server_address[1]
                     self._https_server = srv_tls
@@ -2508,8 +3046,7 @@ class HisensePortalServer:
 
             if self._http80_server is None and http80_port:
                 try:
-                    srv80 = ThreadingHTTPServer(('0.0.0.0', http80_port), handler_cls)
-                    srv80.daemon_threads = True
+                    srv80 = _VidaaHTTPServer(('0.0.0.0', http80_port), handler_cls)
                     self._http80_server = srv80
                     threading.Thread(
                         target=srv80.serve_forever, daemon=True, name='neon-vidaahub-http80'
@@ -2521,6 +3058,7 @@ class HisensePortalServer:
             base.update({
                 'vidaahub_running': self.vidaahub_running,
                 'vidaahub_url': 'https://vidaahub.com/',
+                'hosts_fallback': self._hosts_active,
                 'dns_port': self.dns_port,
                 'https_port': self.https_port,
                 'warnings': list(self.warnings),
@@ -2541,6 +3079,9 @@ class HisensePortalServer:
             if self._dns_server is not None:
                 self._dns_server.stop()
                 self._dns_server = None
+            if self._hosts_active:
+                _hosts_clear_vidaahub()
+                self._hosts_active = False
             self.port = 0
             self.https_port = 0
             self.dns_port = 0

@@ -205,7 +205,7 @@ class Api:
             'hisense_ip': '192.168.1.102',
             'hisense_auth_profile': 'auto',
             'hisense_alem_portal': ALEMTV_DEFAULT_PORTAL,
-            'hisense_alem_mode': 'data_url',
+            'hisense_alem_mode': 'lan_server',
             'hisense_callback_mode': 'data_url',
             'hisense_callback_custom_url': '',
             'hisense_belet_mode': 'lan_server',
@@ -4735,6 +4735,7 @@ class Api:
             'portal_url': self._hisense_portal.base_url(host) if self._hisense_portal.running else '',
             'vidaahub_running': self._hisense_portal.vidaahub_running,
             'pc_ip': pc_ip,
+            'last_tv_probe': self._hisense_portal.last_tv_probe,
         }
 
     def start_hisense_pairing(self, ip=None, auth_profile=None):
@@ -4832,6 +4833,8 @@ class Api:
         s = self.load_settings()
         clean_mode = str(mode or s.get('hisense_belet_mode') or 'lan_server').strip().lower()
         url = str(target_url if target_url is not None else s.get('hisense_belet_url') or 'https://belet.tm/').strip()
+        if clean_mode == 'tv_flash':
+            return self.open_hisense_portal_on_tv(host)
         preset = hisense_vidaa.APP_PRESETS['belet']
         try:
             app_url = self._resolve_hisense_belet_url(host, clean_mode, url)
@@ -4840,15 +4843,15 @@ class Api:
             return {'ok': False, 'error': str(exc)}
 
     def _resolve_hisense_alemtv_url(self, host, target_url, mode):
-        clean_mode = (mode or 'data_url').strip().lower()
+        clean_mode = (mode or 'lan_server').strip().lower()
         portal = (target_url or ALEMTV_DEFAULT_PORTAL).strip()
         if clean_mode == 'portal_url':
             return portal
-        if clean_mode == 'lan_server':
-            self._hisense_portal.ensure_started(tv_ip=host, alem_portal=portal)
-            q = urllib.parse.urlencode({'portal': portal})
-            return f"{self._hisense_portal.base_url(host)}/apps/alemtv?{q}"
-        return build_alemtv_vidaa_data_url(default_portal=portal)
+        if clean_mode == 'data_url':
+            return build_alemtv_vidaa_data_url(default_portal=portal)
+        self._hisense_portal.ensure_started(tv_ip=host, alem_portal=portal)
+        q = urllib.parse.urlencode({'portal': portal})
+        return f"{self._hisense_portal.base_url(host)}/apps/alemtv?{q}"
 
     def install_hisense_alemtv(self, ip=None, target_url=None, mode=None, launch=True):
         host = self._resolve_hisense_ip(ip)
@@ -4856,7 +4859,7 @@ class Api:
             return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
         s = self.load_settings()
         portal = str(target_url or s.get('hisense_alem_portal') or ALEMTV_DEFAULT_PORTAL).strip()
-        clean_mode = str(mode or s.get('hisense_alem_mode') or 'data_url').strip().lower()
+        clean_mode = str(mode or s.get('hisense_alem_mode') or 'lan_server').strip().lower()
         self.save_settings({'hisense_ip': host, 'hisense_alem_portal': portal, 'hisense_alem_mode': clean_mode})
 
         if clean_mode == 'tv_flash':
@@ -4887,7 +4890,9 @@ class Api:
             return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
         s = self.load_settings()
         portal = str(target_url or s.get('hisense_alem_portal') or ALEMTV_DEFAULT_PORTAL).strip()
-        clean_mode = str(mode or s.get('hisense_alem_mode') or 'data_url').strip().lower()
+        clean_mode = str(mode or s.get('hisense_alem_mode') or 'lan_server').strip().lower()
+        if clean_mode == 'tv_flash':
+            return self.open_hisense_portal_on_tv(host, alem_portal=portal)
         app_url = self._resolve_hisense_alemtv_url(host, portal, clean_mode)
         try:
             return self._hisense_ctrl.launch_app(host, ALEMTV_VIDAA_ID, 'Alem TV', app_url)
@@ -4947,6 +4952,8 @@ class Api:
         s = self.load_settings()
         clean_mode = str(mode or s.get('hisense_callback_mode') or 'data_url').strip().lower()
         c_url = str(custom_url if custom_url is not None else s.get('hisense_callback_custom_url') or '').strip()
+        if clean_mode == 'tv_flash':
+            return self.open_hisense_portal_on_tv(host)
         try:
             app_url = self._resolve_hisense_callback_url(host, clean_mode, c_url)
             return self._hisense_ctrl.launch_app(
@@ -5023,15 +5030,24 @@ class Api:
         )
         if not info.get('ok'):
             return info
-        target_url = 'https://vidaahub.com/' if (use_vidaahub and info.get('vidaahub_running')) else info['url']
+        can_vidaahub_on_tv = bool(use_vidaahub and info.get('dns_port') and info.get('https_port'))
+        target_url = 'https://vidaahub.com/' if can_vidaahub_on_tv else info['url']
         launched = False
         sess = self._hisense_store.get(host) if host else None
         if host and sess and sess.is_paired:
             try:
-                self._hisense_ctrl.launch_app(host, 'neon.vidaa.installer', 'NEON Installer', target_url)
-                launched = True
+                res = self._hisense_ctrl.open_browser_url(host, target_url)
+                launched = bool(res.get('ok'))
+                if not launched:
+                    err = res.get('error') or 'Браузер не запустился'
+                    info['launch_error'] = err
+                    self._hisense_log(
+                        f'Не удалось авто-открыть портал на ТВ {host} ({err}). Откройте {target_url} в браузере ТВ вручную.'
+                    )
             except Exception as exc:
-                self._hisense_log(f'Не удалось авто-открыть портал на ТВ {host}: {exc}')
+                self._hisense_log(
+                    f'Не удалось авто-открыть портал на ТВ {host}: {exc}. Откройте {target_url} в браузере ТВ вручную.'
+                )
         info['mode'] = 'tv_flash'
         info['portal_url'] = target_url
         info['launched'] = launched

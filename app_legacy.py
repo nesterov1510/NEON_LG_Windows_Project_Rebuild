@@ -1476,9 +1476,9 @@ class NeonWindow(QMainWindow):
         self.his_lbl_alem_mode = QLabel()
         self.his_lbl_alem_mode.setObjectName('FieldLabel')
         self.his_alem_mode_combo = QComboBox()
+        self.his_alem_mode_combo.addItem('Локальный сервер NEON (LAN · Рекомендуется)', 'lan_server')
+        self.his_alem_mode_combo.addItem('TV Flash / Браузер ТВ (Открыть / Память ТВ)', 'tv_flash')
         self.his_alem_mode_combo.addItem('Offline Data URI (Без ПК / HTML5)', 'data_url')
-        self.his_alem_mode_combo.addItem('TV Flash / Браузер ТВ (Память ТВ)', 'tv_flash')
-        self.his_alem_mode_combo.addItem('Локальный сервер NEON (LAN)', 'lan_server')
         self.his_alem_mode_combo.addItem('Прямой URL портала', 'portal_url')
         l3.addWidget(self.his_lbl_alem_mode)
         l3.addWidget(self.his_alem_mode_combo)
@@ -2645,7 +2645,7 @@ class NeonWindow(QMainWindow):
             self.his_alem_combo.setCurrentIndex(self.his_alem_combo.count() - 1)
             self.his_alem_custom.setText(saved_ha_portal)
             self.his_alem_custom.setVisible(True)
-        ham_idx = self.his_alem_mode_combo.findData(str(self.settings.get('hisense_alem_mode') or 'data_url'))
+        ham_idx = self.his_alem_mode_combo.findData(str(self.settings.get('hisense_alem_mode') or 'lan_server'))
         if ham_idx >= 0:
             self.his_alem_mode_combo.setCurrentIndex(ham_idx)
         hcb_idx = self.his_cb_mode_combo.findData(str(self.settings.get('hisense_callback_mode') or 'data_url'))
@@ -4391,18 +4391,57 @@ class NeonWindow(QMainWindow):
         self._refresh_hisense_status_ui()
         self.toast.show_toast('Сессия Hisense удалена' if self.lang == 'ru' else 'Hisense pairing cleared', 'info')
 
+    def _his_report_install(self, app_label, r):
+        self._refresh_hisense_status_ui()
+        if not isinstance(r, dict):
+            return
+        for w in (r.get('warnings') or []):
+            self.log('[!] ' + w, 'bad')
+        if not r.get('ok'):
+            return
+        if r.get('mode') == 'tv_flash':
+            msg = (
+                ('Установщик открыт в браузере ТВ!' if self.lang == 'ru' else 'Installer opened in TV Browser!')
+                if r.get('launched')
+                else (('Откройте в браузере ТВ: ' if self.lang == 'ru' else 'Open in TV Browser: ') + str(r.get('portal_url', '')))
+            )
+            self.toast.show_toast(msg, 'info')
+            return
+        if r.get('status') == 'sent_unconfirmed':
+            if r.get('browser_opened'):
+                self.toast.show_toast(
+                    f'{app_label}: открыто через браузер ТВ (плитка не подтверждена)'
+                    if self.lang == 'ru' else f'{app_label}: opened in TV Browser (tile unconfirmed)',
+                    'info',
+                )
+            else:
+                self.toast.show_toast(
+                    f'{app_label}: команда отправлена, но ТВ не добавил плитку — откройте установщик на ТВ'
+                    if self.lang == 'ru' else f'{app_label}: sent, but TV did not confirm tile — open TV Installer',
+                    'warn',
+                )
+            return
+        self.toast.show_toast(
+            f'{app_label} установлен на Hisense!' if self.lang == 'ru' else f'{app_label} installed on Hisense!',
+            'info',
+        )
+
+    def _his_report_launch(self, r):
+        self._refresh_hisense_status_ui()
+        if isinstance(r, dict) and r.get('ok') and r.get('browser_opened'):
+            self.toast.show_toast(
+                'Открыто в браузере ТВ!' if self.lang == 'ru' else 'Opened in TV Browser!',
+                'info',
+            )
+
     def his_install_belet(self):
         ip = self.his_ip.text().strip()
         mode = self.his_belet_mode_combo.currentData() or 'lan_server'
         url = self.his_belet_url.text().strip() or 'https://belet.tm/'
-        def done(r):
-            self._refresh_hisense_status_ui()
-            if r.get('ok'):
-                self.toast.show_toast('Belet установлен на Hisense!' if self.lang == 'ru' else 'Belet installed on Hisense!', 'info')
         self._run_async(
             'his',
             lambda: self.api.install_hisense_belet(ip, mode=mode, target_url=url, launch=True),
-            done,
+            lambda r: self._his_report_install('Belet', r),
             'Установка Belet',
         )
 
@@ -4410,39 +4449,41 @@ class NeonWindow(QMainWindow):
         ip = self.his_ip.text().strip()
         mode = self.his_belet_mode_combo.currentData() or 'lan_server'
         url = self.his_belet_url.text().strip() or 'https://belet.tm/'
-        self._run_async('his', lambda: self.api.launch_hisense_belet(ip, mode=mode, target_url=url))
+        self._run_async('his', lambda: self.api.launch_hisense_belet(ip, mode=mode, target_url=url), self._his_report_launch)
 
     def his_install_alemtv(self):
         ip = self.his_ip.text().strip()
         portal = self._selected_his_alem_portal()
-        mode = self.his_alem_mode_combo.currentData() or 'data_url'
-        def done(r):
-            self._refresh_hisense_status_ui()
-            if r.get('ok'):
-                self.toast.show_toast('Alem TV отправлен на Hisense!' if self.lang == 'ru' else 'Alem TV installed on Hisense!', 'info')
-        self._run_async('his', lambda: self.api.install_hisense_alemtv(ip, target_url=portal, mode=mode, launch=True), done, 'Установка Alem TV')
+        mode = self.his_alem_mode_combo.currentData() or 'lan_server'
+        self._run_async(
+            'his',
+            lambda: self.api.install_hisense_alemtv(ip, target_url=portal, mode=mode, launch=True),
+            lambda r: self._his_report_install('Alem TV', r),
+            'Установка Alem TV',
+        )
 
     def his_launch_alemtv(self):
         ip = self.his_ip.text().strip()
         portal = self._selected_his_alem_portal()
-        mode = self.his_alem_mode_combo.currentData() or 'data_url'
-        self._run_async('his', lambda: self.api.launch_hisense_alemtv(ip, target_url=portal, mode=mode))
+        mode = self.his_alem_mode_combo.currentData() or 'lan_server'
+        self._run_async('his', lambda: self.api.launch_hisense_alemtv(ip, target_url=portal, mode=mode), self._his_report_launch)
 
     def his_install_callback(self):
         ip = self.his_ip.text().strip()
         mode = self.his_cb_mode_combo.currentData() or 'data_url'
         c_url = self.his_cb_custom_url.text().strip()
-        def done(r):
-            self._refresh_hisense_status_ui()
-            if r.get('ok'):
-                self.toast.show_toast('MSB Callback установлен на Hisense!' if self.lang == 'ru' else 'MSB Callback installed!', 'info')
-        self._run_async('his', lambda: self.api.install_hisense_callback(ip, mode=mode, custom_url=c_url, launch=True), done, 'Установка MSB Callback')
+        self._run_async(
+            'his',
+            lambda: self.api.install_hisense_callback(ip, mode=mode, custom_url=c_url, launch=True),
+            lambda r: self._his_report_install('MSB Callback', r),
+            'Установка MSB Callback',
+        )
 
     def his_launch_callback(self):
         ip = self.his_ip.text().strip()
         mode = self.his_cb_mode_combo.currentData() or 'data_url'
         c_url = self.his_cb_custom_url.text().strip()
-        self._run_async('his', lambda: self.api.launch_hisense_callback(ip, mode=mode, custom_url=c_url))
+        self._run_async('his', lambda: self.api.launch_hisense_callback(ip, mode=mode, custom_url=c_url), self._his_report_launch)
 
     def his_install_custom(self):
         ip = self.his_ip.text().strip()
@@ -4453,7 +4494,7 @@ class NeonWindow(QMainWindow):
         self._run_async(
             'his',
             lambda: self.api.install_hisense_custom_app(ip, app_id=app_id, title=title, url=url, icon_url=icon, launch=True),
-            lambda r: self.toast.show_toast('Приложение установлено на Hisense!' if self.lang == 'ru' else 'Custom app installed!', 'info') if r.get('ok') else None,
+            lambda r: self._his_report_install(title or 'App', r),
             'Установка приложения',
         )
 
@@ -4462,7 +4503,7 @@ class NeonWindow(QMainWindow):
         app_id = self.his_custom_id.text().strip()
         title = self.his_custom_title.text().strip()
         url = self.his_custom_url.text().strip()
-        self._run_async('his', lambda: self.api.launch_hisense_app(ip, app_id=app_id, title=title, url=url))
+        self._run_async('his', lambda: self.api.launch_hisense_app(ip, app_id=app_id, title=title, url=url), self._his_report_launch)
 
     def his_list_apps(self):
         ip = self.his_ip.text().strip()
@@ -4486,6 +4527,7 @@ class NeonWindow(QMainWindow):
         self._run_async(
             'his',
             lambda: self.api.launch_hisense_app(ip, app_id=data.get('appId', ''), title=data.get('name', ''), url=data.get('url', '')),
+            self._his_report_launch,
         )
 
     def his_start_portal(self, vidaahub=False):
@@ -4507,6 +4549,8 @@ class NeonWindow(QMainWindow):
         portal = self._selected_his_alem_portal()
         def done(r):
             self._refresh_hisense_status_ui()
+            for w in (r.get('warnings') or []):
+                self.log('[!] ' + w, 'bad')
             if r.get('ok'):
                 msg = (
                     'Установщик открыт на ТВ!' if r.get('launched')
