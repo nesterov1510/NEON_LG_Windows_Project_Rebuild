@@ -7,6 +7,22 @@ from urllib.parse import parse_qsl, urlsplit
 ADAPTER = 'NEON-VLESS'
 
 
+_TUN_ROUTE_EXCLUDES = [
+    '10.0.0.0/8',
+    '169.254.0.0/16',
+    '172.16.0.0/15',
+    '172.18.0.0/16',
+    '172.20.0.0/14',
+    '172.24.0.0/13',
+    '192.168.0.0/16',
+    '224.0.0.0/4',
+    '255.255.255.255/32',
+    'fc00::/7',
+    'fe80::/10',
+    'ff00::/8',
+]
+
+
 def configuration(link):
     # Never include user input in exceptions: the UUID is a credential.
     try:
@@ -56,7 +72,8 @@ def configuration(link):
         outbound['transport'] = {'type': 'grpc', 'service_name': q.get('serviceName', '')}
     return {'log': {'level': 'info'},
             'inbounds': [{'type': 'tun', 'interface_name': ADAPTER, 'auto_route': True, 'strict_route': True,
-                          'address': ['172.19.0.1/30', 'fdfe:dcba:9876::1/126']}],
+                          'address': ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
+                          'route_exclude_address': list(_TUN_ROUTE_EXCLUDES)}],
             'outbounds': [outbound],
             'dns': {'servers': [{'type': 'local', 'tag': 'bootstrap'},
                                 {'type': 'tcp', 'tag': 'tunnel-dns', 'server': '1.1.1.1', 'detour': 'vpn'}],

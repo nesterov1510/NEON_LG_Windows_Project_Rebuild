@@ -1633,11 +1633,16 @@ class NeonWindow(QMainWindow):
         self.btn_his_portal_open_tv.setObjectName('PrimaryBtn')
         self.btn_his_portal_open_tv.setCursor(Qt.PointingHandCursor)
         self.btn_his_portal_open_tv.clicked.connect(self.his_open_portal_on_tv)
+        self.btn_his_portal_diag = QPushButton()
+        self.btn_his_portal_diag.setObjectName('NormalBtn')
+        self.btn_his_portal_diag.setCursor(Qt.PointingHandCursor)
+        self.btn_his_portal_diag.clicked.connect(self.his_diagnose_portal)
         self.btn_his_portal_stop = QPushButton()
         self.btn_his_portal_stop.setObjectName('DangerBtn')
         self.btn_his_portal_stop.setCursor(Qt.PointingHandCursor)
         self.btn_his_portal_stop.clicked.connect(self.his_stop_portal)
         pt_row2.addWidget(self.btn_his_portal_open_tv, 2)
+        pt_row2.addWidget(self.btn_his_portal_diag, 1)
         pt_row2.addWidget(self.btn_his_portal_stop, 1)
         l6.addLayout(pt_row2)
         left.addWidget(c6)
@@ -2403,6 +2408,7 @@ class NeonWindow(QMainWindow):
         self.btn_his_portal_start.setText(self.t('his_btn_portal_start'))
         self.btn_his_portal_vidaahub.setText(self.t('his_btn_portal_vidaahub'))
         self.btn_his_portal_open_tv.setText(self.t('his_btn_portal_open_tv'))
+        self.btn_his_portal_diag.setText(self.t('his_btn_portal_diag'))
         self.btn_his_portal_stop.setText(self.t('his_btn_portal_stop'))
 
         self.kpi_his_tv.lbl.setText(self.t('his_kpi_tv'))
@@ -4288,18 +4294,25 @@ class NeonWindow(QMainWindow):
 
         if st.get('portal_running'):
             purl = st.get('portal_url') or ''
+            surl = st.get('short_url') or ''
             vh = st.get('vidaahub_running')
             self.kpi_his_portal.set_data(
                 'VIDAAHUB + LAN' if vh else 'LAN ACTIVE',
                 '#5ef2a0',
-                'https://vidaahub.com' if vh else purl,
+                'https://vidaahub.com' if vh else (surl or purl),
             )
-            self.his_portal_status_lbl.setText(
-                f'LAN: {purl}' + ('\nvidaahub.com: https://vidaahub.com (DNS -> ' + str(st.get('pc_ip')) + ')' if vh else '')
-            )
+            lan_txt = f'LAN: {surl}  |  {purl}' if surl else f'LAN: {purl}'
+            alts = st.get('alt_ips') or []
+            if alts:
+                lan_txt += '\nAlt IP: ' + ', '.join(alts)
+            if vh:
+                lan_txt += '\nvidaahub.com: https://vidaahub.com (DNS -> ' + str(st.get('pc_ip')) + ')'
+            self.his_portal_status_lbl.setText(lan_txt)
         else:
             self.kpi_his_portal.set_data(self.t('his_kpi_portal_idle'), '#8fa4b2', 'HTTP / vidaahub')
-            self.his_portal_status_lbl.setText(f"PC IP: {st.get('pc_ip', '192.168.1.x')}")
+            alts = st.get('alt_ips') or []
+            alt_note = (' · Alt: ' + ', '.join(alts)) if alts else ''
+            self.his_portal_status_lbl.setText(f"PC IP: {st.get('pc_ip', '192.168.1.x')}{alt_note}")
         self._sync_status_badges()
 
     def _on_his_found_selected(self, idx):
@@ -4538,10 +4551,11 @@ class NeonWindow(QMainWindow):
             for w in (r.get('warnings') or []):
                 self.log('[!] ' + w, 'bad')
             if r.get('ok'):
-                self.toast.show_toast(
-                    'Портал Hisense запущен: ' + (r.get('vidaahub_url') if r.get('vidaahub_running') else r.get('url', '')),
-                    'info',
+                shown = (
+                    r.get('vidaahub_url') if r.get('vidaahub_running')
+                    else (r.get('short_url') or r.get('url', ''))
                 )
+                self.toast.show_toast('Портал Hisense запущен: ' + str(shown), 'info')
         self._run_async('his', lambda: self.api.start_hisense_portal_server(ip, start_vidaahub=vidaahub, alem_portal=portal), done, 'Запуск установщика VIDAA')
 
     def his_open_portal_on_tv(self):
@@ -4554,10 +4568,26 @@ class NeonWindow(QMainWindow):
             if r.get('ok'):
                 msg = (
                     'Установщик открыт на ТВ!' if r.get('launched')
-                    else ('Откройте в браузере ТВ: ' + str(r.get('portal_url', '')))
+                    else ('Откройте в браузере ТВ: ' + str(r.get('short_url') or r.get('portal_url', '')))
                 )
                 self.toast.show_toast(msg, 'info')
         self._run_async('his', lambda: self.api.open_hisense_portal_on_tv(ip, alem_portal=portal), done, 'Открытие на ТВ')
+
+    def his_diagnose_portal(self):
+        ip = self.his_ip.text().strip()
+        def done(r):
+            self._refresh_hisense_status_ui()
+            if isinstance(r, dict):
+                issues = r.get('issues') or []
+                if issues:
+                    self.toast.show_toast(issues[0], 'warn')
+                else:
+                    urls = ' · '.join(r.get('urls') or [])
+                    self.toast.show_toast(
+                        ('Портал готов: ' + urls) if self.lang == 'ru' else ('Portal ready: ' + urls),
+                        'info',
+                    )
+        self._run_async('his', lambda: self.api.diagnose_hisense_connection(ip), done, 'Диагностика сети Hisense')
 
     def his_stop_portal(self):
         self.api.stop_hisense_portal_server()

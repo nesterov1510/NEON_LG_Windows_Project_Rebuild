@@ -135,24 +135,88 @@ def default_data_dir() -> str:
     return d
 
 
-def get_local_ip_for_tv(tv_ip: str | None = None) -> str:
-    target = (tv_ip or '').strip() or '8.8.8.8'
+_VPN_TUN_IPS = frozenset({'172.19.0.1'})
+
+
+def _probe_udp_source_ip(target_ip: str) -> str:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.connect((target, 36669))
-        ip = sock.getsockname()[0]
-        if ip and not ip.startswith('127.'):
-            return ip
+        sock.connect((target_ip, 36669))
+        return sock.getsockname()[0] or ''
     except OSError:
-        pass
+        return ''
     finally:
         sock.close()
+
+
+def _is_usable_lan_ip(ip: str) -> bool:
+    clean = (ip or '').strip()
+    if not clean or clean == '0.0.0.0':
+        return False
+    return not (clean.startswith('127.') or clean.startswith('169.254.'))
+
+
+def list_local_ipv4_addresses() -> list[str]:
+    """Return local non-loopback/non-APIPA IPv4 addresses sorted with LAN/ICS first."""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(ip: str) -> None:
+        clean = (ip or '').strip()
+        if not _is_usable_lan_ip(clean) or clean in seen:
+            return
+        seen.add(clean)
+        found.append(clean)
+
+    for probe in ('192.168.137.2', '192.168.1.254', '192.168.0.254', '10.0.0.1', '8.8.8.8'):
+        _add(_probe_udp_source_ip(probe))
+
     try:
-        ip = socket.gethostbyname(socket.gethostname())
-        if ip and not ip.startswith('127.'):
-            return ip
+        for item in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            _add(item[4][0])
     except OSError:
         pass
+    try:
+        _add(socket.gethostbyname(socket.gethostname()))
+    except OSError:
+        pass
+
+    def _rank(ip: str) -> tuple[int, str]:
+        if ip == '192.168.137.1':
+            return (0, ip)
+        if ip in _VPN_TUN_IPS:
+            return (4, ip)
+        if ip.startswith('192.168.'):
+            return (1, ip)
+        if ip.startswith('10.') or ip.startswith('172.'):
+            return (2, ip)
+        return (3, ip)
+
+    return sorted(found, key=_rank)
+
+
+def get_local_ip_for_tv(tv_ip: str | None = None) -> str:
+    clean_tv = (tv_ip or '').strip()
+    cands = list_local_ipv4_addresses()
+    if clean_tv and not clean_tv.startswith('127.'):
+        parts = clean_tv.split('.')
+        if len(parts) == 4:
+            prefix = '.'.join(parts[:3]) + '.'
+            for ip in cands:
+                if ip.startswith(prefix) and ip not in _VPN_TUN_IPS:
+                    return ip
+        direct = _probe_udp_source_ip(clean_tv)
+        if _is_usable_lan_ip(direct) and direct not in _VPN_TUN_IPS:
+            return direct
+    for ip in cands:
+        if ip not in _VPN_TUN_IPS:
+            return ip
+    if cands:
+        return cands[0]
+    if not clean_tv:
+        fallback = _probe_udp_source_ip('8.8.8.8')
+        if _is_usable_lan_ip(fallback):
+            return fallback
     return '127.0.0.1'
 
 
@@ -864,10 +928,15 @@ def _ssdp_location(packet: bytes) -> str | None:
 def _directed_broadcasts() -> list[str]:
     targets = [SSDP_BROADCAST, SSDP_MULTICAST]
     try:
-        local = get_local_ip_for_tv(None)
-        parts = local.split('.')
-        if len(parts) == 4:
-            targets.insert(0, f'{parts[0]}.{parts[1]}.{parts[2]}.255')
+        locals_list = list_local_ipv4_addresses() or [get_local_ip_for_tv(None)]
+        bcasts = []
+        for local in locals_list:
+            if local in _VPN_TUN_IPS:
+                continue
+            parts = local.split('.')
+            if len(parts) == 4:
+                bcasts.append(f'{parts[0]}.{parts[1]}.{parts[2]}.255')
+        targets = bcasts + targets
     except Exception:
         pass
     return list(dict.fromkeys(targets))
@@ -2318,6 +2387,7 @@ class _VidaaHTTPServer(ThreadingHTTPServer):
     """ThreadingHTTPServer that disables SO_REUSEADDR on Windows to prevent silent port hijack."""
     allow_reuse_address = (os.name != 'nt')
     daemon_threads = True
+    request_queue_size = 32
 
 
 def _default_windows_hosts_path() -> str:
@@ -2410,12 +2480,91 @@ def _hosts_clear_vidaahub(hosts_path: str | None = None) -> bool:
         return False
 
 
+def _inspect_windows_firewall_and_unblock(exe_path: str = '') -> dict:
+    """Inspect Windows Firewall profiles/admin state & remove any inbound Block rules for NEON exe."""
+    info: dict = {
+        'admin': True,
+        'removed_blocks': [],
+        'profiles': {},
+        'net': [],
+        'warnings': [],
+    }
+    if os.name != 'nt':
+        return info
+    cflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    env = os.environ.copy()
+    clean_exe = os.path.abspath(exe_path or sys.executable or '')
+    env['NEON_FW_EXE'] = clean_exe if os.path.exists(clean_exe) else ''
+    script = (
+        "$ErrorActionPreference='SilentlyContinue'; "
+        "$exe=$env:NEON_FW_EXE; "
+        "$isAdm=([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent())"
+        ".IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); "
+        "$removed=@(); "
+        "if($exe){ "
+        "Get-NetFirewallApplicationFilter -Program $exe | ForEach-Object { "
+        "$r = $_ | Get-NetFirewallRule; "
+        "if($r -and $r.Direction -eq 'Inbound' -and $r.Action -eq 'Block'){ "
+        "$removed += [string]$r.DisplayName; "
+        "$r | Remove-NetFirewallRule "
+        "} } }; "
+        "$profs=@{}; "
+        "Get-NetFirewallProfile | ForEach-Object { "
+        "$profs[[string]$_.Name]=@{enabled=[bool]$_.Enabled;allowInbound=[bool]$_.AllowInboundRules;defaultInbound=[string]$_.DefaultInboundAction} "
+        "}; "
+        "$cats=@(); "
+        "Get-NetConnectionProfile | ForEach-Object { "
+        "$cats += @{iface=[string]$_.InterfaceAlias;cat=[string]$_.NetworkCategory;idx=[int]$_.InterfaceIndex} "
+        "}; "
+        "@{admin=[bool]$isAdm;removed=$removed;profiles=$profs;net=$cats} | ConvertTo-Json -Compress -Depth 4"
+    )
+    try:
+        res = subprocess.run(
+            ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
+            timeout=8, creationflags=cflags, env=env,
+        )
+        raw = (res.stdout or '').strip()
+        if res.returncode == 0 and raw.startswith('{'):
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                info['admin'] = bool(parsed.get('admin', True))
+                rem = parsed.get('removed') or []
+                if isinstance(rem, str):
+                    rem = [rem]
+                info['removed_blocks'] = [str(x) for x in rem if x]
+                if isinstance(parsed.get('profiles'), dict):
+                    info['profiles'] = parsed['profiles']
+                net = parsed.get('net') or []
+                if isinstance(net, dict):
+                    net = [net]
+                info['net'] = net
+    except Exception:
+        pass
+
+    if not info['admin']:
+        info['warnings'].append(
+            'NEON запущен без прав администратора — Брандмауэр Windows и порт :80 могут блокировать подключение ТВ (ERR_CONNECTION_TIMED_OUT).'
+        )
+
+    for pname in ('Public', 'Private'):
+        p = info['profiles'].get(pname)
+        if isinstance(p, dict) and p.get('enabled') and p.get('allowInbound') is False:
+            net_ru = 'Общедоступная сеть (Public)' if pname == 'Public' else 'Частная сеть (Private)'
+            info['warnings'].append(
+                f'Брандмауэр Windows ({net_ru}): включено «Блокировать все входящие подключения» (AllowInboundRules=False) — '
+                f'это вызывает ERR_CONNECTION_TIMED_OUT на ТВ даже при наличии разрешающих правил. '
+                f'Отключите эту галочку в Безопасности Windows → Брандмауэр и защита сети → {net_ru}.'
+            )
+    return info
+
+
 def _ensure_windows_firewall_rules(tcp_ports: list[int] | tuple[int, ...] = (), udp_ports: list[int] | tuple[int, ...] = ()) -> tuple[bool, str]:
-    """Ensure idempotent Windows Firewall allow rules (profile=any) for NEON VIDAA ports & app."""
+    """Ensure clean, fresh Windows Firewall allow rules (all profiles + edge=yes) for NEON VIDAA."""
     if os.name != 'nt':
         return False, 'not windows'
     cflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-    cmds: list[tuple[str, list[str]]] = []
+    cmds: list[tuple[str, list[str], list[str] | None]] = []
 
     exe_path = os.path.abspath(sys.executable or '')
     if exe_path and os.path.exists(exe_path):
@@ -2424,7 +2573,10 @@ def _ensure_windows_firewall_rules(tcp_ports: list[int] | tuple[int, ...] = (), 
             rule_app,
             ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
              f'name={rule_app}', 'dir=in', 'action=allow',
-             f'program={exe_path}', 'enable=yes', 'profile=any'],
+             f'program={exe_path}', 'enable=yes', 'profile=private,public,domain', 'edge=yes'],
+            ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
+             f'name={rule_app}', 'dir=in', 'action=allow',
+             f'program={exe_path}', 'enable=yes', 'profile=private,public,domain'],
         ))
 
     for port in sorted({int(p) for p in tcp_ports if int(p) > 0}):
@@ -2433,7 +2585,10 @@ def _ensure_windows_firewall_rules(tcp_ports: list[int] | tuple[int, ...] = (), 
             rname,
             ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
              f'name={rname}', 'dir=in', 'action=allow', 'protocol=TCP',
-             f'localport={port}', 'enable=yes', 'profile=any'],
+             f'localport={port}', 'enable=yes', 'profile=private,public,domain', 'edge=yes'],
+            ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
+             f'name={rname}', 'dir=in', 'action=allow', 'protocol=TCP',
+             f'localport={port}', 'enable=yes', 'profile=private,public,domain'],
         ))
     for port in sorted({int(p) for p in udp_ports if int(p) > 0}):
         rname = f'NEON-VIDAA-UDP-{port}'
@@ -2441,7 +2596,8 @@ def _ensure_windows_firewall_rules(tcp_ports: list[int] | tuple[int, ...] = (), 
             rname,
             ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
              f'name={rname}', 'dir=in', 'action=allow', 'protocol=UDP',
-             f'localport={port}', 'enable=yes', 'profile=any'],
+             f'localport={port}', 'enable=yes', 'profile=private,public,domain'],
+            None,
         ))
 
     if not cmds:
@@ -2449,16 +2605,22 @@ def _ensure_windows_firewall_rules(tcp_ports: list[int] | tuple[int, ...] = (), 
 
     any_ok = False
     errors: list[str] = []
-    for rname, add_cmd in cmds:
+    for rname, add_cmd, fallback_cmd in cmds:
         try:
-            chk = subprocess.run(
-                ['netsh', 'advfirewall', 'firewall', 'show', 'rule', f'name={rname}'],
-                capture_output=True, text=True, timeout=5, creationflags=cflags,
+            subprocess.run(
+                ['netsh', 'advfirewall', 'firewall', 'delete', 'rule', f'name={rname}'],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=6, creationflags=cflags,
             )
-            if chk.returncode == 0 and rname in (chk.stdout or ''):
-                any_ok = True
-                continue
-            res = subprocess.run(add_cmd, capture_output=True, text=True, timeout=8, creationflags=cflags)
+            res = subprocess.run(
+                add_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=8, creationflags=cflags,
+            )
+            if res.returncode != 0 and fallback_cmd is not None:
+                res = subprocess.run(
+                    fallback_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace',
+                    timeout=8, creationflags=cflags,
+                )
             if res.returncode == 0:
                 any_ok = True
             else:
@@ -2472,17 +2634,30 @@ def _ensure_windows_firewall_rules(tcp_ports: list[int] | tuple[int, ...] = (), 
 class HisensePortalServer:
     """Serves tile PNG icons, self-contained HTML5 apps, Belet proxy, and optional vidaahub.com DNS/HTTPS."""
 
-    def __init__(self, log_fn=None, preferred_ports: tuple[int, ...] = _VIDAA_HTTP_PREFERRED_PORTS):
+    def __init__(
+        self,
+        log_fn=None,
+        preferred_ports: tuple[int, ...] = _VIDAA_HTTP_PREFERRED_PORTS,
+        bind_port80: bool | None = None,
+        http80_port: int = 80,
+    ):
         self._log_fn = log_fn or (lambda _m: None)
         self._preferred_ports = tuple(preferred_ports)
+        self._bind_port80 = (os.name == 'nt') if bind_port80 is None else bool(bind_port80)
+        self._http80_port_cfg = int(http80_port or 80)
         self._lock = threading.RLock()
         self._proxy_hosts: set[str] = set()
         self._proxy_lock = threading.Lock()
         self._http_server: ThreadingHTTPServer | None = None
         self._https_server: ThreadingHTTPServer | None = None
         self._http80_server: ThreadingHTTPServer | None = None
+        self._http80_bind_ip: str = ''
+        self._http80_actual_port: int = 0
         self._dns_server: _DnsBridgeServer | None = None
         self._firewall_ports: set[tuple[str, int]] = set()
+        self._firewall_checked: bool = False
+        self._firewall_warnings: list[str] = []
+        self._last_fw_info: dict | None = None
         self._hosts_active: bool = False
         self.last_tv_probe: dict | None = None
         self.port: int = 0
@@ -2923,9 +3098,61 @@ class HisensePortalServer:
 
         return Handler
 
+    @staticmethod
+    def _self_probe_http(host: str, port: int) -> bool:
+        if not host or not port:
+            return False
+        conn = None
+        try:
+            conn = http.client.HTTPConnection(host, int(port), timeout=1.0)
+            conn.request('GET', '/__ping')
+            resp = conn.getresponse()
+            resp.read()
+            return resp.status == 200
+        except Exception:
+            return False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _short_url(self) -> str:
+        if self._http80_server is None or not self._http80_actual_port:
+            return ''
+        if self._http80_actual_port == 80:
+            return f'http://{self.pc_ip}/'
+        return f'http://{self.pc_ip}:{self._http80_actual_port}/'
+
+    def _alt_urls(self) -> list[str]:
+        out: list[str] = []
+        if not self.port:
+            return out
+        for ip in list_local_ipv4_addresses():
+            if ip == self.pc_ip or ip in _VPN_TUN_IPS:
+                continue
+            if self._http80_server is not None and self._http80_actual_port == 80 and self._http80_bind_ip == '0.0.0.0':
+                out.append(f'http://{ip}/')
+            out.append(f'http://{ip}:{self.port}/')
+        return out
+
     def _ensure_firewall(self, tcp_ports: list[int] | tuple[int, ...] = (), udp_ports: list[int] | tuple[int, ...] = ()) -> None:
         if os.name != 'nt':
             return
+        if not self._firewall_checked:
+            self._firewall_checked = True
+            fw = _inspect_windows_firewall_and_unblock()
+            self._last_fw_info = fw
+            if fw.get('removed_blocks'):
+                self._log(
+                    'Брандмауэр Windows: сняты старые блокирующие правила (Block) для NEON: '
+                    + ', '.join(fw['removed_blocks'])
+                )
+            self._firewall_warnings = list(fw.get('warnings') or [])
+            for w in self._firewall_warnings:
+                self._log('[!] ' + w)
+
         new_tcp = [int(p) for p in tcp_ports if int(p) > 0 and ('tcp', int(p)) not in self._firewall_ports]
         new_udp = [int(p) for p in udp_ports if int(p) > 0 and ('udp', int(p)) not in self._firewall_ports]
         if not new_tcp and not new_udp:
@@ -2937,13 +3164,16 @@ class HisensePortalServer:
             for p in new_udp:
                 self._firewall_ports.add(('udp', p))
             self._log(
-                f'Брандмауэр Windows: открыты порты TCP={new_tcp or "-"} UDP={new_udp or "-"} (все профили сети)'
+                f'Брандмауэр Windows: открыты порты TCP={new_tcp or "-"} UDP={new_udp or "-"} (все профили сети + edge=yes)'
             )
         elif info and info != 'not windows':
-            self._log(
-                f'Внимание: не удалось автоматически открыть Брандмауэр Windows ({info}). '
+            msg = (
+                f'Не удалось автоматически открыть Брандмауэр Windows ({info}). '
                 f'Разрешите входящие TCP {new_tcp} в профиле «Общедоступная сеть» или запустите NEON от администратора.'
             )
+            if msg not in self._firewall_warnings:
+                self._firewall_warnings.append(msg)
+            self._log('[!] ' + msg)
 
     def _bind_preferred_http(self, handler_cls) -> _VidaaHTTPServer:
         for port in self._preferred_ports:
@@ -2954,30 +3184,94 @@ class HisensePortalServer:
                 continue
         return _VidaaHTTPServer(('0.0.0.0', 0), handler_cls)
 
+    def _start_http80_if_free(self, handler_cls, port80: int) -> None:
+        if not port80:
+            return
+        if self._http80_server is not None:
+            if self._http80_bind_ip in ('0.0.0.0', self.pc_ip):
+                return
+            try:
+                self._http80_server.shutdown()
+                self._http80_server.server_close()
+            except Exception:
+                pass
+            self._http80_server = None
+            self._http80_bind_ip = ''
+            self._http80_actual_port = 0
+
+        candidates = ['0.0.0.0']
+        if _is_usable_lan_ip(self.pc_ip):
+            candidates.append(self.pc_ip)
+        for bind_ip in candidates:
+            try:
+                srv80 = _VidaaHTTPServer((bind_ip, int(port80)), handler_cls)
+                self._http80_server = srv80
+                self._http80_bind_ip = bind_ip
+                self._http80_actual_port = srv80.server_address[1]
+                threading.Thread(
+                    target=srv80.serve_forever, daemon=True, name='neon-vidaa-http80'
+                ).start()
+                self._log(
+                    f'Дополнительный HTTP :{self._http80_actual_port} ({bind_ip}) активен: '
+                    f'{self._short_url()}'
+                )
+                return
+            except OSError:
+                continue
+
     def ensure_started(self, tv_ip: str | None = None, alem_portal: str | None = None) -> dict:
         with self._lock:
             if alem_portal:
                 self.alem_portal = alem_portal
+            prev_ip = self.pc_ip
             if tv_ip:
                 self.pc_ip = get_local_ip_for_tv(tv_ip)
-            elif not self.pc_ip or self.pc_ip == '127.0.0.1':
+            elif not self.pc_ip or self.pc_ip == '127.0.0.1' or self.pc_ip in _VPN_TUN_IPS:
                 self.pc_ip = get_local_ip_for_tv(None)
+
+            handler_cls = self._make_handler()
+            started_now = False
             if self._http_server is None:
-                srv = self._bind_preferred_http(self._make_handler())
+                srv = self._bind_preferred_http(handler_cls)
                 self.port = srv.server_address[1]
                 self._http_server = srv
                 threading.Thread(target=srv.serve_forever, daemon=True, name='neon-vidaa-http').start()
-                self._log(f'Локальный сервер Hisense VIDAA запущен: http://{self.pc_ip}:{self.port}/')
-                self._ensure_firewall(tcp_ports=[self.port])
+                started_now = True
+
+            if self._bind_port80:
+                self._start_http80_if_free(handler_cls, self._http80_port_cfg)
+
+            fw_tcp = [self.port]
+            if self._http80_actual_port:
+                fw_tcp.append(self._http80_actual_port)
+            elif self._bind_port80 and self._http80_port_cfg:
+                fw_tcp.append(self._http80_port_cfg)
+            self._ensure_firewall(tcp_ports=fw_tcp)
+
+            short = self._short_url()
+            if started_now or self.pc_ip != prev_ip:
+                extra = f' (или коротко: {short})' if short else ''
+                self._log(f'Локальный сервер Hisense VIDAA запущен: http://{self.pc_ip}:{self.port}/{extra}')
+                if self.pc_ip and self.pc_ip != '127.0.0.1' and not self._self_probe_http(self.pc_ip, self.port):
+                    self._log(
+                        f'[!] Самопроверка локального адреса http://{self.pc_ip}:{self.port}/__ping не ответила — '
+                        'возможна блокировка антивирусом/брандмауэром на ПК.'
+                    )
+
+            combined_warnings = list(dict.fromkeys(self._firewall_warnings + self.warnings))
             return {
                 'ok': True,
                 'port': self.port,
+                'port80': self._http80_actual_port,
+                'port80_active': bool(self._http80_server is not None),
                 'pc_ip': self.pc_ip,
                 'url': f'http://{self.pc_ip}:{self.port}/',
+                'short_url': short,
+                'alt_urls': self._alt_urls(),
                 'vidaahub_running': self.vidaahub_running,
                 'dns_port': self.dns_port,
                 'https_port': self.https_port,
-                'warnings': list(self.warnings),
+                'warnings': combined_warnings,
             }
 
     def start_vidaahub_bridge(
@@ -2990,8 +3284,8 @@ class HisensePortalServer:
         http80_port: int = 80,
     ) -> dict:
         with self._lock:
-            base = self.ensure_started(tv_ip=tv_ip, alem_portal=alem_portal)
             self.warnings = []
+            base = self.ensure_started(tv_ip=tv_ip, alem_portal=alem_portal)
             handler_cls = self._make_handler()
             self._ensure_firewall(
                 tcp_ports=[p for p in (self.port, https_port, http80_port) if p > 0],
@@ -3014,9 +3308,10 @@ class HisensePortalServer:
                                 f' Записан временный маршрут vidaahub.com -> {self.pc_ip} в hosts ПК '
                                 f'(работает, если общий доступ ICS перенаправляет DNS через этот ПК).'
                             )
+                    alt_link = self._short_url() or f'http://{self.pc_ip}:{self.port}/'
                     self.warnings.append(
                         f'Не удалось занять UDP:{dns_port} ({e} — обычно порт занят Windows ICS / общим интернетом). '
-                        f'Для простого запуска без DNS используйте прямую ссылку http://{self.pc_ip}:{self.port}/ в браузере ТВ.{hosts_note}'
+                        f'Для простого запуска без DNS используйте прямую ссылку {alt_link} в браузере ТВ.{hosts_note}'
                     )
 
             if self._https_server is None:
@@ -3044,26 +3339,147 @@ class HisensePortalServer:
                         f'Не удалось занять TCP:{https_port} ({e}).'
                     )
 
-            if self._http80_server is None and http80_port:
-                try:
-                    srv80 = _VidaaHTTPServer(('0.0.0.0', http80_port), handler_cls)
-                    self._http80_server = srv80
-                    threading.Thread(
-                        target=srv80.serve_forever, daemon=True, name='neon-vidaahub-http80'
-                    ).start()
-                except OSError:
-                    pass
+            self._start_http80_if_free(handler_cls, http80_port)
 
             self.vidaahub_running = bool(self._dns_server or self._https_server)
+            combined_warnings = list(dict.fromkeys(self._firewall_warnings + self.warnings))
             base.update({
+                'port80': self._http80_actual_port,
+                'port80_active': bool(self._http80_server is not None),
+                'short_url': self._short_url(),
                 'vidaahub_running': self.vidaahub_running,
                 'vidaahub_url': 'https://vidaahub.com/',
                 'hosts_fallback': self._hosts_active,
                 'dns_port': self.dns_port,
                 'https_port': self.https_port,
-                'warnings': list(self.warnings),
+                'warnings': combined_warnings,
             })
             return base
+
+    def diagnose_connection(self, tv_ip: str | None = None) -> dict:
+        """Verify local HTTP binding, Windows Firewall/ICS profile, and PC->TV reachability."""
+        clean_tv = (tv_ip or '').strip()
+        info = self.ensure_started(tv_ip=clean_tv or None)
+        lines: list[str] = []
+        issues: list[str] = []
+
+        all_ips = list_local_ipv4_addresses()
+        lan_ips = [ip for ip in all_ips if ip not in _VPN_TUN_IPS]
+        has_vless = any(ip in _VPN_TUN_IPS for ip in all_ips)
+        has_ics = ('192.168.137.1' in lan_ips)
+
+        lines.append(f'Выбранный IP ПК для ТВ: {self.pc_ip}' + (' (Ethernet ICS)' if self.pc_ip == '192.168.137.1' else ''))
+        if lan_ips:
+            lines.append('Все локальные IPv4 ПК: ' + ', '.join(lan_ips))
+        if has_vless:
+            lines.append('Обнаружен TUN-интерфейс VLESS (172.19.0.1).')
+        if has_ics and clean_tv and not clean_tv.startswith('192.168.137.') and not clean_tv.startswith('127.'):
+            issues.append(
+                f'На ПК активна подсеть Ethernet ICS (192.168.137.1), но IP ТВ указан как {clean_tv}. '
+                'Если ТВ подключён кабелем к ПК, укажите его IP из 192.168.137.x.'
+            )
+
+        urls: list[str] = []
+        if info.get('short_url'):
+            urls.append(info['short_url'])
+        urls.append(info['url'])
+        lines.append('Ссылки установщика: ' + ' | '.join(urls))
+        if info.get('alt_urls'):
+            lines.append('Альтернативные IP ПК: ' + ' | '.join(info['alt_urls']))
+
+        loop_ok = self._self_probe_http('127.0.0.1', self.port)
+        pc_ok = self._self_probe_http(self.pc_ip, self.port) if self.pc_ip else False
+        p80_ok = (
+            self._self_probe_http(self.pc_ip, self._http80_actual_port)
+            if (self._http80_server is not None and self._http80_actual_port) else False
+        )
+        lines.append(
+            f'Самопроверка HTTP: localhost:{self.port}={"OK" if loop_ok else "FAIL"}, '
+            f'{self.pc_ip}:{self.port}={"OK" if pc_ok else "FAIL"}'
+            + (f', {self.pc_ip}:{self._http80_actual_port}={"OK" if p80_ok else "FAIL"}' if self._http80_actual_port else '')
+        )
+        if not loop_ok or not pc_ok:
+            issues.append(
+                f'Локальный HTTP-сервер не отвечает на {self.pc_ip}:{self.port} (возможна блокировка антивирусом/брандмауэром).'
+            )
+
+        tv_mqtt_ok = None
+        if clean_tv:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.5)
+            try:
+                s.connect((clean_tv, MQTT_PORT))
+                tv_mqtt_ok = True
+                lines.append(f'ПК → ТВ ({clean_tv}:{MQTT_PORT}): ДОСТУПЕН')
+            except OSError as exc:
+                tv_mqtt_ok = False
+                lines.append(f'ПК → ТВ ({clean_tv}:{MQTT_PORT}): НЕ ДОСТУПЕН ({exc})')
+                issues.append(f'Нет связи ПК → ТВ {clean_tv}:{MQTT_PORT} ({exc}). Проверьте питание ТВ и IP.')
+            finally:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+
+        fw_info = None
+        if os.name == 'nt':
+            with self._lock:
+                self._firewall_checked = False
+                self._firewall_ports.clear()
+                fw_ports = [self.port] + ([self._http80_actual_port] if self._http80_actual_port else [])
+                self._ensure_firewall(tcp_ports=fw_ports)
+                fw_info = self._last_fw_info or {}
+            lines.append(f'Права администратора: {"ДА" if fw_info.get("admin") else "НЕТ"}')
+            profs = fw_info.get('profiles') or {}
+            prof_parts = []
+            for pname in ('Public', 'Private', 'Domain'):
+                p = profs.get(pname)
+                if isinstance(p, dict):
+                    state = 'ON' if p.get('enabled') else 'OFF'
+                    inb = 'allowRules' if p.get('allowInbound', True) else 'BLOCK-ALL!'
+                    prof_parts.append(f'{pname}={state}/{inb}')
+            if prof_parts:
+                lines.append('Профили Firewall: ' + ', '.join(prof_parts))
+            net_cats = [f'{n.get("iface")}: {n.get("cat")}' for n in (fw_info.get('net') or []) if n.get('iface')]
+            if net_cats:
+                lines.append('Категории сетей: ' + '; '.join(net_cats))
+            for w in self._firewall_warnings:
+                if w not in issues:
+                    issues.append(w)
+
+        if self.last_tv_probe:
+            lines.append(
+                f'Последний запрос от ТВ: {self.last_tv_probe.get("remoteIp")} '
+                f'({self.last_tv_probe.get("model") or "TV"} / {self.last_tv_probe.get("osVersion") or ""})'
+            )
+        else:
+            lines.append('Запросов от браузера ТВ к ПК ещё не поступало.')
+
+        if not issues:
+            lines.append(
+                'Если при открытии этих ссылок браузер ТВ всё равно пишет ERR_CONNECTION_TIMED_OUT (-118), '
+                'проверьте сторонний антивирус (Kaspersky/ESET/Avast — отключите сетевой экран на 1 мин для теста) '
+                'или переключите Ethernet в «Частную сеть» Windows.'
+            )
+
+        for ln in lines:
+            self._log('[DIAG] ' + ln)
+        for iss in issues:
+            self._log('[!] ' + iss)
+
+        return {
+            'ok': len(issues) == 0,
+            'pc_ip': self.pc_ip,
+            'tv_ip': clean_tv,
+            'port': self.port,
+            'port80': self._http80_actual_port,
+            'urls': urls,
+            'alt_urls': info.get('alt_urls') or [],
+            'tv_mqtt_ok': tv_mqtt_ok,
+            'issues': issues,
+            'lines': lines,
+            'warnings': issues,
+        }
 
     def stop(self) -> None:
         with self._lock:
@@ -3082,6 +3498,12 @@ class HisensePortalServer:
             if self._hosts_active:
                 _hosts_clear_vidaahub()
                 self._hosts_active = False
+            self._http80_bind_ip = ''
+            self._http80_actual_port = 0
+            self._firewall_ports.clear()
+            self._firewall_checked = False
+            self._firewall_warnings = []
+            self.warnings = []
             self.port = 0
             self.https_port = 0
             self.dns_port = 0
