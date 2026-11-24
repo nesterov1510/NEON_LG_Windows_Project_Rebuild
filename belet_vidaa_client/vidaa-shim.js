@@ -323,6 +323,21 @@
   }
 
   if (proxyBase) {
+    try {
+      (function () {
+        var realBelet = global.Belet;
+        Object.defineProperty(global, 'Belet', {
+          configurable: true,
+          enumerable: true,
+          get: function () { return realBelet; },
+          set: function (val) {
+            realBelet = val;
+            try { wireBeletProxyHook(); } catch (e) {}
+          }
+        });
+      }());
+    } catch (e) {}
+    if (doc && doc.addEventListener) doc.addEventListener('DOMContentLoaded', wireBeletProxyHook, true);
     global.addEventListener('DOMContentLoaded', wireBeletProxyHook, false);
     setTimeout(wireBeletProxyHook, 0);
   }

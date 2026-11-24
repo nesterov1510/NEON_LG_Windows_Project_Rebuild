@@ -322,6 +322,8 @@ ctx.window.addEventListener = (ev, fn) => { (ctx['__win_' + ev] = fn); };
 
 vm.runInContext(fs.readFileSync(dir + '/vidaa-shim.js', 'utf8'), ctx);
 vm.runInContext(fs.readFileSync(dir + '/api.js', 'utf8'), ctx);
+// Proxy must already be attached synchronously when api.js assigns window.Belet (before app.js boots)
+assert.strictEqual(ctx.Belet.clockProxy(), 'http://192.168.1.10:18999');
 if (ctx.__win_DOMContentLoaded) ctx.__win_DOMContentLoaded();
 
 // Activate session via official public API and ensure clock proxy stays sticky
