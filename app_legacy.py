@@ -1402,11 +1402,28 @@ class NeonWindow(QMainWindow):
         b_head.addWidget(self.his_belet_desc, 1)
         l2.addLayout(b_head)
 
+        self.his_lbl_belet_mode = QLabel()
+        self.his_lbl_belet_mode.setObjectName('FieldLabel')
+        self.his_belet_mode_combo = QComboBox()
+        self.his_belet_mode_combo.addItem('Полноценный клиент · Сервер NEON (LAN + Прокси)', 'lan_server')
+        self.his_belet_mode_combo.addItem('Полноценный клиент · TV Flash (Память ТВ, без ПК)', 'tv_flash')
+        self.his_belet_mode_combo.addItem('Полноценный клиент · Offline Data URI (HTML5)', 'data_url')
+        self.his_belet_mode_combo.addItem('Веб-сайт / Свой URL (belet.tm)', 'custom_url')
+        self.his_belet_mode_combo.currentIndexChanged.connect(self._on_his_belet_mode_changed)
+        l2.addWidget(self.his_lbl_belet_mode)
+        l2.addWidget(self.his_belet_mode_combo)
+
+        self.his_belet_url_wrap = QWidget()
+        bu_w = QVBoxLayout(self.his_belet_url_wrap)
+        bu_w.setContentsMargins(0, 0, 0, 0)
+        bu_w.setSpacing(4)
         self.his_lbl_belet_url = QLabel()
         self.his_lbl_belet_url.setObjectName('FieldLabel')
         self.his_belet_url = QLineEdit('https://belet.tm/')
-        l2.addWidget(self.his_lbl_belet_url)
-        l2.addWidget(self.his_belet_url)
+        bu_w.addWidget(self.his_lbl_belet_url)
+        bu_w.addWidget(self.his_belet_url)
+        self.his_belet_url_wrap.setVisible(False)
+        l2.addWidget(self.his_belet_url_wrap)
 
         b_btns = QHBoxLayout()
         b_btns.setSpacing(8)
@@ -2352,6 +2369,7 @@ class NeonWindow(QMainWindow):
 
         self.lbl_his_belet.setText(self.t('his_card_belet'))
         self.his_belet_desc.setText(self.t('his_belet_desc'))
+        self.his_lbl_belet_mode.setText(self.t('his_lbl_belet_mode'))
         self.his_lbl_belet_url.setText(self.t('his_lbl_belet_url'))
         self.btn_his_belet_install.setText(self.t('his_btn_belet_install'))
         self.btn_his_belet_launch.setText(self.t('his_btn_belet_launch'))
@@ -2614,7 +2632,11 @@ class NeonWindow(QMainWindow):
         hp_idx = self.his_profile_combo.findData(str(self.settings.get('hisense_auth_profile', 'auto') or 'auto'))
         if hp_idx >= 0:
             self.his_profile_combo.setCurrentIndex(hp_idx)
+        hbm_idx = self.his_belet_mode_combo.findData(str(self.settings.get('hisense_belet_mode') or 'lan_server'))
+        if hbm_idx >= 0:
+            self.his_belet_mode_combo.setCurrentIndex(hbm_idx)
         self.his_belet_url.setText(str(self.settings.get('hisense_belet_url') or 'https://belet.tm/'))
+        self._on_his_belet_mode_changed()
         saved_ha_portal = str(self.settings.get('hisense_alem_portal') or ALEMTV_DEFAULT_PORTAL)
         ha_idx = self.his_alem_combo.findData(saved_ha_portal)
         if ha_idx >= 0:
@@ -4295,6 +4317,10 @@ class NeonWindow(QMainWindow):
             return self.his_alem_custom.text().strip() or ALEMTV_DEFAULT_PORTAL
         return str(val or ALEMTV_DEFAULT_PORTAL)
 
+    def _on_his_belet_mode_changed(self):
+        mode = self.his_belet_mode_combo.currentData()
+        self.his_belet_url_wrap.setVisible(mode == 'custom_url')
+
     def _on_his_cb_mode_changed(self):
         mode = self.his_cb_mode_combo.currentData()
         self.his_cb_url_wrap.setVisible(mode == 'custom_url')
@@ -4367,17 +4393,24 @@ class NeonWindow(QMainWindow):
 
     def his_install_belet(self):
         ip = self.his_ip.text().strip()
+        mode = self.his_belet_mode_combo.currentData() or 'lan_server'
         url = self.his_belet_url.text().strip() or 'https://belet.tm/'
         def done(r):
             self._refresh_hisense_status_ui()
             if r.get('ok'):
                 self.toast.show_toast('Belet установлен на Hisense!' if self.lang == 'ru' else 'Belet installed on Hisense!', 'info')
-        self._run_async('his', lambda: self.api.install_hisense_belet(ip, target_url=url, launch=True), done, 'Установка Belet')
+        self._run_async(
+            'his',
+            lambda: self.api.install_hisense_belet(ip, mode=mode, target_url=url, launch=True),
+            done,
+            'Установка Belet',
+        )
 
     def his_launch_belet(self):
         ip = self.his_ip.text().strip()
+        mode = self.his_belet_mode_combo.currentData() or 'lan_server'
         url = self.his_belet_url.text().strip() or 'https://belet.tm/'
-        self._run_async('his', lambda: self.api.launch_hisense_belet(ip, target_url=url))
+        self._run_async('his', lambda: self.api.launch_hisense_belet(ip, mode=mode, target_url=url))
 
     def his_install_alemtv(self):
         ip = self.his_ip.text().strip()

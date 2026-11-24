@@ -401,8 +401,11 @@ def test_hisense_portal_server_and_dns_bridge():
             ('/', 'NEON · HISENSE VIDAA INSTALLER'),
             ('/vidaa/selfinstall.html', 'Hisense_installApp'),
             ('/vidaa/selfinstall.html', 'HiUtils_createRequest'),
+            ('/vidaa/selfinstall.html', '/apps/belet/standalone.html'),
             ('/apps/msbcallback', 'Meryosab Callback'),
             ('/apps/alemtv', 'Alem TV'),
+            ('/apps/belet/', 'vidaa-shim.js'),
+            ('/apps/belet/standalone.html', 'beletWebosIdentity'),
         ):
             with urllib.request.urlopen(base + path, timeout=3) as resp:
                 assert resp.status == 200
@@ -458,9 +461,16 @@ def test_core_api_hisense_installers_and_alemtv_vidaa_html(tmp_path, monkeypatch
         p2 = api.confirm_hisense_pairing(p1['pairing_id'], '4821')
         assert p2['ok'] and p2['status'] == 'paired'
 
-        belet = api.install_hisense_belet('127.0.0.1', 'https://belet.tm/', True)
+        # Default Belet VIDAA install deploys full-featured Belet client (not https://belet.tm/)
+        belet = api.install_hisense_belet('127.0.0.1', mode='lan_server', launch=True)
         assert belet['ok'] and belet['confirmed']
-        assert belet['url'] == 'https://belet.tm/'
+        assert belet['url'].endswith('/apps/belet/')
+
+        belet_data = api.install_hisense_belet('127.0.0.1', mode='data_url', launch=False)
+        assert belet_data['ok'] and belet_data['url'].startswith('data:text/html;charset=utf-8;base64,')
+
+        belet_custom = api.install_hisense_belet('127.0.0.1', 'https://belet.tm/', False)
+        assert belet_custom['ok'] and belet_custom['url'] == 'https://belet.tm/'
 
         alem_data_res = api.install_hisense_alemtv('127.0.0.1', 'http://iptv.tmalem.tv', 'data_url', False)
         assert alem_data_res['ok'] and alem_data_res['url'].startswith('data:text/html;')
@@ -493,7 +503,7 @@ def test_core_api_hisense_installers_and_alemtv_vidaa_html(tmp_path, monkeypatch
 def test_desktop_ui_and_build_scripts_include_hisense_support():
     ui_html = (ROOT / 'ui.html').read_text(encoding='utf-8')
     for token in (
-        'tabHis', 'hisPage', 'hisIp', 'hisPinWrap', 'hisInstallBelet()',
+        'tabHis', 'hisPage', 'hisIp', 'hisPinWrap', 'hisBeletMode', 'hisInstallBelet()',
         'hisInstallAlem()', 'hisInstallCallback()', 'installCallbackHisense()',
         'hisStartPortal(', 'read_hisense_logs',
     ):
@@ -508,16 +518,30 @@ def test_desktop_ui_and_build_scripts_include_hisense_support():
                 if isinstance(target, ast.Name) and target.id == 'TR':
                     tr_dict = ast.literal_eval(node.value)
     assert isinstance(tr_dict, dict)
+    assert set(tr_dict['en']) == set(tr_dict['ru'])
     for lang in ('en', 'ru'):
-        for key in ('nav_his', 'page_his_title', 'his_btn_belet_install', 'his_btn_alem_install', 'his_btn_cb_install', 'his_card_portal'):
+        for key in (
+            'nav_his', 'page_his_title', 'his_lbl_belet_mode', 'his_btn_belet_install',
+            'his_btn_alem_install', 'his_btn_cb_install', 'his_card_portal',
+        ):
             assert key in tr_dict[lang], f'Missing TR[{lang}][{key}]'
 
     legacy = (ROOT / 'app_legacy.py').read_text(encoding='utf-8')
     for sym in (
         'def _build_hisense_page', 'def his_start_pairing', 'def his_confirm_pin',
         'def his_install_belet', 'def his_install_alem', 'def his_install_callback',
-        'def _install_callback_hisense', 'def his_open_portal_on_tv',
+        'def _install_callback_hisense', 'def his_open_portal_on_tv', 'his_belet_mode_combo',
     ):
         assert sym in legacy
 
+    for build_rel in (
+        'build_windows.bat', 'build_windows_81.bat', 'build_linux.sh',
+        '.github/workflows/build-windows.yml', '.github/workflows/build-windows-81.yml',
+        '.github/workflows/build-linux.yml',
+    ):
+        build_txt = (ROOT / build_rel).read_text(encoding='utf-8')
+        assert 'belet_samsung_native' in build_txt, f'{build_rel} must bundle belet_samsung_native'
+        assert 'belet_vidaa_client' in build_txt, f'{build_rel} must bundle belet_vidaa_client'
+
     assert (ROOT / 'assets' / 'vidaa_client.bundle').is_file()
+    assert (ROOT / 'belet_vidaa_client' / 'vidaa-shim.js').is_file()

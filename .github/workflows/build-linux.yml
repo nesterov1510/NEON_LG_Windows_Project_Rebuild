@@ -48,6 +48,8 @@ jobs:
             --add-data "change_region.sh:." \
             --add-data "assets:assets" \
             --add-data "samsung-belet/BeletSamsungClient-unsigned.wgt:samsung-belet" \
+            --add-data "belet_samsung_native:belet_samsung_native" \
+            --add-data "belet_vidaa_client:belet_vidaa_client" \
             --exclude-module PyQt5 \
             --exclude-module PyQt5.QtWebEngineWidgets \
             --exclude-module PyQt5.QtWebEngineCore \

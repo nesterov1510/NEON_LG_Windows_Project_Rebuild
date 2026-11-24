@@ -75,6 +75,7 @@ from alemtv_app import (
     build_alemtv_vidaa_data_url,
     build_alemtv_wgt,
 )
+import belet_vidaa_client
 import hisense_vidaa
 
 REGION_CODES = {'22282', '3642', '19461', '13741', '13869', '19345', '18362', '18789', '4837'}
@@ -207,6 +208,7 @@ class Api:
             'hisense_alem_mode': 'data_url',
             'hisense_callback_mode': 'data_url',
             'hisense_callback_custom_url': '',
+            'hisense_belet_mode': 'lan_server',
             'hisense_belet_url': 'https://belet.tm/',
             'hisense_custom_id': 'neon.customapp',
             'hisense_custom_title': 'My TV App',
@@ -4775,36 +4777,65 @@ class Api:
         except Exception:
             return ''
 
-    def install_hisense_belet(self, ip=None, target_url=None, launch=True):
+    def _resolve_hisense_belet_url(self, host, mode, target_url=''):
+        clean_mode = (mode or 'lan_server').strip().lower()
+        if clean_mode == 'custom_url':
+            url = (target_url or 'https://belet.tm/').strip()
+            if not url:
+                raise ValueError('Укажите URL для режима Custom URL')
+            return url
+        if clean_mode == 'data_url':
+            return belet_vidaa_client.build_vidaa_data_url()
+        self._hisense_portal.ensure_started(tv_ip=host)
+        return f"{self._hisense_portal.base_url(host)}/apps/belet/"
+
+    def install_hisense_belet(self, ip=None, mode=None, target_url=None, launch=True):
         host = self._resolve_hisense_ip(ip)
         if not host:
             return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
-        url = str(target_url or self.load_settings().get('hisense_belet_url') or 'https://belet.tm/').strip()
-        self.save_settings({'hisense_ip': host, 'hisense_belet_url': url})
+        if isinstance(mode, str) and mode.strip().lower().startswith(('http://', 'https://', 'data:')):
+            target_url = mode
+            mode = 'custom_url'
+        s = self.load_settings()
+        clean_mode = str(mode or s.get('hisense_belet_mode') or 'lan_server').strip().lower()
+        url = str(target_url if target_url is not None else s.get('hisense_belet_url') or 'https://belet.tm/').strip()
+        self.save_settings({'hisense_ip': host, 'hisense_belet_mode': clean_mode, 'hisense_belet_url': url})
+
+        if clean_mode == 'tv_flash':
+            return self.open_hisense_portal_on_tv(host)
+
         preset = hisense_vidaa.APP_PRESETS['belet']
         icon = self._hisense_asset_url(host, preset['icon_asset'])
         try:
+            app_url = self._resolve_hisense_belet_url(host, clean_mode, url)
             res = self._hisense_ctrl.install_tile(
                 host,
                 preset['app_id'],
                 preset['title'],
-                url,
+                app_url,
                 icon_url=icon,
                 auto_launch=bool(launch),
             )
+            res['mode'] = clean_mode
             return res
         except Exception as exc:
             self._hisense_log(f'Ошибка установки Belet на {host}: {exc}')
             return {'ok': False, 'error': str(exc)}
 
-    def launch_hisense_belet(self, ip=None, target_url=None):
+    def launch_hisense_belet(self, ip=None, mode=None, target_url=None):
         host = self._resolve_hisense_ip(ip)
         if not host:
             return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
-        url = str(target_url or self.load_settings().get('hisense_belet_url') or 'https://belet.tm/').strip()
+        if isinstance(mode, str) and mode.strip().lower().startswith(('http://', 'https://', 'data:')):
+            target_url = mode
+            mode = 'custom_url'
+        s = self.load_settings()
+        clean_mode = str(mode or s.get('hisense_belet_mode') or 'lan_server').strip().lower()
+        url = str(target_url if target_url is not None else s.get('hisense_belet_url') or 'https://belet.tm/').strip()
         preset = hisense_vidaa.APP_PRESETS['belet']
         try:
-            return self._hisense_ctrl.launch_app(host, preset['app_id'], preset['title'], url)
+            app_url = self._resolve_hisense_belet_url(host, clean_mode, url)
+            return self._hisense_ctrl.launch_app(host, preset['app_id'], preset['title'], app_url)
         except Exception as exc:
             return {'ok': False, 'error': str(exc)}
 

@@ -372,7 +372,7 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
         'alemPortal', 'samAlemPortal', 'installAlem()', 'installSamAlem()',
         'samTimeMode', 'samTimePreset', 'samTimeTarget', 'samTimeSources',
         'samTimeChkCheck', 'samTimeUpstream', 'startSamTimeOverride()', 'stopSamTimeOverride()', 'syncSamTimeNow()',
-        'tabHis', 'hisPage', 'hisStartPairing()', 'hisInstallBelet()', 'hisInstallAlem()', 'hisInstallCallback()',
+        'tabHis', 'hisPage', 'hisStartPairing()', 'hisBeletMode', 'hisInstallBelet()', 'hisInstallAlem()', 'hisInstallCallback()',
         'installCallbackHisense()',
     ):
         assert token in ui_html
@@ -382,6 +382,15 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     assert win.his_ip is not None
     assert win.btn_his_scan is not None
     assert win.btn_his_pair is not None
+    assert win.his_belet_mode_combo.count() == 4
+    assert win.his_belet_url_wrap.isVisible() is False
+    idx_custom = win.his_belet_mode_combo.findData('custom_url')
+    win.his_belet_mode_combo.setCurrentIndex(idx_custom)
+    qt_app.processEvents()
+    assert win.his_belet_url_wrap.isVisible() is True
+    win.his_belet_mode_combo.setCurrentIndex(0)
+    qt_app.processEvents()
+    assert win.his_belet_url_wrap.isVisible() is False
     assert win.btn_his_belet_install is not None
     assert win.btn_his_alem_install is not None
     assert win.btn_his_cb_install is not None

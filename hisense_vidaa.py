@@ -5,10 +5,12 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, field
 import email.utils
+import gzip
 import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
+import ipaddress
 import json
 import os
 import re
@@ -1734,10 +1736,10 @@ body{{padding:28px 36px}}
 
   <div class="card">
     <h2>Belet TV</h2>
-    <p>Официальный веб-клиент Belet (https://belet.tm/) для Hisense VIDAA.</p>
-    <button class="btn btn-prim" onclick="installBridgeApp('tm.belet.vidaa','Belet','https://belet.tm/','/assets/belet_large_icon.png')">Установить (Hisense API)</button>
-    <button class="btn" onclick="installUrlFlash('tm.belet.vidaa','Belet','https://belet.tm/','/assets/belet_large_icon.png')">Записать в Appinfo.json</button>
-    <button class="btn" onclick="openUrl('https://belet.tm/')">Открыть сейчас</button>
+    <p>Полноценный Smart TV клиент Bëlet (QR/SMS-вход, каталог, поиск, сериалы, HLS-плеер — на общей базе с LG и Samsung).</p>
+    <button class="btn btn-prim" onclick="installOfflineFlash('tm.belet.vidaa','Belet','/apps/belet/standalone.html','/assets/belet_large_icon.png','/apps/belet/standalone.html?nofonts=1')">Установить в память ТВ (Offline)</button>
+    <button class="btn" onclick="installBridgeApp('tm.belet.vidaa','Belet',ORIGIN+'/apps/belet/','/assets/belet_large_icon.png')">Установить (LAN + Прокси)</button>
+    <button class="btn" onclick="openUrl('/apps/belet/')">Открыть сейчас</button>
     <button class="btn btn-danger" onclick="uninstallApp('tm.belet.vidaa','Belet')">Удалить</button>
   </div>
 </div>
@@ -1814,11 +1816,11 @@ body{{padding:28px 36px}}
     return HiUtils_createRequest('fileWrite', {{ path: 'websdk/Appinfo.json', mode: 6, writedata: JSON.stringify(reg) }});
   }}
 
-  window.installOfflineFlash = function(appId, title, htmlPath, iconPath) {{
+  window.installOfflineFlash = function(appId, title, htmlPath, iconPath, fallbackHtmlPath) {{
     if (!hasHiUtils) {{
       log('HiUtils_createRequest недоступен на этом домене — пробую data:/Hisense API…');
       if (hasBridge) {{
-        fetchText(htmlPath, function(err, body){{
+        fetchText(fallbackHtmlPath || htmlPath, function(err, body){{
           if (err) return log('Ошибка загрузки: ' + err);
           var durl = 'data:text/html;charset=utf-8;base64,' + btoa(unescape(encodeURIComponent(body)));
           installBridgeApp(appId, title, durl, iconPath);
@@ -1829,21 +1831,30 @@ body{{padding:28px 36px}}
       return;
     }}
     log('Загрузка ' + title + ' и запись во внутреннюю память ТВ…');
-    fetchText(htmlPath, function(err, body){{
-      if (err) return log('Ошибка загрузки HTML: ' + err);
-      var flashPath = 'websdk/' + appId + '/index.html';
-      var w1 = HiUtils_createRequest('fileWrite', {{ path: flashPath, mode: 6, writedata: body }});
-      if (!w1 || !w1.ret) return log('Ошибка fileWrite HTML: ' + JSON.stringify(w1));
-      var localUrl = 'file:///APPS/' + flashPath;
-      var fullIcon = ORIGIN + iconPath;
-      var w2 = upsertAppInfo(appId, title, localUrl, fullIcon);
-      if (w2 && w2.ret) {{
-        refreshLauncher(appId);
-        log('ГОТОВО! «' + title + '» записан в память ТВ (' + localUrl + '). Переоткройте список приложений или перезагрузите ТВ.');
-      }} else {{
-        log('Ошибка записи Appinfo.json: ' + JSON.stringify(w2));
-      }}
-    }});
+    function writeFlash(pathToFetch, allowFallback) {{
+      fetchText(pathToFetch, function(err, body){{
+        if (err) return log('Ошибка загрузки HTML: ' + err);
+        var flashPath = 'websdk/' + appId + '/index.html';
+        var w1 = HiUtils_createRequest('fileWrite', {{ path: flashPath, mode: 6, writedata: body }});
+        if (!w1 || !w1.ret) {{
+          if (allowFallback && fallbackHtmlPath) {{
+            log('Пробую облегчённую сборку без встроенных шрифтов…');
+            return writeFlash(fallbackHtmlPath, false);
+          }}
+          return log('Ошибка fileWrite HTML: ' + JSON.stringify(w1));
+        }}
+        var localUrl = 'file:///APPS/' + flashPath;
+        var fullIcon = ORIGIN + iconPath;
+        var w2 = upsertAppInfo(appId, title, localUrl, fullIcon);
+        if (w2 && w2.ret) {{
+          refreshLauncher(appId);
+          log('ГОТОВО! «' + title + '» записан в память ТВ (' + localUrl + '). Переоткройте список приложений или перезагрузите ТВ.');
+        }} else {{
+          log('Ошибка записи Appinfo.json: ' + JSON.stringify(w2));
+        }}
+      }});
+    }}
+    writeFlash(htmlPath, !!fallbackHtmlPath);
   }};
 
   window.installUrlFlash = function(appId, title, appUrl, iconPath) {{
@@ -1899,12 +1910,134 @@ body{{padding:28px 36px}}
 </html>'''
 
 
+_BELET_PROXY_BASE_DOMAINS = ('beletapis.com', 'belet.tm', 'belet.me')
+_BELET_API_SCAN_HOSTS = frozenset({
+    'beletapis.com',
+    'api.belet.tm',
+    'homepage.belet.me',
+    'film.beletapis.com',
+    'film-search.belet.me',
+    'search.belet.me',
+})
+_BELET_HOST_TOKEN_RE = re.compile(r'https?://([a-z0-9.-]+)(?::\d+)?/', re.IGNORECASE)
+_BELET_ALLOWED_REQ_HEADERS = frozenset({
+    'accept',
+    'authorization',
+    'content-type',
+    'fingerprint',
+    'lang',
+    'x-platform',
+    'x-versioncode',
+    'x-app-version',
+    'app-version',
+    'x-device-model',
+    'x-player-session-id',
+    'x-chunk-length',
+    'x-code-sending-type',
+    'range',
+    'if-none-match',
+    'if-modified-since',
+})
+_BELET_DEFAULT_CORS_HEADERS = (
+    'Accept, Authorization, Content-Type, fingerprint, Lang, X-Platform, '
+    'X-VersionCode, X-App-Version, app-version, X-Device-Model, '
+    'X-Player-Session-Id, X-Chunk-Length, X-Code-Sending-Type, Range'
+)
+_BELET_FORWARD_RESP_HEADERS = (
+    'content-type',
+    'content-range',
+    'accept-ranges',
+    'etag',
+    'last-modified',
+    'cache-control',
+)
+
+
+def _is_safe_public_host(raw_host: str) -> bool:
+    h = str(raw_host or '').strip().lower()
+    if not h or len(h) > 253:
+        return False
+    if any(ch in h for ch in (' ', '/', '\\', '@', ':', '[', ']')):
+        return False
+    if not re.fullmatch(r'[a-z0-9.-]+', h):
+        return False
+    if '.' not in h or h.startswith('.') or h.endswith('.'):
+        return False
+    if h == 'localhost' or h.endswith(('.local', '.internal', '.lan', '.home.arpa')):
+        return False
+    try:
+        ipaddress.ip_address(h)
+        # Disallow raw IP addresses in the public domain proxy to avoid LAN/SSRF exposure.
+        return False
+    except ValueError:
+        return True
+
+
+def _is_belet_static_host(host: str) -> bool:
+    h = str(host or '').lower()
+    if not _is_safe_public_host(h):
+        return False
+    return any(h == d or h.endswith('.' + d) for d in _BELET_PROXY_BASE_DOMAINS)
+
+
+def _remember_belet_hosts(text: str, register_fn) -> None:
+    if not text or ('http://' not in text and 'https://' not in text):
+        return
+    for match in _BELET_HOST_TOKEN_RE.finditer(text):
+        host = match.group(1).lower()
+        if _is_safe_public_host(host):
+            register_fn(host)
+
+
+def _rewrite_proxy_url(raw_url: str, proxy_origin: str, up_host: str, register_fn) -> str:
+    s = str(raw_url or '').strip()
+    if not s or s.startswith(proxy_origin + '/__proxy/'):
+        return s
+    mh = re.match(r'^https?://([a-z0-9.-]+)(?::\d+)?(/.*)?$', s, re.IGNORECASE)
+    if mh:
+        h = mh.group(1).lower()
+        if _is_safe_public_host(h):
+            register_fn(h)
+            return f'{proxy_origin}/__proxy/{h}{mh.group(2) or "/"}'
+        return s
+    mp = re.match(r'^//([a-z0-9.-]+)(/.*)?$', s)
+    if mp:
+        h = mp.group(1).lower()
+        if _is_safe_public_host(h):
+            register_fn(h)
+            return f'{proxy_origin}/__proxy/{h}{mp.group(2) or "/"}'
+        return s
+    if s.startswith('/') and up_host and _is_safe_public_host(up_host):
+        return f'{proxy_origin}/__proxy/{up_host}{s}'
+    return s
+
+
+def _rewrite_m3u8(text: str, proxy_origin: str, up_host: str, register_fn) -> str:
+    def _attr_sub(m: re.Match) -> str:
+        return 'URI="' + _rewrite_proxy_url(m.group(1), proxy_origin, up_host, register_fn) + '"'
+
+    out_lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip('\r')
+        trimmed = line.strip()
+        if not trimmed:
+            out_lines.append(line)
+            continue
+        if trimmed.startswith('#'):
+            out_lines.append(re.sub(r'URI="([^"]+)"', _attr_sub, line))
+            continue
+        out_lines.append(_rewrite_proxy_url(trimmed, proxy_origin, up_host, register_fn))
+    return '\n'.join(out_lines) + ('\n' if text.endswith('\n') else '')
+
+
 class HisensePortalServer:
-    """Serves tile PNG icons, self-contained HTML5 apps, and optional vidaahub.com DNS/HTTPS."""
+    """Serves tile PNG icons, self-contained HTML5 apps, Belet proxy, and optional vidaahub.com DNS/HTTPS."""
 
     def __init__(self, log_fn=None):
         self._log_fn = log_fn or (lambda _m: None)
         self._lock = threading.RLock()
+        self._proxy_hosts: set[str] = set()
+        self._proxy_lock = threading.Lock()
         self._http_server: ThreadingHTTPServer | None = None
         self._https_server: ThreadingHTTPServer | None = None
         self._http80_server: ThreadingHTTPServer | None = None
@@ -1935,6 +2068,32 @@ class HisensePortalServer:
         base = self.base_url(tv_ip)
         return f'{base}/assets/{asset_name}' if base else ''
 
+    def _register_proxy_host(self, host: str) -> None:
+        h = str(host or '').strip().lower()
+        if not _is_safe_public_host(h) or _is_belet_static_host(h):
+            return
+        with self._proxy_lock:
+            if len(self._proxy_hosts) >= 256:
+                self._proxy_hosts.clear()
+            self._proxy_hosts.add(h)
+
+    def _is_proxy_host_allowed(self, host: str) -> bool:
+        h = str(host or '').strip().lower()
+        if _is_belet_static_host(h):
+            return True
+        if not _is_safe_public_host(h):
+            return False
+        with self._proxy_lock:
+            return h in self._proxy_hosts
+
+    def _open_upstream(self, scheme: str, host: str, timeout: float = 15.0) -> http.client.HTTPConnection:
+        if scheme == 'http':
+            return http.client.HTTPConnection(host, 80, timeout=timeout)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return http.client.HTTPSConnection(host, 443, timeout=timeout, context=ctx)
+
     def _make_handler(self):
         portal_ref = self
 
@@ -1944,22 +2103,265 @@ class HisensePortalServer:
             def log_message(self, format, *args):  # noqa: A002
                 pass
 
-            def _send(self, code: int, body: bytes, content_type: str) -> None:
+            def _send_cors_headers(self) -> None:
+                req_hdrs = (self.headers.get('Access-Control-Request-Headers') or '').strip()
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, HEAD, OPTIONS')
+                self.send_header('Access-Control-Allow-Headers', req_hdrs or _BELET_DEFAULT_CORS_HEADERS)
+                self.send_header(
+                    'Access-Control-Expose-Headers',
+                    'X-Neon-Final-URL, Content-Length, Content-Range, Accept-Ranges',
+                )
+
+            def _send(self, code: int, body: bytes, content_type: str, cache: str = 'no-cache') -> None:
                 self.send_response(code)
                 self.send_header('Content-Type', content_type)
                 self.send_header('Content-Length', str(len(body)))
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.send_header('Cache-Control', 'no-cache')
+                self._send_cors_headers()
+                self.send_header('Cache-Control', cache)
+                self.send_header('Connection', 'close')
                 self.end_headers()
-                self.wfile.write(body)
+                if self.command != 'HEAD' and body:
+                    self.wfile.write(body)
+
+            def _origin(self) -> str:
+                host_hdr = self.headers.get('Host') or f'{portal_ref.pc_ip}:{portal_ref.port}'
+                scheme = 'https' if isinstance(self.connection, ssl.SSLSocket) else 'http'
+                return f'{scheme}://{host_hdr}'
+
+            def _handle_proxy_request(self, method: str) -> None:
+                parsed = urllib.parse.urlsplit(self.path)
+                m = re.match(r'^/__proxy/([a-z0-9.-]+)(/.*)?$', parsed.path, re.IGNORECASE)
+                if not m:
+                    self._send(404, b'Not Found', 'text/plain; charset=utf-8', cache='no-store')
+                    return
+                up_host = m.group(1).lower()
+                up_path = (m.group(2) or '/') + (f'?{parsed.query}' if parsed.query else '')
+                if not portal_ref._is_proxy_host_allowed(up_host):
+                    self._send(403, b'Forbidden proxy host', 'text/plain; charset=utf-8', cache='no-store')
+                    return
+
+                content_len = 0
+                try:
+                    content_len = int(self.headers.get('Content-Length') or '0')
+                except ValueError:
+                    content_len = 0
+                if content_len > 8 * 1024 * 1024:
+                    self._send(413, b'Request body too large', 'text/plain; charset=utf-8', cache='no-store')
+                    return
+                req_body = self.rfile.read(content_len) if content_len > 0 else None
+
+                out_headers: dict[str, str] = {}
+                for h_name, h_val in self.headers.items():
+                    if h_name.lower() in _BELET_ALLOWED_REQ_HEADERS:
+                        out_headers[h_name] = h_val
+                out_headers['Accept-Encoding'] = 'identity'
+                is_belet_static = _is_belet_static_host(up_host)
+                out_headers.setdefault(
+                    'User-Agent',
+                    'belet_films_android'
+                    if is_belet_static
+                    else 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+                )
+                if is_belet_static and up_host in _BELET_API_SCAN_HOSTS:
+                    out_headers['Origin'] = 'https://belet.tm'
+                    out_headers['Referer'] = 'https://belet.tm/'
+
+                origin = self._origin()
+                cur_scheme = 'https'
+                cur_host = up_host
+                cur_path = up_path
+                cur_method = method
+                cur_body = req_body
+                cur_headers = dict(out_headers)
+                final_url = f'{cur_scheme}://{cur_host}{cur_path}'
+
+                conn = None
+                resp = None
+                try:
+                    for _redir in range(6):
+                        conn = portal_ref._open_upstream(cur_scheme, cur_host, timeout=18.0)
+                        conn.request(cur_method, cur_path, body=cur_body, headers=cur_headers)
+                        resp = conn.getresponse()
+                        if resp.status in (301, 302, 303, 307, 308):
+                            loc = (resp.getheader('Location') or '').strip()
+                            resp.read()
+                            conn.close()
+                            conn = None
+                            if not loc:
+                                break
+                            joined = urllib.parse.urljoin(final_url, loc)
+                            parts = urllib.parse.urlsplit(joined)
+                            next_host = (parts.hostname or '').lower()
+                            if parts.scheme not in ('http', 'https') or not _is_safe_public_host(next_host):
+                                break
+                            portal_ref._register_proxy_host(next_host)
+                            cur_scheme = parts.scheme
+                            cur_host = next_host
+                            cur_path = (parts.path or '/') + (f'?{parts.query}' if parts.query else '')
+                            final_url = joined
+                            if resp.status == 303 or (resp.status in (301, 302) and cur_method == 'POST'):
+                                cur_method = 'GET'
+                                cur_body = None
+                                cur_headers.pop('Content-Type', None)
+                                cur_headers.pop('Content-Length', None)
+                            continue
+                        break
+
+                    if resp is None:
+                        self._send(502, b'Upstream did not respond', 'text/plain; charset=utf-8', cache='no-store')
+                        return
+
+                    ctype = (resp.getheader('Content-Type') or '').lower()
+                    cenc = (resp.getheader('Content-Encoding') or '').lower()
+                    up_pathname = urllib.parse.urlsplit(cur_path).path.lower()
+                    is_m3u8 = up_pathname.endswith('.m3u8') or 'mpegurl' in ctype
+                    is_json_scan = (
+                        is_belet_static
+                        and cur_host in _BELET_API_SCAN_HOSTS
+                        and ('json' in ctype or 'text/plain' in ctype)
+                    )
+
+                    if (is_m3u8 or is_json_scan) and cur_method != 'HEAD' and 200 <= resp.status < 300:
+                        raw_bytes = resp.read(4 * 1024 * 1024 + 1)
+                        if len(raw_bytes) <= 4 * 1024 * 1024:
+                            plain_bytes = raw_bytes
+                            if 'gzip' in cenc:
+                                try:
+                                    plain_bytes = gzip.decompress(raw_bytes)
+                                    cenc = ''
+                                except Exception:
+                                    plain_bytes = raw_bytes
+                            try:
+                                text = plain_bytes.decode('utf-8', 'replace')
+                            except Exception:
+                                text = ''
+                            if is_json_scan:
+                                _remember_belet_hosts(text, portal_ref._register_proxy_host)
+                                out_bytes = raw_bytes
+                            else:
+                                rewritten = _rewrite_m3u8(
+                                    text, origin, cur_host, portal_ref._register_proxy_host
+                                )
+                                out_bytes = rewritten.encode('utf-8')
+                                cenc = ''
+                            self.send_response(resp.status)
+                            for h_name in _BELET_FORWARD_RESP_HEADERS:
+                                h_val = resp.getheader(h_name)
+                                if h_val:
+                                    self.send_header(h_name.title(), h_val)
+                            if cenc:
+                                self.send_header('Content-Encoding', cenc)
+                            self.send_header('Content-Length', str(len(out_bytes)))
+                            self.send_header('X-Neon-Final-URL', final_url)
+                            self.send_header('Cache-Control', 'no-store')
+                            self._send_cors_headers()
+                            self.send_header('Connection', 'close')
+                            self.end_headers()
+                            self.wfile.write(out_bytes)
+                            return
+                        # Fallback to streaming remainder if oversized
+                        self.send_response(resp.status)
+                        for h_name in _BELET_FORWARD_RESP_HEADERS:
+                            h_val = resp.getheader(h_name)
+                            if h_val:
+                                self.send_header(h_name.title(), h_val)
+                        self.send_header('X-Neon-Final-URL', final_url)
+                        self._send_cors_headers()
+                        self.send_header('Connection', 'close')
+                        self.end_headers()
+                        self.wfile.write(raw_bytes)
+                        while True:
+                            chunk = resp.read(65536)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                        return
+
+                    self.send_response(resp.status)
+                    for h_name in _BELET_FORWARD_RESP_HEADERS:
+                        h_val = resp.getheader(h_name)
+                        if h_val:
+                            self.send_header(h_name.title(), h_val)
+                    clen_hdr = resp.getheader('Content-Length')
+                    if clen_hdr and cur_method != 'HEAD':
+                        self.send_header('Content-Length', clen_hdr)
+                    if cenc:
+                        self.send_header('Content-Encoding', cenc)
+                    self.send_header('X-Neon-Final-URL', final_url)
+                    self._send_cors_headers()
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+
+                    if cur_method != 'HEAD' and resp.status not in (204, 304):
+                        while True:
+                            chunk = resp.read(65536)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                except Exception as exc:
+                    msg = json.dumps({'ok': False, 'error': str(exc)}).encode('utf-8')
+                    try:
+                        self._send(502, msg, 'application/json; charset=utf-8', cache='no-store')
+                    except Exception:
+                        pass
+                finally:
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+
+            def do_OPTIONS(self):  # noqa: N802
+                self.send_response(204)
+                self._send_cors_headers()
+                self.send_header('Access-Control-Max-Age', '600')
+                self.send_header('Content-Length', '0')
+                self.send_header('Connection', 'close')
+                self.end_headers()
+
+            def do_POST(self):  # noqa: N802
+                if self.path.startswith('/__proxy/'):
+                    self._handle_proxy_request('POST')
+                    return
+                self._send(404, b'Not Found', 'text/plain; charset=utf-8')
+
+            def do_PUT(self):  # noqa: N802
+                if self.path.startswith('/__proxy/'):
+                    self._handle_proxy_request('PUT')
+                    return
+                self._send(404, b'Not Found', 'text/plain; charset=utf-8')
+
+            def do_DELETE(self):  # noqa: N802
+                if self.path.startswith('/__proxy/'):
+                    self._handle_proxy_request('DELETE')
+                    return
+                self._send(404, b'Not Found', 'text/plain; charset=utf-8')
+
+            def do_HEAD(self):  # noqa: N802
+                if self.path.startswith('/__proxy/'):
+                    self._handle_proxy_request('HEAD')
+                    return
+                self.do_GET()
 
             def do_GET(self):  # noqa: N802
                 parsed = urllib.parse.urlsplit(self.path)
                 path = parsed.path
                 qs = urllib.parse.parse_qs(parsed.query)
-                host_hdr = self.headers.get('Host') or f'{portal_ref.pc_ip}:{portal_ref.port}'
-                scheme = 'https' if isinstance(self.connection, ssl.SSLSocket) else 'http'
-                origin = f'{scheme}://{host_hdr}'
+                origin = self._origin()
+
+                if path == '/__ping':
+                    payload = json.dumps({
+                        'ok': True,
+                        'service': 'neon-vidaa-proxy',
+                        'serverTimeMs': int(time.time() * 1000),
+                    }).encode('utf-8')
+                    self._send(200, payload, 'application/json; charset=utf-8', cache='no-store')
+                    return
+
+                if path.startswith('/__proxy/'):
+                    self._handle_proxy_request('GET')
+                    return
 
                 if path in ('/', '/index.html', '/vidaa/selfinstall.html'):
                     p_url = (qs.get('portal', [''])[0] or portal_ref.alem_portal).strip()
@@ -1979,6 +2381,39 @@ class HisensePortalServer:
                     html = alemtv_app.build_alemtv_vidaa_html(default_portal=p_url)
                     self._send(200, html.encode('utf-8'), 'text/html; charset=utf-8')
                     return
+
+                if path == '/apps/belet/standalone.html':
+                    import belet_vidaa_client
+                    use_proxy = (qs.get('proxy', ['0'])[0] or '').strip().lower() in ('1', 'true', 'yes')
+                    no_fonts = (qs.get('nofonts', ['0'])[0] or '').strip().lower() in ('1', 'true', 'yes')
+                    html = belet_vidaa_client.build_standalone_html(
+                        proxy_base=origin if use_proxy else '',
+                        include_fonts=not no_fonts,
+                    )
+                    self._send(200, html.encode('utf-8'), 'text/html; charset=utf-8')
+                    return
+
+                if path in ('/apps/belet', '/apps/belet/', '/apps/belet/index.html'):
+                    import belet_vidaa_client
+                    item = belet_vidaa_client.read_package_file('index.html', proxy_base=origin)
+                    if item is not None:
+                        body_bytes, ctype = item
+                        if path == '/apps/belet':
+                            text = body_bytes.decode('utf-8')
+                            text = text.replace('<head>', '<head>\n  <base href="/apps/belet/">', 1)
+                            body_bytes = text.encode('utf-8')
+                        self._send(200, body_bytes, ctype)
+                        return
+
+                if path.startswith('/apps/belet/'):
+                    import belet_vidaa_client
+                    rel_name = path[len('/apps/belet/'):]
+                    item = belet_vidaa_client.read_package_file(rel_name, proxy_base=origin)
+                    if item is not None:
+                        body_bytes, ctype = item
+                        cache = 'public, max-age=3600' if rel_name.endswith(('.png', '.ttf', '.js')) else 'no-cache'
+                        self._send(200, body_bytes, ctype, cache=cache)
+                        return
 
                 if path.startswith('/assets/'):
                     name = os.path.basename(path[len('/assets/'):])
