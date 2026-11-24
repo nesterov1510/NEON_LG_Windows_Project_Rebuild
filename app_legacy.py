@@ -1634,9 +1634,9 @@ class NeonWindow(QMainWindow):
 
         kpi_row = QHBoxLayout()
         kpi_row.setSpacing(12)
-        self.kpi_his_tv = KpiCard('')
-        self.kpi_his_pair = KpiCard('')
-        self.kpi_his_portal = KpiCard('')
+        self.kpi_his_tv = KpiCard('HISENSE VIDAA', '—', 'MQTT :36669')
+        self.kpi_his_pair = KpiCard('PAIRING', '—', 'PIN 4 digits')
+        self.kpi_his_portal = KpiCard('PORTAL', '—', 'HTTP / vidaahub')
         kpi_row.addWidget(self.kpi_his_tv)
         kpi_row.addWidget(self.kpi_his_pair)
         kpi_row.addWidget(self.kpi_his_portal)
