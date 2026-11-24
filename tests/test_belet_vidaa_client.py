@@ -374,8 +374,82 @@ ctxDirect.Belet.acceptQrSession({ token: 'tok-1', refresh_token: 'ref-1' });
 ctxDirect.Belet.registerDevice(() => {});
 ctxDirect.Belet.home(0, 12, () => {});
 assert(xhrDirect.length >= 2 && xhrDirect[0].startsWith('https://'), 'expected direct HTTPS in TV Flash mode, got ' + JSON.stringify(xhrDirect));
+
+// 4. Live http: origin triggers non-blocking /__tv_probe telemetry via setTimeout
+const httpProbeCalls = [];
+function HttpProbeXHR() {}
+HttpProbeXHR.prototype.open = function (m, u) { this._m = m; this._u = u; };
+HttpProbeXHR.prototype.setRequestHeader = function () {};
+HttpProbeXHR.prototype.send = function (b) { httpProbeCalls.push({ m: this._m, u: this._u, b: String(b || '') }); };
+const ctxHttpProbe = vm.createContext({
+  window: null,
+  location: { protocol: 'http:', href: 'http://192.168.137.1:18880/apps/belet/' },
+  document: { activeElement: null, getElementById: () => null, addEventListener: () => {} },
+  navigator: { userAgent: 'VIDAA/6.0' },
+  Hisense_GetModelName: () => '65U6G',
+  __NEON_BELET_PROXY__: 'http://192.168.137.1:18880',
+  XMLHttpRequest: HttpProbeXHR,
+  NodeList: function () {},
+  localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+  setTimeout: (fn) => { fn(); return 1; }, clearTimeout, Date, Math, JSON, Object, Array, String, Number, Error, RegExp, encodeURIComponent
+});
+ctxHttpProbe.window = ctxHttpProbe;
+ctxHttpProbe.window.addEventListener = () => {};
+vm.runInContext(fs.readFileSync(dir + '/vidaa-shim.js', 'utf8'), ctxHttpProbe);
+assert(httpProbeCalls.some((c) => c.m === 'POST' && c.u === 'http://192.168.137.1:18880/__tv_probe'),
+  'expected /__tv_probe POST over http:, got ' + JSON.stringify(httpProbeCalls));
+
+// 5. selfinstaller.js: refuses overwrite if Appinfo.json unreadable; verifies write on disk without AllAppsUpdate
+const logEl = { textContent: '' };
+const envEl = { innerHTML: '' };
+const siXhrs = [];
+function SiXHR() {}
+SiXHR.prototype.open = function (m, u) { this._m = m; this._u = u; };
+SiXHR.prototype.setRequestHeader = function () {};
+SiXHR.prototype.send = function (b) { siXhrs.push({ m: this._m, u: this._u, b: String(b || '') }); };
+const diskFiles = { 'websdk/Appinfo.json': JSON.stringify({ AppInfo: [{ Id: 'netflix', Title: 'Netflix' }] }) };
+let readable = false;
+let omiRefreshCalls = 0;
+const ctxSi = vm.createContext({
+  window: null,
+  location: { href: 'https://vidaahub.com/' },
+  document: {
+    getElementById: (id) => (id === 'logBox' ? logEl : id === 'envInfo' ? envEl : null),
+    querySelectorAll: () => []
+  },
+  navigator: { userAgent: 'VIDAA' },
+  XMLHttpRequest: SiXHR,
+  omi_platform: { sendPlatformMessage: () => { omiRefreshCalls += 1; } },
+  HiUtils_createRequest: (op, arg) => {
+    if (op === 'fileRead') {
+      if (!readable) return { ret: false, msg: 'EACCES' };
+      return { ret: true, msg: diskFiles[arg.path] || '' };
+    }
+    if (op === 'fileWrite') {
+      diskFiles[arg.path] = arg.writedata;
+      return { ret: true };
+    }
+    return { ret: false };
+  },
+  Date, JSON, Array, String, Object, Error, encodeURIComponent, escape, unescape
+});
+ctxSi.window = ctxSi;
+vm.runInContext(fs.readFileSync(dir + '/selfinstaller.js', 'utf8'), ctxSi);
+assert(siXhrs.some((c) => c.m === 'POST' && c.u.endsWith('/__tv_probe')));
+
+// Unreadable Appinfo.json -> MUST NOT clobber existing Netflix entry
+ctxSi.window.installLanTile('tmalemtvvidaa', 'Alem TV', 'http://192.168.137.1:18880/apps/alemtv', '/assets/alemtv_large_icon.png');
+assert.strictEqual(JSON.parse(diskFiles['websdk/Appinfo.json']).AppInfo.length, 1);
+
+// Readable Appinfo.json -> writes tile + verifies on disk + preserves Netflix + NO AllAppsUpdate wipe
+readable = true;
+ctxSi.window.installLanTile('tmalemtvvidaa', 'Alem TV', 'http://192.168.137.1:18880/apps/alemtv', '/assets/alemtv_large_icon.png');
+const savedApps = JSON.parse(diskFiles['websdk/Appinfo.json']).AppInfo;
+assert.strictEqual(savedApps.length, 2);
+assert.strictEqual(savedApps[1].URL, 'http://192.168.137.1:18880/apps/alemtv');
+assert.strictEqual(omiRefreshCalls, 0);
+assert(logEl.textContent.includes('проверено на диске'));
 """
     runner = tmp_path / 'runner.js'
     runner.write_text(script, encoding='utf-8')
     subprocess.run([node, str(runner), str(tmp_path)], check=True, timeout=30)
-

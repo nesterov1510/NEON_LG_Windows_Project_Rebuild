@@ -61,7 +61,7 @@ def _make_server_ssl_context(tmp_path: Path) -> ssl.SSLContext:
 class _MockVidaaBroker:
     """Minimal MQTT 3.1.1 over TLS mock implementing VIDAA topics & token expiry."""
 
-    def __init__(self, tmp_path: Path, apps=None, expire_access_token: str | None = None):
+    def __init__(self, tmp_path: Path, apps=None, expire_access_token: str | None = None, ignore_app_install: bool = False):
         self.ssl_ctx = _make_server_ssl_context(tmp_path)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -74,6 +74,7 @@ class _MockVidaaBroker:
             {'appId': 'netflix', 'name': 'Netflix', 'url': 'https://www.netflix.com'},
         ])
         self.expire_access_token = expire_access_token
+        self.ignore_app_install = bool(ignore_app_install)
         self.rejected_stale_once = False
         self.received = []
         self.expected_pin = 4821
@@ -254,7 +255,7 @@ class _MockVidaaBroker:
             )
         elif topic.endswith('/actions/uievent'):
             data = json.loads(payload)
-            if data.get('type') == 'app_install':
+            if data.get('type') == 'app_install' and not self.ignore_app_install:
                 info = data.get('app_info', {})
                 self.apps.append({
                     'appId': info.get('Id', ''),
@@ -545,3 +546,177 @@ def test_desktop_ui_and_build_scripts_include_hisense_support():
 
     assert (ROOT / 'assets' / 'vidaa_client.bundle').is_file()
     assert (ROOT / 'belet_vidaa_client' / 'vidaa-shim.js').is_file()
+
+
+def test_vidaa_black_screen_prevention_browser_fallback_and_hidden_urls(tmp_path, monkeypatch):
+    monkeypatch.setenv('APPDATA', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path))
+
+    # Helper checks: mediaId + HTTP_APP_DEFAULT_URL* + find_browser_app
+    parsed = hisense_vidaa.parse_applist(json.dumps([
+        {'appId': '16', 'name': 'TV Browser', 'url': 'url16', 'storeType': 100},
+        {'mediaId': 'tm.belet.vidaa', 'name': 'Belet', 'url': 'HTTP_APP_DEFAULT_URLtm.belet.vidaa', 'storeType': 99},
+    ]))
+    assert parsed[1]['appId'] == 'tm.belet.vidaa'
+    browser = hisense_vidaa.find_browser_app(parsed)
+    assert browser is not None and browser['appId'] == '16' and browser['storeType'] == 100
+    assert hisense_vidaa.tile_matches_request(parsed[1], 'tm.belet.vidaa', 'http://pc:18880/apps/belet/', allow_hidden_url=False) is False
+    assert hisense_vidaa.tile_matches_request(parsed[1], 'tm.belet.vidaa', 'http://pc:18880/apps/belet/', allow_hidden_url=True) is True
+    assert json.loads(hisense_vidaa.launch_payload('16', 'TV Browser', 'http://192.168.137.1:18880/', store_type=100))['storeType'] == 100
+
+    # Simulate VIDAA firmware that ignores app_install but has built-in TV Browser (appId=16, url='browser')
+    broker = _MockVidaaBroker(
+        tmp_path,
+        apps=[{'appId': '16', 'name': 'TV Browser', 'url': 'browser', 'storeType': 100}],
+        ignore_app_install=True,
+    )
+    monkeypatch.setattr(hisense_vidaa, 'MQTT_PORT', broker.port)
+    monkeypatch.setattr(hisense_vidaa, 'fetch_tv_descriptor', lambda ip, timeout=2.0: hisense_vidaa.VidaaTvInfo(
+        ip=ip, friendly_name='Hisense VIDAA', model_name='50A5FE', brand='his', transport_protocol=3300,
+        is_vidaa=True, tv_ts=1700000000,
+    ))
+    logs = []
+    try:
+        store = hisense_vidaa.HisenseSessionStore(str(tmp_path / 'hisense_sessions.json'))
+        ctrl = hisense_vidaa.HisenseController(store, logs.append)
+        p1 = ctrl.start_pairing('127.0.0.1', auth_profile='modern')
+        assert ctrl.confirm_pairing(p1['pairing_id'], '4821')['ok']
+
+        # 1. Unconfirmed data: URI install MUST NOT call actions/launchapp (which causes a black screen!)
+        data_res = ctrl.install_tile(
+            '127.0.0.1',
+            'tmalemtvvidaa',
+            'Alem TV',
+            'data:text/html;base64,PGgxPkFsZW08L2gxPg==',
+            auto_launch=True,
+            poll_delays=(0.02, 0.02),
+        )
+        assert data_res['ok'] is True
+        assert data_res['status'] == 'sent_unconfirmed'
+        assert data_res['confirmed'] is False
+        assert data_res['launched'] is False
+        assert data_res['browser_opened'] is False
+        assert [p for t, p in broker.received if t.endswith('/actions/launchapp')] == []
+
+        # 2. Launching uninstalled data: URI directly refuses instead of black-screening TV
+        bad_launch = ctrl.launch_app('127.0.0.1', 'tmalemtvvidaa', 'Alem TV', 'data:text/html;base64,PGgxPkFsZW08L2gxPg==')
+        assert bad_launch['ok'] is False
+        assert bad_launch['launched'] is False
+        assert [p for t, p in broker.received if t.endswith('/actions/launchapp')] == []
+
+        # 3. Unconfirmed HTTP LAN install routes launch through real TV Browser (appId='16')
+        lan_res = ctrl.install_tile(
+            '127.0.0.1',
+            'tm.belet.vidaa',
+            'Belet',
+            'http://192.168.137.1:18880/apps/belet/',
+            auto_launch=True,
+            poll_delays=(0.02, 0.02),
+        )
+        assert lan_res['ok'] is True
+        assert lan_res['status'] == 'sent_unconfirmed'
+        assert lan_res['browser_opened'] is True
+        assert lan_res['launched'] is True
+        launches = [json.loads(p) for t, p in broker.received if t.endswith('/actions/launchapp')]
+        assert len(launches) == 1
+        assert launches[0]['appId'] == '16'
+        assert launches[0]['url'] == 'http://192.168.137.1:18880/apps/belet/'
+        assert launches[0]['storeType'] == 100
+
+        # 4. VIDAA U5 (url='url16' on TV Browser) skips fake MQTT URL launch to avoid black screen / wrong page
+        broker.apps[0]['url'] = 'url16'
+        broker.received.clear()
+        u5_res = ctrl.install_tile(
+            '127.0.0.1',
+            'tm.belet.vidaa',
+            'Belet',
+            'http://192.168.137.1:18880/apps/belet/',
+            auto_launch=True,
+            poll_delays=(0.02, 0.02),
+        )
+        assert u5_res['ok'] is True and u5_res['launched'] is False
+        assert u5_res['launch_skipped_reason'] == 'tv_browser_ignores_mqtt_url'
+        assert [p for t, p in broker.received if t.endswith('/actions/launchapp')] == []
+
+        # Restore 'browser' so Api.open_hisense_portal_on_tv exercises TV Browser launch
+        broker.apps[0]['url'] = 'browser'
+
+        # 5. Api.open_hisense_portal_on_tv opens TV Browser (appId='16'), NEVER fake 'neon.vidaa.installer'
+        #    and Api.install_hisense_alemtv defaults to 'lan_server' instead of giant 'data_url'
+        api = Api()
+        try:
+            ap1 = api.start_hisense_pairing('127.0.0.1', 'modern')
+            assert api.confirm_hisense_pairing(ap1['pairing_id'], '4821')['ok']
+            broker.received.clear()
+            portal_res = api.open_hisense_portal_on_tv('127.0.0.1', alem_portal='http://iptv.tmalem.tv')
+            assert portal_res['ok'] is True and portal_res['launched'] is True
+            portal_launches = [json.loads(p) for t, p in broker.received if t.endswith('/actions/launchapp')]
+            assert len(portal_launches) == 1
+            assert portal_launches[0]['appId'] == '16'
+            assert portal_launches[0]['url'].startswith('http://')
+
+            monkeypatch.setattr(api._hisense_ctrl, 'install_tile', lambda *a, **kw: {
+                'ok': True, 'confirmed': True, 'app_id': a[1], 'title': a[2], 'url': a[3],
+            })
+            default_alem = api.install_hisense_alemtv('127.0.0.1', launch=False)
+            assert default_alem['ok'] is True
+            assert default_alem['mode'] == 'lan_server'
+            assert '/apps/alemtv?' in default_alem['url']
+        finally:
+            api.close()
+    finally:
+        broker.close()
+
+
+def test_portal_preferred_ports_tv_probe_and_hosts_fallback(tmp_path):
+    logs = []
+    p1 = hisense_vidaa.HisensePortalServer(logs.append)
+    p2 = hisense_vidaa.HisensePortalServer(logs.append)
+    try:
+        i1 = p1.ensure_started(tv_ip='127.0.0.1')
+        i2 = p2.ensure_started(tv_ip='127.0.0.1')
+        assert i1['port'] in hisense_vidaa._VIDAA_HTTP_PREFERRED_PORTS
+        assert i2['port'] in hisense_vidaa._VIDAA_HTTP_PREFERRED_PORTS
+        assert i1['port'] != i2['port']
+
+        base = f'http://127.0.0.1:{i1["port"]}'
+        opt_req = urllib.request.Request(f'{base}/__tv_probe', method='OPTIONS')
+        with urllib.request.urlopen(opt_req, timeout=3) as resp:
+            assert resp.status == 204
+            assert resp.headers.get('Access-Control-Allow-Origin') == '*'
+
+        probe_req = urllib.request.Request(
+            f'{base}/__tv_probe',
+            data=json.dumps({
+                'page': 'selfinstall',
+                'model': '55U7HQ',
+                'osVersion': 'VIDAA6.0',
+                'hasHiUtils': False,
+                'hasInstallApp': False,
+            }).encode('utf-8'),
+            method='POST',
+            headers={'Content-Type': 'application/json'},
+        )
+        with urllib.request.urlopen(probe_req, timeout=3) as resp:
+            assert resp.status == 200
+            assert json.loads(resp.read().decode('utf-8'))['ok'] is True
+        assert p1.last_tv_probe['model'] == '55U7HQ'
+        assert any('[TV PROBE' in line and '55U7HQ' in line for line in logs)
+
+        # hosts fallback safely adds and cleanly removes only NEON VIDAAHUB block
+        hosts_file = tmp_path / 'hosts'
+        hosts_file.write_text('127.0.0.1 localhost\n# user entry\n10.0.0.5 mybox\n', encoding='utf-8')
+        ok_h, _ = hisense_vidaa._hosts_set_vidaahub('192.168.137.1', hosts_path=str(hosts_file))
+        assert ok_h is True
+        written = hosts_file.read_text(encoding='utf-8')
+        assert '192.168.137.1 vidaahub.com' in written
+        assert '10.0.0.5 mybox' in written
+
+        assert hisense_vidaa._hosts_clear_vidaahub(hosts_path=str(hosts_file)) is True
+        cleared = hosts_file.read_text(encoding='utf-8')
+        assert 'vidaahub.com' not in cleared
+        assert hisense_vidaa._HOSTS_BEGIN_MARKER not in cleared
+        assert '10.0.0.5 mybox' in cleared
+    finally:
+        p2.stop()
+        p1.stop()
