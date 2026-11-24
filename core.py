@@ -20,12 +20,14 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
 import paramiko
 
 from lg_remote import LGRemote, ALLOWED_KEYS as LG_REMOTE_KEYS
+import vless
 import msb_callback
 import belet_lg_client
 from local_tv_packages import read_package, validate_ipk, validate_wgt
@@ -51,14 +53,30 @@ from samsung_tizen import (
     sign_wgt_bytes,
     verify_wgt_signatures,
 )
+from samsung_time_override import (
+    DEFAULT_SOURCE_DOMAINS as SAMSUNG_TIME_DEFAULT_SOURCES,
+    SamsungTimeOverrideServer,
+    deploy_samsung_time_remote as deploy_samsung_time_ssh,
+    diagnose_samsung_time_reachability as probe_samsung_time_reachability,
+    generate_router_snippets as make_samsung_router_snippets,
+    generate_standalone_gateway_script as build_samsung_standalone_gateway,
+    normalize_time_target as normalize_samsung_time_target,
+    parse_source_domains as parse_samsung_source_domains,
+    parse_upstream_dns as parse_samsung_upstream_dns,
+    sync_clock_from_target as sync_samsung_clock_from_target,
+)
 from alemtv_app import (
     ALEMTV_APP_ID,
     ALEMTV_DEFAULT_PORTAL,
     ALEMTV_PKG_ID,
+    ALEMTV_VIDAA_ID,
     ALEMTV_WEBOS_ID,
     build_alemtv_ipk,
+    build_alemtv_vidaa_data_url,
     build_alemtv_wgt,
 )
+import belet_vidaa_client
+import hisense_vidaa
 
 REGION_CODES = {'22282', '3642', '19461', '13741', '13869', '19345', '18362', '18789', '4837'}
 
@@ -90,6 +108,7 @@ class Api:
         self.vpn_state = 'DISCONNECTED'
         self.vpn_profile = None
         self.vpn_lock = threading.Lock()
+        self._vpn_control = threading.RLock()
         self.hotspot_active = False
         self.hotspot_mode = None
         self.ethernet_active = False
@@ -115,7 +134,18 @@ class Api:
         self._sam_logs = []
         self._sam_log_lock = threading.Lock()
         self._samsung_auth_stop = threading.Event()
+        self._samsung_time_server = SamsungTimeOverrideServer(log_cb=self._sam_log)
         self._logger = self._setup_logger()
+        self._hisense_logs = []
+        self._hisense_log_lock = threading.Lock()
+        self._hisense_store = hisense_vidaa.HisenseSessionStore(
+            os.path.join(self._data_dir(), 'hisense_sessions.json')
+        )
+        self._hisense_ctrl = hisense_vidaa.HisenseController(
+            store=self._hisense_store,
+            log_fn=self._hisense_log,
+        )
+        self._hisense_portal = hisense_vidaa.HisensePortalServer(log_fn=self._hisense_log)
 
     def _data_dir(self):
         base = os.environ.get('APPDATA') or os.path.join(os.path.expanduser('~'), '.config')
@@ -163,6 +193,27 @@ class Api:
             'samsung_ip': '192.168.1.101',
             'samsung_port': 'auto',
             'samsung_tokens': {},
+            'samsung_time_mode': 'gateway',
+            'samsung_time_target': 'time.cloudflare.com',
+            'samsung_time_sources': ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES),
+            'samsung_time_intercept_check': True,
+            'samsung_time_upstream_dns': '',
+            'samsung_time_autostop': False,
+            'samsung_time_remote_host': '',
+            'samsung_time_remote_user': 'root',
+            'samsung_time_remote_port': 22,
+            'hisense_ip': '192.168.1.102',
+            'hisense_auth_profile': 'auto',
+            'hisense_alem_portal': ALEMTV_DEFAULT_PORTAL,
+            'hisense_alem_mode': 'data_url',
+            'hisense_callback_mode': 'data_url',
+            'hisense_callback_custom_url': '',
+            'hisense_belet_mode': 'lan_server',
+            'hisense_belet_url': 'https://belet.tm/',
+            'hisense_custom_id': 'neon.customapp',
+            'hisense_custom_title': 'My TV App',
+            'hisense_custom_url': '',
+            'hisense_custom_icon': '',
         }
         try:
             with open(self._settings_path(), 'r', encoding='utf-8') as f:
@@ -178,7 +229,16 @@ class Api:
             return self.load_settings()
         current = self.load_settings()
         # Never persist secrets in settings.json.
-        forbidden = {'passphrase', 'password', 'tv_pass', 'vpn_pass', 'hotspot_pass'}
+        forbidden = {
+            'passphrase',
+            'password',
+            'tv_pass',
+            'vpn_pass',
+            'hotspot_pass',
+            'samsung_time_remote_pass',
+            'ssh_pass',
+            'remote_pass',
+        }
         for k, v in updates.items():
             if k not in forbidden:
                 current[k] = v
@@ -1228,7 +1288,34 @@ class Api:
             except Exception:
                 pass
 
-    def install_local_samsung_wgt(self, ip, path, _expected_pkg=None, _launch=False):
+    @staticmethod
+    def _customize_belet_client_wgt(data, bypass_mode='bypass', strip_service=False):
+        import zipfile
+        out_buf = io.BytesIO()
+        mode_val = 'off' if bypass_mode == 'direct' else 'always'
+        with zipfile.ZipFile(io.BytesIO(data), 'r') as zin, zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                if strip_service and item.filename in ('service/clock-proxy.js', 'wrt-service.js'):
+                    continue
+                payload = zin.read(item.filename)
+                if strip_service and item.filename == 'config.xml':
+                    cfg = payload.decode('utf-8')
+                    cfg = re.sub(r'\s*<feature\s+name="http://tizen\.org/feature/web\.service"[^>]*/?>', '', cfg)
+                    cfg = re.sub(r'\s*<tizen:service\b[^>]*>.*?</tizen:service>', '', cfg, flags=re.S)
+                    cfg = cfg.replace('background-support="enable"', 'background-support="disable"')
+                    payload = cfg.encode('utf-8')
+                elif item.filename == 'index.html':
+                    html_txt = payload.decode('utf-8')
+                    html_txt = re.sub(r'\s*<meta\s+name="neon-bypass-mode"[^>]*>', '', html_txt)
+                    html_txt = re.sub(r'\s*<meta\s+name="neon-pc-bridge"[^>]*>', '', html_txt)
+                    meta_tag = f'<meta name="neon-bypass-mode" content="{mode_val}">'
+                    if '</head>' in html_txt:
+                        html_txt = html_txt.replace('</head>', f'\n{meta_tag}\n</head>', 1)
+                        payload = html_txt.encode('utf-8')
+                zout.writestr(item.filename, payload)
+        return out_buf.getvalue()
+
+    def install_local_samsung_wgt(self, ip, path, _expected_pkg=None, _launch=False, _bypass_mode='auto'):
         try:
             clean_ip = self._resolve_samsung_ip(ip)
             data = read_package(path, '.wgt')
@@ -1237,7 +1324,12 @@ class Api:
                 raise ValueError('Bundled application has an unexpected package ID.')
         except (ValueError, OSError) as exc:
             return {'ok': False, 'error': str(exc)}
-        lines = ['[+] Installing selected WGT: ' + pkg_id + '. Existing signatures will be replaced.']
+        if _expected_pkg == 'BeletFilm1' and _bypass_mode == 'direct':
+            lines = ['[+] Installing Belet TV (BeletFilm1) WITHOUT bypass (direct new client)...']
+        elif _expected_pkg == 'BeletFilm1':
+            lines = ['[+] Installing Belet TV (BeletFilm1) WITH bypass (ClockProxy)...']
+        else:
+            lines = ['[+] Installing selected WGT: ' + pkg_id + '. Existing signatures will be replaced.']
         self._samsung_auth_stop.clear()
         try:
             with SdbClient(clean_ip, timeout=10.0) as sdb:
@@ -1253,7 +1345,14 @@ class Api:
                     bundle = cert_mgr.sign_in_and_provision(duid, open_browser=True, timeout=240.0,
                                 stop_event=self._samsung_auth_stop,
                                 url_cb=lambda u: self._sam_log('[CERT] Sign-in URL: ' + u))
-                signed = sign_wgt_bytes(data, bundle['author_key'], bundle['author_certs'], bundle['dist_key'], bundle['dist_certs'])
+                wgt_payload = data
+                if _expected_pkg == 'BeletFilm1':
+                    wgt_payload = self._customize_belet_client_wgt(
+                        data,
+                        bypass_mode=_bypass_mode,
+                        strip_service=(_bypass_mode == 'direct'),
+                    )
+                signed = sign_wgt_bytes(wgt_payload, bundle['author_key'], bundle['author_certs'], bundle['dist_key'], bundle['dist_certs'])
                 verify_wgt_signatures(signed)
                 remote = sdk_path + '/' + pkg_id + '.wgt'
                 sdb.push_bytes(signed, remote)
@@ -1261,6 +1360,40 @@ class Api:
                 if result.strip():
                     lines.extend(result.strip().splitlines())
                 diag = diagnose_install_output(result, pkg_id)
+                if diag.get('status') == 'cert_mismatch':
+                    lines.append(f'[i] Removing previous {pkg_id} (certificate mismatch) and retrying...')
+                    try:
+                        sdb.uninstall_app(pkg_id)
+                    except Exception:
+                        pass
+                    result = sdb.install_wgt(pkg_id, remote, timeout=120.0)
+                    if result.strip():
+                        lines.extend(result.strip().splitlines())
+                    diag = diagnose_install_output(result, pkg_id)
+                if _expected_pkg == 'BeletFilm1' and _bypass_mode != 'direct' and diag.get('status') in ('manifest_error', 'api_mismatch'):
+                    lines.append('[!] ТВ отклонил манифест фонового сервиса ClockProxy; ставим облегчённый пакет без встроенного сервиса.')
+                    stripped_payload = self._customize_belet_client_wgt(
+                        wgt_payload,
+                        bypass_mode=_bypass_mode,
+                        strip_service=True,
+                    )
+                    signed = sign_wgt_bytes(stripped_payload, bundle['author_key'], bundle['author_certs'], bundle['dist_key'], bundle['dist_certs'])
+                    verify_wgt_signatures(signed)
+                    sdb.push_bytes(signed, remote)
+                    result = sdb.install_wgt(pkg_id, remote, timeout=120.0)
+                    if result.strip():
+                        lines.extend(result.strip().splitlines())
+                    diag = diagnose_install_output(result, pkg_id)
+                if diag.get('status') == 'cert_mismatch':
+                    lines.append(f'[i] Removing previous {pkg_id} (certificate mismatch) and retrying...')
+                    try:
+                        sdb.uninstall_app(pkg_id)
+                    except Exception:
+                        pass
+                    result = sdb.install_wgt(pkg_id, remote, timeout=120.0)
+                    if result.strip():
+                        lines.extend(result.strip().splitlines())
+                    diag = diagnose_install_output(result, pkg_id)
                 if diag.get('status') != 'ok':
                     return {'ok': False, 'error': diag.get('reason') or 'TV did not confirm WGT installation; see log.', 'output': '\n'.join(lines)}
                 lines.append('[+] Samsung reported installation complete. Open the app on the TV.')
@@ -1275,10 +1408,50 @@ class Api:
             return {'ok': False, 'error': str(exc), 'output': '\n'.join(lines)}
 
     def install_samsung_belet_client(self, ip=None):
-        """Sign and install the separate experimental client, never the ordinary Belet."""
+        """Sign and install Belet Samsung (BeletFilm1) WITH bypass enabled from startup."""
         return self.install_local_samsung_wgt(
             ip, resource('samsung-belet/BeletSamsungClient-unsigned.wgt'),
             _expected_pkg='BeletFilm1', _launch=True)
+
+    def install_samsung_belet_direct_client(self, ip=None):
+        """Sign and install Belet Samsung (BeletFilm1) WITHOUT bypass (direct new client)."""
+        return self.install_local_samsung_wgt(
+            ip, resource('samsung-belet/BeletSamsungClient-unsigned.wgt'),
+            _expected_pkg='BeletFilm1', _launch=True, _bypass_mode='direct')
+
+    def launch_samsung_belet_client(self, ip=None):
+        try:
+            clean_ip = self._resolve_samsung_ip(ip)
+        except ValueError as exc:
+            return {'ok': False, 'error': str(exc)}
+        app_id = 'BeletFilm1.BeletClient'
+        try:
+            with SdbClient(clean_ip, timeout=10.0) as sdb:
+                reply = sdb.launch_app(app_id)
+            return {
+                'ok': True,
+                'app_id': app_id,
+                'output': f'[+] Launched Belet ({app_id}): {reply}',
+            }
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Launch failed: {exc}'}
+
+    def remove_samsung_belet_client(self, ip=None):
+        try:
+            clean_ip = self._resolve_samsung_ip(ip)
+        except ValueError as exc:
+            return {'ok': False, 'error': str(exc)}
+        pkg_id = 'BeletFilm1'
+        try:
+            with SdbClient(clean_ip, timeout=10.0) as sdb:
+                reply = sdb.uninstall_app(pkg_id)
+            return {
+                'ok': True,
+                'pkg_id': pkg_id,
+                'output': f'[+] Removed Belet ({pkg_id}): {reply.strip() or "done"}',
+            }
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Uninstall failed: {exc}'}
 
     def browse_profile(self):
         if not self.window:
@@ -1365,7 +1538,48 @@ class Api:
             sock.bind(('127.0.0.1', 0))
             return sock.getsockname()[1]
 
+    def connect_vless(self, link):
+        if platform.system() != 'Windows':
+            return {'error': 'Embedded VLESS is available on Windows x64.'}
+        with self._vpn_control:
+            if self.openvpn_process and self.openvpn_process.poll() is None:
+                return {'error': 'Disconnect the active VPN first.'}
+            try:
+                config = vless.configuration(link)
+            except ValueError as exc:
+                return {'error': str(exc)}
+            exe = resource(os.path.join('assets', 'vless', 'sing-box.exe'))
+            if not os.path.isfile(exe):
+                return {'error': 'Embedded VLESS engine missing. Reinstall the NEON Windows build.'}
+            proc = None
+            try:
+                # stdin avoids putting UUIDs in the process list or temp files.
+                proc = subprocess.Popen([exe, 'run', '-c', 'stdin'], cwd=os.path.dirname(exe),
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        encoding='utf-8', errors='replace', creationflags=self._creation_flags())
+                proc.stdin.write(json.dumps(config))
+                proc.stdin.close()
+                with self.vpn_lock:
+                    self.openvpn_process = proc  # common owner for both engines and ICS teardown
+                    self._vpn_stop_requested = False
+                    self._mgmt_port = None
+                    self.vpn_profile = 'VLESS'
+                    self.vpn_adapter_name = self.vpn_adapter_guid = self.vpn_ifindex = None
+                    self.vpn_state = 'CONNECTING'
+                    self.vpn_logs = ['[NEON] Starting embedded VLESS tunnel.']
+                threading.Thread(target=self._read_openvpn_log, args=(proc, True), daemon=True).start()
+                return {'ok': True, 'output': 'Starting NEON-VLESS.'}
+            except OSError:
+                if proc is not None:
+                    proc.kill()
+                    proc.wait()
+                return {'error': 'Cannot start the embedded VLESS engine. Check the Windows build and permissions.'}
+
     def connect_vpn(self, profile, username='', password=''):
+        with self._vpn_control:
+            return self._connect_openvpn(profile, username, password)
+
+    def _connect_openvpn(self, profile, username, password):
         if platform.system() != 'Windows':
             return {'error': 'Headless Conf engine control is available in the Windows build.'}
         info = self.inspect_profile(profile)
@@ -1464,7 +1678,7 @@ class Api:
         except Exception as exc:
             self._logger.warning('Emergency sharing teardown error: %s', exc)
 
-    def _read_openvpn_log(self, process):
+    def _read_openvpn_log(self, process, is_vless=False):
         fatal_markers = (
             'AUTH_FAILED',
             'Exiting due to fatal error',
@@ -1479,6 +1693,13 @@ class Api:
                     continue
                 drop_auth = False
                 with self.vpn_lock:
+                    if is_vless:
+                        # Do not forward engine logs: they can contain profile data or browsing activity.
+                        if self.openvpn_process is process and 'sing-box started (' in line:
+                            self.vpn_state = 'CONNECTED'
+                            self.vpn_adapter_name = vless.ADAPTER
+                            self.vpn_logs.append('[NEON] VLESS tunnel interface ready.')
+                        continue
                     self.vpn_logs.append(line)
                     if len(self.vpn_logs) > 1500:
                         self.vpn_logs = self.vpn_logs[-1000:]
@@ -1533,8 +1754,9 @@ class Api:
                     process.stdout.close()
             except Exception:
                 pass
-            self._cleanup_auth_file()
-            rc = process.poll()
+            if not is_vless:
+                self._cleanup_auth_file()
+            rc = process.wait() if is_vless else process.poll()
             need_teardown = False
             with self.vpn_lock:
                 is_current = self.openvpn_process is process
@@ -1545,6 +1767,8 @@ class Api:
                     if stop_requested:
                         self.vpn_state = 'DISCONNECTED'
                     else:
+                        if is_vless and rc:
+                            self.vpn_logs.append('[!] VLESS stopped (exit %s). Check the profile and administrator permissions.' % rc)
                         if self.vpn_state != 'ERROR':
                             self.vpn_state = 'ERROR' if (rc is not None and rc != 0) else 'DISCONNECTED'
                         if self.hotspot_active or self.ethernet_active or self.app_shared_pair:
@@ -1580,6 +1804,10 @@ class Api:
             return False
 
     def disconnect_vpn(self, profile=None):
+        with self._vpn_control:
+            return self._disconnect_vpn()
+
+    def _disconnect_vpn(self):
         with self.vpn_lock:
             self._vpn_stop_requested = True
             proc = self.openvpn_process
@@ -3117,6 +3345,18 @@ class Api:
 
         self._cleanup_auth_file()
         self.cancel_samsung_auth()
+        try:
+            self._samsung_time_server.stop()
+        except Exception:
+            pass
+        try:
+            self._hisense_ctrl.close()
+        except Exception:
+            pass
+        try:
+            self._hisense_portal.stop()
+        except Exception:
+            pass
         self.disconnect_tv()
         self.disconnect_lg_remote()
         self.disconnect_samsung()
@@ -3246,6 +3486,13 @@ class Api:
         ],
         'exit_factory_loop': [
             ('KEY_FACTORY', 0.25, 'Click'),
+        ],
+        'hospitality_menu': [
+            ('KEY_MUTE', 0.35, 'Click'),
+            ('KEY_1', 0.35, 'Click'),
+            ('KEY_1', 0.35, 'Click'),
+            ('KEY_9', 0.35, 'Click'),
+            ('KEY_ENTER', 0.25, 'Click'),
         ],
         'reboot_tv': [
             ('KEY_POWER', 0.25, 'Click'),
@@ -3473,6 +3720,33 @@ class Api:
                         continue
                 return {'ok': False, 'error': f'Samsung send_key failed ({clean_key}): {exc}'}
         return {'ok': False, 'error': 'Samsung send_key failed'}
+
+    def samsung_send_text(self, text):
+        raw = str(text or '')
+        if not raw:
+            return {'ok': False, 'error': 'Enter text or IP address to send to TV.'}
+        client = self._ensure_samsung_connected()
+        if client is None:
+            return {'ok': False, 'error': 'Samsung TV is not connected'}
+        if not hasattr(client, 'send_text'):
+            return {'ok': False, 'error': 'Text entry is supported on Tizen WebSocket TVs (8001/8002), not legacy 55000.'}
+
+        for attempt in range(2):
+            try:
+                with self._samsung_lock:
+                    if not self.samsung_client:
+                        raise ConnectionError('Samsung TV disconnected')
+                    self.samsung_client.send_text(raw)
+                return {'ok': True, 'text': raw, 'output': f'Sent text to TV input field: {raw}'}
+            except Exception as exc:
+                if attempt == 0 and self.samsung_ip:
+                    ip = self.samsung_ip
+                    port = str(self.samsung_port or 'auto')
+                    res = self.connect_samsung(ip, port=port)
+                    if res.get('ok'):
+                        continue
+                return {'ok': False, 'error': f'Samsung send_text failed: {exc}'}
+        return {'ok': False, 'error': 'Samsung send_text failed'}
 
     def samsung_send_sequence(self, steps):
         if not steps:
@@ -4171,4 +4445,600 @@ class Api:
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': f'[!] Uninstall failed: {exc}'}
 
+    def _effective_samsung_time_upstream(self, upstream_dns=None):
+        raw = str(upstream_dns or '').strip()
+        if raw:
+            return parse_samsung_upstream_dns(raw)
+        cfg = self._get_dns_config_from_settings()
+        if cfg.get('servers'):
+            return parse_samsung_upstream_dns(cfg['servers'])
+        return parse_samsung_upstream_dns(None)
+
+    def get_samsung_time_status(self, tv_ip=None):
+        s = self.load_settings()
+        target_tv = str(tv_ip or '').strip() or self.samsung_ip or str(s.get('samsung_ip') or '192.168.1.101')
+        st = self._samsung_time_server.get_status()
+        if not st.get('running'):
+            st['mode'] = str(s.get('samsung_time_mode', 'gateway') or 'gateway')
+            st['target'] = str(s.get('samsung_time_target', 'time.cloudflare.com') or 'time.cloudflare.com')
+            st['sources_text'] = str(s.get('samsung_time_sources') or ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES))
+            st['intercept_check'] = bool(s.get('samsung_time_intercept_check', True))
+            st['upstream_dns_text'] = str(s.get('samsung_time_upstream_dns', '') or '')
+            st['auto_stop_after_sync'] = bool(s.get('samsung_time_autostop', False))
+            st['pc_ip'] = _tizen_local_ip(target_tv)
+        else:
+            st['sources_text'] = ', '.join(
+                d for d in st.get('source_domains', [])
+                if d not in ('cdn.samsungcloudsolution.com', 'cdn.samsungcloudsolution.net')
+            ) or ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES)
+            st['upstream_dns_text'] = str(s.get('samsung_time_upstream_dns', '') or '')
+        return st
+
+    def save_samsung_time_settings(
+        self,
+        target=None,
+        mode=None,
+        source_domains=None,
+        intercept_check=None,
+        upstream_dns=None,
+        auto_stop_after_sync=None,
+    ):
+        s = self.load_settings()
+        clean_mode = 'dns_direct' if str(mode or s.get('samsung_time_mode') or 'gateway').strip().lower() == 'dns_direct' else 'gateway'
+        tgt_raw = str(target if target is not None else s.get('samsung_time_target') or 'time.cloudflare.com').strip()
+        spec = normalize_samsung_time_target(tgt_raw)
+        if clean_mode == 'dns_direct' and spec['is_local']:
+            raise ValueError('Direct DNS A-record mode needs a remote domain or IPv4 server (or use NEON Time Gateway).')
+        src_raw = source_domains if source_domains is not None else s.get('samsung_time_sources')
+        chk = bool(s.get('samsung_time_intercept_check', True) if intercept_check is None else intercept_check)
+        parsed_sources = parse_samsung_source_domains(src_raw, intercept_check=chk)
+        if spec['host'] in parsed_sources:
+            raise ValueError(f'Target "{spec["host"]}" cannot be inside Samsung intercepted source domains.')
+        user_sources_text = ', '.join(
+            d for d in parsed_sources
+            if d not in ('cdn.samsungcloudsolution.com', 'cdn.samsungcloudsolution.net')
+        ) or ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES)
+        up_raw = str(s.get('samsung_time_upstream_dns', '') if upstream_dns is None else upstream_dns).strip()
+        autostop = bool(s.get('samsung_time_autostop', False) if auto_stop_after_sync is None else auto_stop_after_sync)
+        self.save_settings({
+            'samsung_time_mode': clean_mode,
+            'samsung_time_target': spec['raw'],
+            'samsung_time_sources': user_sources_text,
+            'samsung_time_intercept_check': chk,
+            'samsung_time_upstream_dns': up_raw,
+            'samsung_time_autostop': autostop,
+        })
+        return {
+            'mode': clean_mode,
+            'target': spec['raw'],
+            'source_domains': user_sources_text,
+            'intercept_check': chk,
+            'upstream_dns': up_raw,
+            'auto_stop_after_sync': autostop,
+        }
+
+    def start_samsung_time_override(
+        self,
+        target=None,
+        mode=None,
+        source_domains=None,
+        intercept_check=True,
+        upstream_dns=None,
+        tv_ip=None,
+        auto_stop_after_sync=None,
+    ):
+        try:
+            saved = self.save_samsung_time_settings(
+                target=target,
+                mode=mode,
+                source_domains=source_domains,
+                intercept_check=intercept_check,
+                upstream_dns=upstream_dns,
+                auto_stop_after_sync=auto_stop_after_sync,
+            )
+            eff_upstreams = self._effective_samsung_time_upstream(saved['upstream_dns'])
+            clean_tv_ip = str(tv_ip or '').strip() or self.samsung_ip or str(self.load_settings().get('samsung_ip') or '192.168.1.101')
+            res = self._samsung_time_server.start(
+                target=saved['target'],
+                mode=saved['mode'],
+                source_domains=saved['source_domains'],
+                intercept_check=saved['intercept_check'],
+                upstream_dns=eff_upstreams,
+                tv_ip=clean_tv_ip,
+                auto_stop_after_sync=saved['auto_stop_after_sync'],
+            )
+            res['sources_text'] = saved['source_domains']
+            res['upstream_dns_text'] = saved['upstream_dns']
+            return res
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Samsung Time Override failed: {exc}'}
+
+    def stop_samsung_time_override(self):
+        try:
+            st = self._samsung_time_server.stop()
+            return st
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Stop failed: {exc}'}
+
+    def sync_samsung_time_now(self, target=None):
+        try:
+            s = self.load_settings()
+            tgt = str(target if target is not None else s.get('samsung_time_target') or 'time.cloudflare.com').strip()
+            up = self._effective_samsung_time_upstream(s.get('samsung_time_upstream_dns', ''))
+            if self._samsung_time_server.get_status().get('running') and (target is None or tgt == self._samsung_time_server.target):
+                res = self._samsung_time_server.sync_now(target=tgt, upstream_dns=up)
+            else:
+                res = sync_samsung_clock_from_target(tgt, upstream_dns=up)
+            msg = (
+                f"[+] Time sync OK from {res.get('target', tgt)} ({res.get('method', '')})"
+                f" | UTC {res.get('utc_iso', '')} | offset {res.get('offset_ms', 0):+d} ms"
+            )
+            res['output'] = msg
+            res['status'] = self.get_samsung_time_status()
+            return res
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Time sync failed: {exc}'}
+
+    def diagnose_samsung_time_reachability(self, resolvers=None):
+        try:
+            return probe_samsung_time_reachability(resolvers=resolvers)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Diagnostic failed: {exc}'}
+
+    def get_samsung_time_router_snippets(self, gateway_ip='', source_domains=None, intercept_check=None):
+        try:
+            s = self.load_settings()
+            src = source_domains if source_domains is not None else s.get('samsung_time_sources')
+            chk = bool(s.get('samsung_time_intercept_check', True) if intercept_check is None else intercept_check)
+            gw = str(gateway_ip or '').strip() or _tizen_local_ip(s.get('samsung_ip') or '192.168.1.101')
+            snips = make_samsung_router_snippets(gw, source_domains=src, intercept_check=chk)
+            snips['ok'] = True
+            return snips
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def export_samsung_time_gateway(
+        self,
+        save_path='',
+        target=None,
+        source_domains=None,
+        intercept_check=None,
+        upstream_dns=None,
+        advertise_ip='',
+    ):
+        try:
+            s = self.load_settings()
+            tgt = str(target if target is not None else s.get('samsung_time_target') or 'time.cloudflare.com').strip()
+            src = source_domains if source_domains is not None else s.get('samsung_time_sources')
+            chk = bool(s.get('samsung_time_intercept_check', True) if intercept_check is None else intercept_check)
+            up = self._effective_samsung_time_upstream(
+                upstream_dns if upstream_dns is not None else s.get('samsung_time_upstream_dns', '')
+            )
+            script_text = build_samsung_standalone_gateway(
+                target=tgt,
+                source_domains=src,
+                intercept_check=chk,
+                upstream_dns=up,
+                advertise_ip=advertise_ip,
+            )
+            if not save_path:
+                out_dir = self._data_dir()
+                os.makedirs(out_dir, exist_ok=True)
+                save_path = os.path.join(out_dir, 'neon_samsung_time_gateway.py')
+            with open(save_path, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(script_text)
+            return {
+                'ok': True,
+                'path': save_path,
+                'script': script_text,
+                'output': f'[+] Saved standalone 24/7 gateway script: {save_path}',
+            }
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Export failed: {exc}'}
+
+    def deploy_samsung_time_remote(
+        self,
+        host,
+        username='root',
+        password='',
+        port=22,
+        target=None,
+        source_domains=None,
+        intercept_check=None,
+        upstream_dns=None,
+        advertise_ip='',
+        gateway_ip='',
+    ):
+        try:
+            s = self.load_settings()
+            clean_host = str(host or '').strip()
+            clean_user = str(username or 'root').strip() or 'root'
+            clean_port = int(port or 22)
+            tgt = str(target if target is not None else s.get('samsung_time_target') or 'time.cloudflare.com').strip()
+            src = source_domains if source_domains is not None else s.get('samsung_time_sources')
+            chk = bool(s.get('samsung_time_intercept_check', True) if intercept_check is None else intercept_check)
+            up = self._effective_samsung_time_upstream(
+                upstream_dns if upstream_dns is not None else s.get('samsung_time_upstream_dns', '')
+            )
+            # Save only non-secret remote host/user/port; never persist password.
+            self.save_settings({
+                'samsung_time_remote_host': clean_host,
+                'samsung_time_remote_user': clean_user,
+                'samsung_time_remote_port': clean_port,
+            })
+            return deploy_samsung_time_ssh(
+                host=clean_host,
+                username=clean_user,
+                password=password,
+                port=clean_port,
+                target=tgt,
+                source_domains=src,
+                intercept_check=chk,
+                upstream_dns=up,
+                advertise_ip=advertise_ip,
+                gateway_ip=gateway_ip,
+            )
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Remote deploy failed: {exc}'}
+
+    # ------------------------------------------------------------------
+    # Hisense / Toshiba VIDAA Smart TV
+    # ------------------------------------------------------------------
+
+    def _hisense_log(self, msg):
+        line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+        with self._hisense_log_lock:
+            self._hisense_logs.append(line)
+            if len(self._hisense_logs) > 400:
+                self._hisense_logs = self._hisense_logs[-300:]
+        try:
+            self._logger.info('[HISENSE] %s', msg)
+        except Exception:
+            pass
+
+    def read_hisense_logs(self):
+        with self._hisense_log_lock:
+            out = list(self._hisense_logs)
+            self._hisense_logs.clear()
+            return {'logs': out}
+
+    def _resolve_hisense_ip(self, ip=None):
+        val = str(ip if ip is not None else '').strip()
+        if not val:
+            val = str(self.load_settings().get('hisense_ip') or '').strip()
+        return val
+
+    def discover_hisense(self):
+        try:
+            self._hisense_log('Сканирование сети (SSDP/UPnP) на наличие Hisense/Toshiba VIDAA…')
+            tvs = hisense_vidaa.discover_vidaa_tvs(timeout=2.5)
+            devices = [t.to_dict() for t in tvs]
+            self._hisense_log(f'Найдено устройств VIDAA: {len(devices)}')
+            return {'ok': True, 'devices': devices}
+        except Exception as exc:
+            self._hisense_log(f'Ошибка поиска VIDAA: {exc}')
+            return {'ok': False, 'devices': [], 'error': str(exc)}
+
+    def get_hisense_status(self, ip=None):
+        host = self._resolve_hisense_ip(ip)
+        sess = self._hisense_store.get(host) if host else None
+        pc_ip = hisense_vidaa.get_local_ip_for_tv(host)
+        return {
+            'ok': True,
+            'host': host,
+            'paired': bool(sess and sess.is_paired),
+            'auth_profile': sess.auth_profile if sess else '',
+            'brand': sess.brand if sess else 'his',
+            'friendly_name': sess.friendly_name if sess else '',
+            'model_name': sess.model_name if sess else '',
+            'portal_running': self._hisense_portal.running,
+            'portal_url': self._hisense_portal.base_url(host) if self._hisense_portal.running else '',
+            'vidaahub_running': self._hisense_portal.vidaahub_running,
+            'pc_ip': pc_ip,
+        }
+
+    def start_hisense_pairing(self, ip=None, auth_profile=None):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        prof = str(auth_profile or self.load_settings().get('hisense_auth_profile') or 'auto').strip()
+        self.save_settings({'hisense_ip': host, 'hisense_auth_profile': prof})
+        return self._hisense_ctrl.start_pairing(host, auth_profile=prof)
+
+    def confirm_hisense_pairing(self, pairing_id, pin):
+        return self._hisense_ctrl.confirm_pairing(pairing_id, pin)
+
+    def cancel_hisense_pairing(self, pairing_id=None):
+        return self._hisense_ctrl.cancel_pairing(pairing_id)
+
+    def forget_hisense_pairing(self, ip=None):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес ТВ.'}
+        removed = self._hisense_store.delete(host)
+        self._hisense_log(f'Удалена сохранённая сессия для {host}' if removed else f'Сессия для {host} не найдена')
+        return {'ok': True, 'removed': removed}
+
+    def list_hisense_apps(self, ip=None):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'apps': [], 'error': 'Укажите IP-адрес ТВ.'}
+        try:
+            apps = self._hisense_ctrl.list_apps(host)
+            return {'ok': True, 'apps': apps}
+        except Exception as exc:
+            self._hisense_log(f'Ошибка получения списка приложений {host}: {exc}')
+            return {'ok': False, 'apps': [], 'error': str(exc)}
+
+    def _hisense_asset_url(self, host, asset_name):
+        try:
+            self._hisense_portal.ensure_started(tv_ip=host)
+            return self._hisense_portal.icon_url(asset_name, tv_ip=host)
+        except Exception:
+            return ''
+
+    def _resolve_hisense_belet_url(self, host, mode, target_url=''):
+        clean_mode = (mode or 'lan_server').strip().lower()
+        if clean_mode == 'custom_url':
+            url = (target_url or 'https://belet.tm/').strip()
+            if not url:
+                raise ValueError('Укажите URL для режима Custom URL')
+            return url
+        if clean_mode == 'data_url':
+            return belet_vidaa_client.build_vidaa_data_url()
+        self._hisense_portal.ensure_started(tv_ip=host)
+        return f"{self._hisense_portal.base_url(host)}/apps/belet/"
+
+    def install_hisense_belet(self, ip=None, mode=None, target_url=None, launch=True):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        if isinstance(mode, str) and mode.strip().lower().startswith(('http://', 'https://', 'data:')):
+            target_url = mode
+            mode = 'custom_url'
+        s = self.load_settings()
+        clean_mode = str(mode or s.get('hisense_belet_mode') or 'lan_server').strip().lower()
+        url = str(target_url if target_url is not None else s.get('hisense_belet_url') or 'https://belet.tm/').strip()
+        self.save_settings({'hisense_ip': host, 'hisense_belet_mode': clean_mode, 'hisense_belet_url': url})
+
+        if clean_mode == 'tv_flash':
+            return self.open_hisense_portal_on_tv(host)
+
+        preset = hisense_vidaa.APP_PRESETS['belet']
+        icon = self._hisense_asset_url(host, preset['icon_asset'])
+        try:
+            app_url = self._resolve_hisense_belet_url(host, clean_mode, url)
+            res = self._hisense_ctrl.install_tile(
+                host,
+                preset['app_id'],
+                preset['title'],
+                app_url,
+                icon_url=icon,
+                auto_launch=bool(launch),
+            )
+            res['mode'] = clean_mode
+            return res
+        except Exception as exc:
+            self._hisense_log(f'Ошибка установки Belet на {host}: {exc}')
+            return {'ok': False, 'error': str(exc)}
+
+    def launch_hisense_belet(self, ip=None, mode=None, target_url=None):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        if isinstance(mode, str) and mode.strip().lower().startswith(('http://', 'https://', 'data:')):
+            target_url = mode
+            mode = 'custom_url'
+        s = self.load_settings()
+        clean_mode = str(mode or s.get('hisense_belet_mode') or 'lan_server').strip().lower()
+        url = str(target_url if target_url is not None else s.get('hisense_belet_url') or 'https://belet.tm/').strip()
+        preset = hisense_vidaa.APP_PRESETS['belet']
+        try:
+            app_url = self._resolve_hisense_belet_url(host, clean_mode, url)
+            return self._hisense_ctrl.launch_app(host, preset['app_id'], preset['title'], app_url)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def _resolve_hisense_alemtv_url(self, host, target_url, mode):
+        clean_mode = (mode or 'data_url').strip().lower()
+        portal = (target_url or ALEMTV_DEFAULT_PORTAL).strip()
+        if clean_mode == 'portal_url':
+            return portal
+        if clean_mode == 'lan_server':
+            self._hisense_portal.ensure_started(tv_ip=host, alem_portal=portal)
+            q = urllib.parse.urlencode({'portal': portal})
+            return f"{self._hisense_portal.base_url(host)}/apps/alemtv?{q}"
+        return build_alemtv_vidaa_data_url(default_portal=portal)
+
+    def install_hisense_alemtv(self, ip=None, target_url=None, mode=None, launch=True):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        s = self.load_settings()
+        portal = str(target_url or s.get('hisense_alem_portal') or ALEMTV_DEFAULT_PORTAL).strip()
+        clean_mode = str(mode or s.get('hisense_alem_mode') or 'data_url').strip().lower()
+        self.save_settings({'hisense_ip': host, 'hisense_alem_portal': portal, 'hisense_alem_mode': clean_mode})
+
+        if clean_mode == 'tv_flash':
+            return self.open_hisense_portal_on_tv(host, alem_portal=portal)
+
+        preset = hisense_vidaa.APP_PRESETS['alemtv']
+        icon = self._hisense_asset_url(host, preset['icon_asset'])
+        app_url = self._resolve_hisense_alemtv_url(host, portal, clean_mode)
+        try:
+            res = self._hisense_ctrl.install_tile(
+                host,
+                ALEMTV_VIDAA_ID,
+                preset['title'],
+                app_url,
+                icon_url=icon,
+                auto_launch=bool(launch),
+            )
+            res['mode'] = clean_mode
+            res['portal'] = portal
+            return res
+        except Exception as exc:
+            self._hisense_log(f'Ошибка установки Alem TV на {host}: {exc}')
+            return {'ok': False, 'error': str(exc)}
+
+    def launch_hisense_alemtv(self, ip=None, target_url=None, mode=None):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        s = self.load_settings()
+        portal = str(target_url or s.get('hisense_alem_portal') or ALEMTV_DEFAULT_PORTAL).strip()
+        clean_mode = str(mode or s.get('hisense_alem_mode') or 'data_url').strip().lower()
+        app_url = self._resolve_hisense_alemtv_url(host, portal, clean_mode)
+        try:
+            return self._hisense_ctrl.launch_app(host, ALEMTV_VIDAA_ID, 'Alem TV', app_url)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def _resolve_hisense_callback_url(self, host, mode, custom_url=''):
+        clean_mode = (mode or 'data_url').strip().lower()
+        if clean_mode == 'custom_url':
+            url = (custom_url or '').strip()
+            if not url:
+                raise ValueError('Укажите URL для режима Custom URL')
+            return url
+        if clean_mode == 'lan_server':
+            self._hisense_portal.ensure_started(tv_ip=host)
+            return f"{self._hisense_portal.base_url(host)}/apps/msbcallback"
+        return msb_callback.build_hisense_data_url()
+
+    def install_hisense_callback(self, ip=None, mode=None, custom_url=None, launch=True):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        s = self.load_settings()
+        clean_mode = str(mode or s.get('hisense_callback_mode') or 'data_url').strip().lower()
+        c_url = str(custom_url if custom_url is not None else s.get('hisense_callback_custom_url') or '').strip()
+        self.save_settings({
+            'hisense_ip': host,
+            'hisense_callback_mode': clean_mode,
+            'hisense_callback_custom_url': c_url,
+        })
+
+        if clean_mode == 'tv_flash':
+            return self.open_hisense_portal_on_tv(host)
+
+        preset = hisense_vidaa.APP_PRESETS['msbcallback']
+        icon = self._hisense_asset_url(host, preset['icon_asset'])
+        try:
+            app_url = self._resolve_hisense_callback_url(host, clean_mode, c_url)
+            res = self._hisense_ctrl.install_tile(
+                host,
+                msb_callback.HISENSE_ID,
+                msb_callback.HISENSE_TITLE,
+                app_url,
+                icon_url=icon,
+                auto_launch=bool(launch),
+            )
+            res['mode'] = clean_mode
+            return res
+        except Exception as exc:
+            self._hisense_log(f'Ошибка установки MSB Callback на {host}: {exc}')
+            return {'ok': False, 'error': str(exc)}
+
+    def launch_hisense_callback(self, ip=None, mode=None, custom_url=None):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        s = self.load_settings()
+        clean_mode = str(mode or s.get('hisense_callback_mode') or 'data_url').strip().lower()
+        c_url = str(custom_url if custom_url is not None else s.get('hisense_callback_custom_url') or '').strip()
+        try:
+            app_url = self._resolve_hisense_callback_url(host, clean_mode, c_url)
+            return self._hisense_ctrl.launch_app(
+                host, msb_callback.HISENSE_ID, msb_callback.HISENSE_TITLE, app_url
+            )
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def install_hisense_custom_app(self, ip=None, app_id='', title='', url='', icon_url='', launch=True):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        clean_title = (title or '').strip() or 'Custom App'
+        clean_url = (url or '').strip()
+        clean_id = hisense_vidaa.sanitize_app_id(app_id, clean_title)
+        clean_icon = (icon_url or '').strip()
+        self.save_settings({
+            'hisense_ip': host,
+            'hisense_custom_id': clean_id,
+            'hisense_custom_title': clean_title,
+            'hisense_custom_url': clean_url,
+            'hisense_custom_icon': clean_icon,
+        })
+        try:
+            return self._hisense_ctrl.install_tile(
+                host, clean_id, clean_title, clean_url, icon_url=clean_icon, auto_launch=bool(launch)
+            )
+        except Exception as exc:
+            self._hisense_log(f'Ошибка установки кастомного приложения на {host}: {exc}')
+            return {'ok': False, 'error': str(exc)}
+
+    def launch_hisense_app(self, ip=None, app_id='', title='', url=''):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        try:
+            return self._hisense_ctrl.launch_app(host, app_id, title=title, url=url)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def hisense_send_key(self, ip=None, key='KEY_OK'):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        try:
+            return self._hisense_ctrl.send_key(host, key)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def hisense_show_toast(self, ip=None, text='', title='NEON'):
+        host = self._resolve_hisense_ip(ip)
+        if not host:
+            return {'ok': False, 'error': 'Укажите IP-адрес Hisense VIDAA TV.'}
+        try:
+            return self._hisense_ctrl.show_toast(host, text or 'NEON connected', title=title)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def start_hisense_portal_server(self, ip=None, start_vidaahub=False, upstream_dns='8.8.8.8', alem_portal=None):
+        host = self._resolve_hisense_ip(ip)
+        try:
+            if start_vidaahub:
+                return self._hisense_portal.start_vidaahub_bridge(
+                    tv_ip=host, upstream_dns=upstream_dns, alem_portal=alem_portal
+                )
+            return self._hisense_portal.ensure_started(tv_ip=host, alem_portal=alem_portal)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def open_hisense_portal_on_tv(self, ip=None, use_vidaahub=False, alem_portal=None):
+        host = self._resolve_hisense_ip(ip)
+        info = self.start_hisense_portal_server(
+            ip=host, start_vidaahub=bool(use_vidaahub), alem_portal=alem_portal
+        )
+        if not info.get('ok'):
+            return info
+        target_url = 'https://vidaahub.com/' if (use_vidaahub and info.get('vidaahub_running')) else info['url']
+        launched = False
+        sess = self._hisense_store.get(host) if host else None
+        if host and sess and sess.is_paired:
+            try:
+                self._hisense_ctrl.launch_app(host, 'neon.vidaa.installer', 'NEON Installer', target_url)
+                launched = True
+            except Exception as exc:
+                self._hisense_log(f'Не удалось авто-открыть портал на ТВ {host}: {exc}')
+        info['mode'] = 'tv_flash'
+        info['portal_url'] = target_url
+        info['launched'] = launched
+        return info
+
+    def stop_hisense_portal_server(self):
+        self._hisense_portal.stop()
+        self._hisense_log('Локальный сервер / мост Hisense VIDAA остановлен')
+        return {'ok': True}
 

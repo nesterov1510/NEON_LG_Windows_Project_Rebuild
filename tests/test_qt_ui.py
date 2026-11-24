@@ -26,11 +26,11 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     win.show()
     qt_app.processEvents()
 
-    assert win.stack.count() == 5
+    assert win.stack.count() == 6
     assert win.current_tab == 0
     assert not win.windowIcon().isNull()
 
-    # Tab switching across LG, Samsung, Conf, Diagnostics and contacts
+    # Tab switching across LG, Samsung, Hisense, Conf, Diagnostics and contacts
     win.switch_tab(1)
     assert win.current_tab == 1
     win.switch_tab(2)
@@ -38,6 +38,8 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     win.switch_tab(3)
     assert win.current_tab == 3
     win.switch_tab(4)
+    assert win.current_tab == 4
+    win.switch_tab(5)
     assert win.page_title.text() == 'MSB CALLBACK'
     win.switch_tab(0)
 
@@ -70,7 +72,7 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     api.remember_profile(str(ovpn_auth))
     api.remember_profile(str(ovpn_cert))
 
-    win.switch_tab(2)
+    win.switch_tab(3)
     win.profile_combo.addItems(['auth', 'cert'])
     win.profile_combo.setCurrentText('auth')
     qt_app.processEvents()
@@ -102,10 +104,11 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     qt_app.processEvents()
     assert win.region_code_input.text() == '22282'
 
-    # Log writes to LG, Samsung, and Conf terminals
+    # Log writes to LG, Samsung, Hisense, and Conf terminals
     win.log('[+] Test synced log line')
     assert '[+] Test synced log line' in win.tv_term.edit.toPlainText()
     assert '[+] Test synced log line' in win.sam_term.edit.toPlainText()
+    assert '[+] Test synced log line' in win.his_term.edit.toPlainText()
     assert '[+] Test synced log line' in win.vpn_term.edit.toPlainText()
 
     # Samsung TV tab controls, Local Set guide, discovery, connect, and PC arrow navigation
@@ -164,23 +167,38 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     assert win.btn_sam_sdb_check is not None
     assert win.btn_sam_cert is not None
     assert win.btn_sam_belet_install is not None
+    assert win.btn_sam_belet_direct is not None
     assert win.btn_sam_belet_launch is not None
     assert win.btn_sam_belet_remove is not None
     assert len(win.sam_host_ip_lbl.text()) > 5
 
-    with mock.patch.object(api, 'install_samsung_belet', return_value={
+    with mock.patch.object(api, 'install_samsung_belet_client', return_value={
         'ok': True,
-        'duid': 'DUID_UI_1',
-        'app_id': 'BeletTV001.Belet',
-        'output': '[+] Belet (BeletTV001.Belet) installed successfully!',
+        'pkg_id': 'BeletFilm1',
+        'app_id': 'BeletFilm1.BeletClient',
+        'output': '[+] Belet (BeletFilm1.BeletClient) installed WITH bypass!',
     }) as m_sam_inst:
-        win.install_samsung_belet()
+        win.install_samsung_belet_client()
         deadline = __import__('time').time() + 2.0
         while win.sam_busy and __import__('time').time() < deadline:
             win._pump()
             qt_app.processEvents()
         m_sam_inst.assert_called_once()
-        assert 'BeletTV001.Belet' in win.sam_term.edit.toPlainText()
+        assert 'BeletFilm1.BeletClient' in win.sam_term.edit.toPlainText()
+
+    with mock.patch.object(api, 'install_samsung_belet_direct_client', return_value={
+        'ok': True,
+        'pkg_id': 'BeletFilm1',
+        'app_id': 'BeletFilm1.BeletClient',
+        'output': '[+] Belet (BeletFilm1.BeletClient) installed WITHOUT bypass!',
+    }) as m_sam_dir:
+        win.install_samsung_belet_direct_client()
+        deadline = __import__('time').time() + 2.0
+        while win.sam_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_sam_dir.assert_called_once()
+        assert 'WITHOUT bypass' in win.sam_term.edit.toPlainText()
 
     # LG page: the new native Belet client (tm.belet.neonclient) is installable from the UI
     prev_tv_connected = win.tv_connected
@@ -232,6 +250,8 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
          mock.patch.object(api, 'action', side_effect=AssertionError('must not act')), \
          mock.patch.object(api, 'install_belet_app', side_effect=AssertionError('must not install')), \
          mock.patch.object(api, 'install_samsung_belet', side_effect=AssertionError('must not install samsung')), \
+         mock.patch.object(api, 'install_samsung_belet_client', side_effect=AssertionError('must not install samsung client')), \
+         mock.patch.object(api, 'install_samsung_belet_direct_client', side_effect=AssertionError('must not install samsung direct')), \
          mock.patch.object(api, 'connect_samsung', side_effect=AssertionError('must not connect samsung')), \
          mock.patch.object(api, 'samsung_action', side_effect=AssertionError('must not send samsung action')), \
          mock.patch.object(api, 'connect_vpn', side_effect=AssertionError('must not start conf')), \
@@ -248,8 +268,8 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
             assert len(dlg.stream_view.toPlainText()) > 50
             dlg.close()
 
-    # Ethernet Conf sharing + Custom DNS controls on Tab 3
-    win.switch_tab(2)
+    # Ethernet Conf sharing + Custom DNS controls on Tab 3 (Conf · Wi-Fi · LAN)
+    win.switch_tab(3)
     assert win.eth_combo is not None
     assert win.btn_eth_start is not None
     assert win.btn_eth_stop is not None
@@ -345,12 +365,83 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     with open(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'ui.html'), 'r', encoding='utf-8') as hf:
         ui_html = hf.read()
     for token in (
-        "openSysTune('samsung')", 'checkSamSdb()', 'authSamCert()', 'installSamBelet()', 'launchSamBelet()', 'removeSamBelet()',
+        "openSysTune('samsung')", 'checkSamSdb()', 'authSamCert()',
+        'installSamBeletClient()', 'installSamBeletDirectClient()', 'launchSamBeletClient()', 'removeSamBeletClient()',
         'ethAdapter', 'startEthernetShare()', 'stopEthernetShare()',
         'dnsPreset', 'dnsPrimary', 'dnsSecondary', 'dnsApplyUplink', 'applySharingDns()', 'resetSharingDns()',
         'alemPortal', 'samAlemPortal', 'installAlem()', 'installSamAlem()',
+        'samTimeMode', 'samTimePreset', 'samTimeTarget', 'samTimeSources',
+        'samTimeChkCheck', 'samTimeUpstream', 'startSamTimeOverride()', 'stopSamTimeOverride()', 'syncSamTimeNow()',
+        'tabHis', 'hisPage', 'hisStartPairing()', 'hisBeletMode', 'hisInstallBelet()', 'hisInstallAlem()', 'hisInstallCallback()',
+        'installCallbackHisense()',
     ):
         assert token in ui_html
+
+    # Hisense VIDAA tab controls (Tab 2)
+    win.switch_tab(2)
+    assert win.his_ip is not None
+    assert win.btn_his_scan is not None
+    assert win.btn_his_pair is not None
+    assert win.his_belet_mode_combo.count() == 4
+    assert win.his_belet_url_wrap.isVisible() is False
+    idx_custom = win.his_belet_mode_combo.findData('custom_url')
+    win.his_belet_mode_combo.setCurrentIndex(idx_custom)
+    qt_app.processEvents()
+    assert win.his_belet_url_wrap.isVisible() is True
+    win.his_belet_mode_combo.setCurrentIndex(0)
+    qt_app.processEvents()
+    assert win.his_belet_url_wrap.isVisible() is False
+    assert win.btn_his_belet_install is not None
+    assert win.btn_his_alem_install is not None
+    assert win.btn_his_cb_install is not None
+    assert win.his_alem_combo.count() >= 7
+    with mock.patch.object(api, 'discover_hisense', return_value={
+        'ok': True,
+        'devices': [{'ip': '192.168.1.77', 'name': 'Hisense 55U7HQ', 'model': 'VIDAA', 'brand': 'his'}],
+    }):
+        win.his_scan()
+        deadline = __import__('time').time() + 2.0
+        while win.his_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        assert win.his_found_wrap.isVisible() is True
+        assert win.his_ip.text() == '192.168.1.77'
+
+    with mock.patch.object(api, 'start_hisense_pairing', return_value={
+        'ok': True,
+        'status': 'pin_required',
+        'pairing_id': 'pair-xyz',
+        'host': '192.168.1.77',
+        'auth_profile': 'modern',
+        'brand': 'his',
+    }):
+        win.his_start_pairing()
+        deadline = __import__('time').time() + 2.0
+        while win.his_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        assert win.his_pin_wrap.isVisible() is True
+        assert win._his_pairing_id == 'pair-xyz'
+
+    with mock.patch.object(api, 'install_hisense_belet', return_value={
+        'ok': True, 'confirmed': True, 'app_id': 'tm.belet.vidaa',
+    }) as m_hb:
+        win.his_install_belet()
+        deadline = __import__('time').time() + 2.0
+        while win.his_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_hb.assert_called_once()
+
+    with mock.patch.object(api, 'install_hisense_callback', return_value={
+        'ok': True, 'confirmed': True, 'app_id': 'neonmsbcallback',
+    }) as m_hcb:
+        win._install_callback_hisense()
+        deadline = __import__('time').time() + 2.0
+        while win.his_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_hcb.assert_called_once()
 
     # Check Alem TV Card portal selectors on webOS (Tab 0) and Samsung Tizen (Tab 1)
     assert win.alem_portal_combo is not None
@@ -359,6 +450,84 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     assert win.sam_alem_portal_combo is not None
     assert win.sam_alem_portal_combo.count() >= 7
     assert win.btn_sam_alem_install is not None
+
+    # Check Samsung Time Domain Override card widgets & start/stop flow
+    assert win.sam_time_mode_combo.count() == 2
+    assert win.sam_time_preset_combo.count() >= 6
+    assert win.sam_time_target_input.text() == 'time.cloudflare.com'
+    win.sam_time_target_input.setText('pool.ntp.org')
+    qt_app.processEvents()
+    assert win.sam_time_preset_combo.currentData() == 'pool.ntp.org'
+    win.sam_time_target_input.setText('my-ntp.example.com')
+    qt_app.processEvents()
+    assert win.sam_time_preset_combo.currentData() == 'custom'
+    with mock.patch.object(api, 'start_samsung_time_override', return_value={
+        'ok': True,
+        'running': True,
+        'mode': 'gateway',
+        'target': 'my-ntp.example.com',
+        'pc_ip': '192.168.1.45',
+        'dns_port': 53,
+        'http_port': 80,
+        'ntp_port': 123,
+        'offset_ms': 15,
+        'sync_method': 'SNTP :123',
+        'stats': {'dns_overridden': 2, 'http_timesync': 1, 'http_check': 1, 'ntp_hits': 0},
+        'output': '[+] Samsung Time Override ACTIVE',
+    }) as m_st_start:
+        win.start_samsung_time_override()
+        deadline = __import__('time').time() + 2.0
+        while win.sam_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_st_start.assert_called_once()
+        assert win.btn_sam_time_stop.isEnabled() is True
+        assert 'my-ntp.example.com' in win.sam_term.edit.toPlainText() or 'ACTIVE' in win.sam_time_status_lbl.text()
+
+    with mock.patch.object(api, 'stop_samsung_time_override', return_value={
+        'ok': True,
+        'running': False,
+        'pc_ip': '192.168.1.45',
+        'output': '[+] Samsung Time Override stopped.',
+    }) as m_st_stop:
+        win.stop_samsung_time_override()
+        deadline = __import__('time').time() + 2.0
+        while win.sam_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_st_stop.assert_called_once()
+        assert win.btn_sam_time_stop.isEnabled() is False
+
+    # One-time PC sync, diagnostic, autonomous 24/7 SSH deploy & TV text entry controls
+    assert win.sam_time_chk_autostop is not None
+    assert win.btn_sam_time_diag is not None
+    assert win.btn_sam_time_deploy is not None
+    assert win.btn_sam_time_export is not None
+    assert win.btn_sam_time_snippets is not None
+    assert win.sam_text_input is not None
+    assert win.btn_sam_send_text is not None
+    assert win.btn_sam_hotel is not None
+
+    with mock.patch.object(api, 'diagnose_samsung_time_reachability', return_value={
+        'ok': True,
+        'best_public_dns': '1.1.1.1',
+        'output': '[+] Direct DNS 1.1.1.1 works without PC!',
+    }) as m_diag:
+        win.diagnose_samsung_time_reachability()
+        deadline = __import__('time').time() + 2.0
+        while win.sam_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_diag.assert_called_once()
+
+    with mock.patch.object(api, 'samsung_send_text', return_value={'ok': True, 'output': 'Sent text'}) as m_txt:
+        win.sam_text_input.setText('1.1.1.1')
+        win.sam_send_text()
+        deadline = __import__('time').time() + 2.0
+        while win.sam_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        m_txt.assert_called_once_with('1.1.1.1')
 
     win._force_exit = True
     win.close()
@@ -377,8 +546,13 @@ def test_new_buttons_have_neon_styles(qt_app, tmp_path, monkeypatch):
     for text, style in [
         ('Подключить пульт', 'PrimaryBtn'), ('Отключить', 'GhostBtn'),
         ('▲', 'SamKeyPrimary'), ('HOME', 'SamKeyBtn'),
-        ('УСТАНОВИТЬ BELET SAMSUNG · НОВЫЙ КЛИЕНТ', 'NormalBtn'),
+        ('Belet TV · С обходом (1970 / TLS)', 'PrimaryBtn'),
+        ('Belet TV · Без обхода (Новый клиент)', 'NormalBtn'),
         ('УСТАНОВИТЬ НА LG', 'PrimaryBtn'), ('УСТАНОВИТЬ НА SAMSUNG', 'PrimaryBtn'),
+        ('УСТАНОВИТЬ НА HISENSE', 'PrimaryBtn'),
+        ('Установить Belet на Hisense', 'PrimaryBtn'),
+        ('Установить Alem TV на Hisense', 'PrimaryBtn'),
+        ('Установить MSB Callback', 'PrimaryBtn'),
     ]:
         assert any(button.objectName() == style for button in by_text(text))
         assert 'QPushButton#' + style in win.styleSheet()

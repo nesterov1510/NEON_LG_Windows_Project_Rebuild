@@ -59,15 +59,7 @@ calls.platformBack = 0;
 /* the shim must not fake Tizen-only player APIs */
 assert.strictEqual(sandbox.webapis.avplay, undefined, 'no avplay on webOS: the hls.js/<video> chain is used');
 
-/* Back: consumed by the client -> nothing happens, unconsumed -> leave the app */
-const keydown = listeners.keydown || [];
-assert.strictEqual(keydown.length, 1, 'one Back listener is registered after app.js');
-keydown[0]({ keyCode: 461, defaultPrevented: true });
-assert.strictEqual(calls.platformBack, 0, 'a handled Back stays inside the app');
-keydown[0]({ keyCode: 461, defaultPrevented: false });
-assert.strictEqual(calls.platformBack, 1, 'an unhandled Back leaves the app');
-keydown[0]({ keyCode: 13, defaultPrevented: false });
-assert.strictEqual(calls.platformBack, 1, 'OK is not the Back key');
+assert.strictEqual((listeners.keydown || []).length, 0, 'only the shared client handles Back');
 
 /* Magic Remote hover moves the DOM focus to the nearest focusable element */
 const card = makeNode('card focusable');

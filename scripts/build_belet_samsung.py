@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / 'belet_samsung_native'
 OUT = ROOT / 'samsung-belet' / 'BeletSamsungClient-unsigned.wgt'
 FILES = ('config.xml', 'index.html', 'style.css', 'api.js', 'hls.min.js', 'hls.LICENSE', 'app.js',
+         'wrt-service.js', 'service/clock-proxy.js',
          'icon.png', 'belet-logo.png', 'login-background.png', 'belet-regular.ttf', 'belet-bold.ttf')
 
 

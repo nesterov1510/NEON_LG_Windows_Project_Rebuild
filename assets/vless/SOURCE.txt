@@ -1,0 +1,4 @@
+NEON launches the unmodified sing-box 1.14.4 executable as a separate program.
+Source: https://github.com/SagerNet/sing-box/tree/v1.14.4
+Release (including Windows legacy build): https://github.com/SagerNet/sing-box/releases/tag/v1.14.4
+See LICENSE-sing-box.txt. The Windows build contains Wintun; see https://www.wintun.net/.

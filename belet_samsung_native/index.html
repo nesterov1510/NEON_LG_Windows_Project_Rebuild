@@ -24,10 +24,14 @@
 
     <!-- Boot -->
     <section id="boot" class="screen">
+      <div class="boot-glow" aria-hidden="true"></div>
       <div class="boot-inner">
-        <img class="boot-logo" src="belet-logo.png" alt="Bëlet">
-        <div class="boot-spinner" aria-hidden="true"></div>
-        <p id="bootStatus" class="boot-status" role="status">Подключение к Belet…</p>
+        <div class="boot-logo-wrap">
+          <img class="boot-logo" src="belet-logo.png" alt="Bëlet">
+        </div>
+        <div class="boot-progress" aria-hidden="true"><span class="boot-bar"></span></div>
+        <div class="boot-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p id="bootStatus" class="boot-status" role="status">Загрузка Belet…</p>
       </div>
     </section>
 
@@ -104,10 +108,18 @@
         </div>
       </div>
       <div id="rows" class="rows"></div>
+      <div id="homeLoading" class="home-loading hidden">
+        <div class="boot-progress" aria-hidden="true"><span class="boot-bar"></span></div>
+        <div class="boot-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="boot-status">Загрузка каталога…</p>
+      </div>
       <div id="homeEmpty" class="empty hidden">
         <h2>Каталог пуст</h2>
         <p>Сервис ответил, но не вернул ни одного раздела. Проверьте подписку и повторите.</p>
-        <button id="homeReload" class="ghost focusable" type="button">Обновить</button>
+        <div class="empty-actions">
+          <button id="homeReload" class="ghost focusable" type="button">Обновить</button>
+          <button id="homeHelp" class="ghost focusable" type="button">Проверка сети и справка</button>
+        </div>
       </div>
     </section>
 
@@ -139,7 +151,7 @@
 
     <!-- Detail -->
     <section id="detail" class="screen hidden">
-      <div id="detailBackdrop" class="detail-backdrop" aria-hidden="true"></div>
+      <div id="detailBackdrop" class="detail-backdrop" aria-hidden="true"><img id="detailBackdropImg" class="detail-backdrop-img" alt=""></div>
       <div class="detail-scroll">
         <div class="detail-top">
           <img id="detailPoster" class="detail-poster" alt="">
@@ -220,15 +232,15 @@
       <div class="screen-head"><h1>Проверка сети и справка</h1></div>
       <div class="about-layout">
         <div id="aboutStatus" class="about-card"></div>
-        <div class="about-text">
-          <p>Клиент обращается к тем же серверам, что и приложение Belet: авторизация, каталог, видеосервис и поиск. Если один из них недоступен, экран покажет причину.</p>
-          <p>Воспроизведение использует нативный AVPlay телевизора, при его отказе — HTML5-плеер. Поддержка конкретного кодека зависит от модели телевизора и активной подписки.</p>
-          <p>Ошибка HTTP 0 при доступном Wi-Fi означает, что браузер ТВ заблокировал запрос (CORS) или сервер недоступен из вашей сети. Повторите проверку после перезагрузки телевизора.</p>
-          <p>Это неофициальный клиент, установленный через NEON. Аккаунт и токены не передаются третьим лицам.</p>
-        </div>
+        <div id="aboutClockAlert" class="about-alert hidden"></div>
         <div class="about-actions">
           <button id="aboutRetest" class="primary focusable" type="button">Проверить снова</button>
           <button id="aboutBack" class="ghost focusable" type="button">Назад</button>
+        </div>
+        <div class="about-text">
+          <p>Клиент обращается напрямую к серверам Belet (авторизация, каталог, видеосервис и поиск). Воспроизведение использует нативный AVPlay, при отказе — HTML5-плеер.</p>
+          <p>Если сеть (Wi-Fi или Ethernet) подключена, но время ТВ сброшено на 01.01.1970, браузер блокирует HTTPS-сертификаты (HTTP 0). Настройте время в меню ТВ — приложение подключится автоматически.</p>
+          <p>Это неофициальный клиент, установленный через NEON. Аккаунт и токены хранятся только на телевизоре.</p>
         </div>
       </div>
     </section>

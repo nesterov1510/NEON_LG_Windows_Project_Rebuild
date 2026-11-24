@@ -352,6 +352,33 @@ class SamsungWsClient:
         }).encode('utf-8')
         self._send_frame(0x1, payload)
 
+    def send_text(self, text, end_input=True):
+        """Type text into an active native Tizen text/IP field via SendInputString."""
+        raw = str(text or '')
+        b64 = base64.b64encode(raw.encode('utf-8')).decode('ascii')
+        payload = json.dumps({
+            'method': 'ms.remote.control',
+            'params': {
+                'Cmd': b64,
+                'TypeOfRemote': 'SendInputString',
+                'DataOfCmd': 'base64',
+            },
+        }).encode('utf-8')
+        self._send_frame(0x1, payload)
+        if end_input:
+            self.send_input_end()
+
+    def send_input_end(self):
+        payload = json.dumps({
+            'method': 'ms.remote.control',
+            'params': {
+                'Cmd': '',
+                'TypeOfRemote': 'SendInputEnd',
+                'DataOfCmd': 'base64',
+            },
+        }).encode('utf-8')
+        self._send_frame(0x1, payload)
+
     def close(self):
         if self._sock is not None:
             try:

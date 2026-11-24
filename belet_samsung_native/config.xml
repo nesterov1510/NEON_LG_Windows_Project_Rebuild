@@ -5,13 +5,22 @@
   <icon src="icon.png"/>
   <name>Belet Samsung</name>
   <feature name="http://tizen.org/feature/screen.size.all"/>
+  <feature name="http://tizen.org/feature/web.service"/>
   <access origin="*" subdomains="true"/>
   <tizen:allow-navigation>*</tizen:allow-navigation>
-  <tizen:content-security-policy>default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src https://beletapis.com https://*.beletapis.com https://api.belet.tm https://*.belet.me https://belet.me; img-src https: data:; media-src https: blob:; worker-src blob:</tizen:content-security-policy>
+  <tizen:allow-mixed-content>true</tizen:allow-mixed-content>
+  <tizen:content-security-policy>default-src 'self'; script-src 'self' 'sha256-H3ls4evEQz8yKpOaN6Zo052zU7sNwlTAq36H8yoOtmc='; style-src 'self' 'unsafe-inline'; connect-src https://beletapis.com https://*.beletapis.com https://api.belet.tm https://belet.tm https://*.belet.tm https://*.belet.me https://belet.me http://127.0.0.1:18767 http://localhost:18767 http:; img-src 'self' https: data: http: blob:; media-src https: blob: http:; worker-src blob:</tizen:content-security-policy>
+  <tizen:metadata key="http://samsung.com/tv/metadata/no_use_process_pool" value="true"/>
   <tizen:privilege name="http://tizen.org/privilege/internet"/>
   <tizen:privilege name="http://developer.samsung.com/privilege/network.public"/>
   <tizen:privilege name="http://developer.samsung.com/privilege/avplay"/>
   <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"/>
+  <tizen:privilege name="http://tizen.org/privilege/application.launch"/>
+  <tizen:service id="BeletFilm1.ClockProxy" auto-restart="true">
+    <tizen:content src="service/clock-proxy.js"/>
+    <tizen:name>BeletClockProxy</tizen:name>
+    <tizen:description>Belet local TLS clock-recovery bridge</tizen:description>
+  </tizen:service>
   <tizen:profile name="tv-samsung"/>
-  <tizen:setting screen-orientation="landscape" context-menu="disable" background-support="disable" hwkey-event="enable"/>
+  <tizen:setting screen-orientation="landscape" context-menu="disable" background-support="enable" encryption="disable" install-location="auto" hwkey-event="enable"/>
 </widget>

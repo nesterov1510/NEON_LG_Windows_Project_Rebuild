@@ -38,9 +38,36 @@
   var refreshing = false;
   var refreshQueue = [];
   var generation = 0;
+  var qrAuthHost = HOSTS.auth;
+  var clockProxyBase = '';
 
-  function nowHex() {
-    return ('0000000' + Date.now().toString(16)).slice(-8);
+  function setClockProxy(baseUrl) {
+    clockProxyBase = baseUrl ? String(baseUrl).replace(/\/+$/, '') : '';
+  }
+
+  function proxyUrl(targetUrl) {
+    var s;
+    var match;
+    var host;
+    var rest;
+    if (!clockProxyBase || typeof targetUrl !== 'string') return targetUrl;
+    s = targetUrl.replace(/^\s+|\s+$/g, '').replace(/ /g, '%20');
+    if (!s) return targetUrl;
+    if (s.indexOf(clockProxyBase + '/__proxy/') === 0) return s;
+    if (s.indexOf('//') === 0) s = 'https:' + s;
+    match = /^https:\/\/([^\/:?#]+)(?::443)?(.*)$/i.exec(s);
+    if (!match) {
+      match = /^http:\/\/([^\/:?#]+)(?::80)?(.*)$/i.exec(s);
+      if (!match) return s;
+      host = match[1].toLowerCase();
+      if (!/(?:^|\.)(belet\.me|belet\.tm|beletapis\.com)$/i.test(host)) return s;
+      rest = match[2] || '';
+      return clockProxyBase + '/__proxy/' + host +
+        (rest && rest.charAt(0) === '/' ? rest : '/' + rest);
+    }
+    rest = match[2] || '';
+    return clockProxyBase + '/__proxy/' + match[1].toLowerCase() +
+      (rest && rest.charAt(0) === '/' ? rest : '/' + rest);
   }
 
   function randomHex(bytes) {
@@ -71,11 +98,17 @@
 
   function loadDevice() {
     var saved = storageGet(DEVICE_KEY);
-    if (saved && /^[a-f0-9]{32,64}$/i.test(saved)) return saved;
+    if (saved && /^(?:[a-f0-9]{32,64}|tv[a-f0-9]{32})$/i.test(saved)) return saved;
     // The official clients use a 32 character random fingerprint per installation.
-    var created = 'tv' + nowHex() + randomHex(12);
+    var created = randomHex(16);
     storageSet(DEVICE_KEY, created);
     return created;
+  }
+
+  function rotateDevice() {
+    device = randomHex(16);
+    storageSet(DEVICE_KEY, device);
+    return device;
   }
 
   function loadSession() {
@@ -118,6 +151,19 @@
     try { return JSON.parse(text); } catch (e) { return undefined; }
   }
 
+  function hasOverrideHeader(headers, name) {
+    var target = String(name).toLowerCase();
+    var k;
+    for (k in headers) {
+      if (Object.prototype.hasOwnProperty.call(headers, k) &&
+          String(k).toLowerCase() === target &&
+          headers[k] !== null && headers[k] !== undefined) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function rawRequest(options, callback) {
     var xhr = new XMLHttpRequest();
     var done = false;
@@ -132,15 +178,18 @@
     }
 
     try {
-      xhr.open(options.method || 'GET', options.url, true);
+      xhr.open(options.method || 'GET', proxyUrl(options.url), true);
       xhr.timeout = options.timeout || REQUEST_TIMEOUT;
-      xhr.setRequestHeader('Accept', 'application/json');
-      xhr.setRequestHeader('Lang', CLIENT.lang);
-      xhr.setRequestHeader('X-Platform', CLIENT.platform);
-      xhr.setRequestHeader('X-VersionCode', CLIENT.versionCode);
-      xhr.setRequestHeader('X-App-Version', CLIENT.appVersion);
-      xhr.setRequestHeader('app-version', CLIENT.versionCode);
-      if (device) xhr.setRequestHeader('fingerprint', device);
+      try { xhr.withCredentials = false; } catch (e) {}
+      if (!hasOverrideHeader(headers, 'Accept')) xhr.setRequestHeader('Accept', 'application/json');
+      if (!hasOverrideHeader(headers, 'Lang')) xhr.setRequestHeader('Lang', CLIENT.lang);
+      if (!hasOverrideHeader(headers, 'X-Platform')) xhr.setRequestHeader('X-Platform', CLIENT.platform);
+      if (!hasOverrideHeader(headers, 'X-VersionCode')) xhr.setRequestHeader('X-VersionCode', CLIENT.versionCode);
+      if (!hasOverrideHeader(headers, 'X-App-Version')) xhr.setRequestHeader('X-App-Version', CLIENT.appVersion);
+      if (!hasOverrideHeader(headers, 'app-version')) xhr.setRequestHeader('app-version', CLIENT.versionCode);
+      if (device && !hasOverrideHeader(headers, 'fingerprint')) {
+        xhr.setRequestHeader('fingerprint', device);
+      }
       for (key in headers) {
         if (Object.prototype.hasOwnProperty.call(headers, key) && headers[key] !== null && headers[key] !== undefined) {
           xhr.setRequestHeader(key, String(headers[key]));
@@ -148,10 +197,14 @@
       }
       if (options.form) {
         body = options.form;
-        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+        if (!hasOverrideHeader(headers, 'Content-Type')) {
+          xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+        }
       } else if (options.body !== undefined && options.body !== null) {
         body = JSON.stringify(options.body);
-        xhr.setRequestHeader('Content-Type', 'application/json; charset=utf-8');
+        if (!hasOverrideHeader(headers, 'Content-Type')) {
+          xhr.setRequestHeader('Content-Type', 'application/json; charset=utf-8');
+        }
       }
       xhr.onreadystatechange = function () {
         var parsed;
@@ -183,20 +236,37 @@
       persist(null);
       return callback(apiError('auth', 401), null);
     }
-    rawRequest({
-      method: 'POST',
-      url: HOSTS.auth + '/api/v2/auth/refresh-mobile',
-      body: { fingerprint: device, refresh_token: current.refresh_token },
-      headers: { 'X-Platform': 'Android', 'X-VersionCode': CLIENT.versionCode }
-    }, function (err, data) {
+    function handleRefreshResult(err, data) {
       var next;
       if (!err && data && typeof data.token === 'string' && data.token && typeof data.refresh_token === 'string' && data.refresh_token) {
         next = { token: data.token, refresh_token: data.refresh_token, fingerprint: device, saved_at: Date.now() };
         persist(next);
         return callback(null, next);
       }
+      if (err && (err.kind === 'network' || err.kind === 'server')) {
+        return callback(err, null);
+      }
       if (err && err.http === 401) persist(null);
-      callback(apiError('auth', err ? err.http : 0, err ? err.message : ''), null);
+      callback(apiError('auth', err ? err.http : 401, err ? err.message : ''), null);
+    }
+    rawRequest({
+      method: 'POST',
+      url: HOSTS.auth + '/api/v2/auth/refresh-mobile',
+      timeout: 10000,
+      body: { fingerprint: device, refresh_token: current.refresh_token }
+    }, function (err, data) {
+      if (err && (err.kind === 'network' || err.http === 404 || err.http === 405 || err.http >= 500)) {
+        return rawRequest({
+          method: 'POST',
+          url: HOSTS.authAlt + '/api/v2/auth/refresh-mobile',
+          timeout: 10000,
+          body: { fingerprint: device, refresh_token: current.refresh_token }
+        }, function (altErr, altData) {
+          if (!altErr) return handleRefreshResult(null, altData);
+          handleRefreshResult(altErr || err, altData);
+        });
+      }
+      handleRefreshResult(err, data);
     });
   }
 
@@ -216,11 +286,12 @@
    * Authenticated request with one token refresh + retry on HTTP 401.
    * `options.fallback` may be a second URL used when the first answers 404/405.
    */
-  function authorized(options, callback) {
+  function authorized(options, callback, send) {
+    send = send || rawRequest;
     var started = generation;
     if (!session) return callback(apiError('auth', 401), null);
     withToken(options, session.token);
-    rawRequest(options, function (err, data, http) {
+    send(options, function (err, data, http) {
       if (started !== generation) return;
       if (err && err.kind === 'auth') {
         refreshSession(function (refreshErr, next) {
@@ -230,11 +301,11 @@
           retry = { method: options.method, url: options.url, body: options.body, form: options.form, headers: options.headers, timeout: options.timeout };
           retry.headers = retry.headers || {};
           retry.headers.Authorization = next.token;
-          rawRequest(retry, function (retryErr, retryData, retryHttp) {
+          send(retry, function (retryErr, retryData, retryHttp) {
             if (retryErr && retryErr.kind === 'auth') persist(null);
             if (retryErr && options.fallback && (retryErr.http === 404 || retryErr.http === 405)) {
               retry.url = options.fallback;
-              return rawRequest(retry, callback);
+              return send(retry, callback);
             }
             callback(retryErr, retryData, retryHttp);
           });
@@ -244,7 +315,7 @@
       if (err && options.fallback && (err.http === 404 || err.http === 405)) {
         options.url = options.fallback;
         options.fallback = null;
-        return authorized(options, callback);
+        return authorized(options, callback, send);
       }
       callback(err, data, http);
     });
@@ -284,109 +355,162 @@
 
   /* ── Auth ───────────────────────────────────────────────────────────── */
 
+  function otpListFrom(data) {
+    if (!data || typeof data !== 'object') return [];
+    if (Array.isArray(data.otp)) return data.otp;
+    if (data.result && Array.isArray(data.result.otp)) return data.result.otp;
+    if (Array.isArray(data.result)) return data.result;
+    if (Array.isArray(data.data)) return data.data;
+    return [];
+  }
+
   function otpMethods(callback) {
-    rawRequest({ method: 'GET', url: HOSTS.auth + '/api/v1/auth/available-otp' }, function (err, data) {
-      var list;
+    rawRequest({ method: 'GET', url: HOSTS.auth + '/api/v1/auth/available-otp', timeout: 8000 }, function (err, data) {
       if (err) {
         // The web host answers the same route; used only when the mobile host is unreachable.
-        return rawRequest({ method: 'GET', url: HOSTS.authAlt + '/api/v1/auth/available-otp' }, function (altErr, altData) {
+        return rawRequest({ method: 'GET', url: HOSTS.authAlt + '/api/v1/auth/available-otp', timeout: 8000 }, function (altErr, altData) {
           if (altErr) return callback(err, null);
-          list = altData && altData.otp;
-          callback(null, Array.isArray(list) ? list : []);
+          callback(null, otpListFrom(altData));
         });
       }
-      list = data && data.otp;
-      callback(null, Array.isArray(list) ? list : []);
+      callback(null, otpListFrom(data));
     });
   }
 
   function signIn(phone, signInType, callback) {
+    var path = '/api/v1/auth/sign-in?sign_in_type=' + encodeURIComponent(signInType);
+    var body = { phone: Number(phone) };
+    var headers = { 'X-Code-Sending-Type': String(signInType) };
     rawRequest({
       method: 'POST',
-      url: HOSTS.auth + '/api/v1/auth/sign-in?sign_in_type=' + encodeURIComponent(signInType),
-      body: { phone: Number(phone) },
-      headers: { 'X-Code-Sending-Type': String(signInType) }
+      url: HOSTS.auth + path,
+      body: body,
+      headers: headers,
+      timeout: 12000
     }, function (err, data) {
-      if (err) return callback(err, null);
-      if (!data || typeof data.token !== 'string' || !data.token) return callback(apiError('format', 200), null);
-      callback(null, data);
+      if (!err) {
+        if (!data || typeof data.token !== 'string' || !data.token) return callback(apiError('format', 200), null);
+        return callback(null, data);
+      }
+      if (err.kind === 'network' || err.http === 404 || err.http === 405 || err.http >= 500) {
+        return rawRequest({
+          method: 'POST',
+          url: HOSTS.authAlt + path,
+          body: body,
+          headers: headers,
+          timeout: 12000
+        }, function (altErr, altData) {
+          if (altErr) return callback(err, null);
+          if (!altData || typeof altData.token !== 'string' || !altData.token) return callback(apiError('format', 200), null);
+          callback(null, altData);
+        });
+      }
+      callback(err, null);
     });
   }
 
   function checkCode(code, tempToken, callback) {
-    rawRequest({
-      method: 'POST',
-      url: HOSTS.auth + '/api/v1/auth/check-code-mobile',
-      body: { code: code, fingerprint: device, token: tempToken }
-    }, function (err, data) {
-      if (err) return callback(err, null);
+    var payload = { code: code, fingerprint: device, token: tempToken };
+    function accept(data) {
       if (!data || typeof data.token !== 'string' || !data.token) return callback(apiError('format', 200), null);
       generation += 1;
       persist({ token: data.token, refresh_token: String(data.refresh_token || ''), fingerprint: device, saved_at: Date.now() });
       callback(null, data);
+    }
+    rawRequest({
+      method: 'POST',
+      url: HOSTS.auth + '/api/v1/auth/check-code-mobile',
+      body: payload,
+      timeout: 12000
+    }, function (err, data) {
+      if (!err) return accept(data);
+      if (err.kind === 'network' || err.http === 404 || err.http === 405 || err.http >= 500) {
+        return rawRequest({
+          method: 'POST',
+          url: HOSTS.authAlt + '/api/v1/auth/check-code-mobile',
+          body: payload,
+          timeout: 12000
+        }, function (altErr, altData) {
+          if (altErr) return callback(err, null);
+          accept(altData);
+        });
+      }
+      callback(err, null);
     });
   }
 
+  function parseQrPayload(data) {
+    var rawCode, match, token, png;
+    if (!data || typeof data.code !== 'string' || typeof data.qr_png !== 'string') return null;
+    rawCode = data.code.replace(/^\s+|\s+$/g, '');
+    match = /^https?:\/\/[^\/]+\/register\/([A-Za-z0-9_-]+)\/?$/.exec(rawCode);
+    if (match) token = match[1];
+    else if (/^[A-Za-z0-9_-]{6,256}$/.test(rawCode)) token = rawCode;
+    else return null;
+    png = data.qr_png.replace(/\s+/g, '').replace(/^data:image\/png;base64,/i, '');
+    if (!/^iVBORw0KGgo[A-Za-z0-9+/=]+$/.test(png) || png.length > 600000) return null;
+    return {
+      code: token,
+      image: 'data:image/png;base64,' + png
+    };
+  }
+
   function qrCode(callback) {
-    rawRequest({ method: 'GET', url: HOSTS.auth + '/api/v1/auth/get-qrcode' }, function (err, data) {
-      if (err) return callback(err, null);
-      if (!data || typeof data.code !== 'string' || !/^https:\/\/film\.belet\.me\/register\/[A-Za-z0-9_-]+$/.test(data.code)) {
-        return callback(apiError('format', 200), null);
-      }
-      if (typeof data.qr_png !== 'string' || !/^iVBORw0KGgo[A-Za-z0-9+/=]+$/.test(data.qr_png) || data.qr_png.length > 400000) {
-        return callback(apiError('format', 200), null);
-      }
-      callback(null, {
-        code: data.code.substring('https://film.belet.me/register/'.length),
-        image: 'data:image/png;base64,' + data.qr_png
+    qrAuthHost = HOSTS.auth;
+    rawRequest({ method: 'GET', url: HOSTS.auth + '/api/v1/auth/get-qrcode', timeout: 8000 }, function (err, data) {
+      var parsed = !err && parseQrPayload(data);
+      if (parsed) return callback(null, parsed);
+      rawRequest({ method: 'GET', url: HOSTS.authAlt + '/api/v1/auth/get-qrcode', timeout: 8000 }, function (altErr, altData) {
+        var altParsed = !altErr && parseQrPayload(altData);
+        if (altParsed) {
+          qrAuthHost = HOSTS.authAlt;
+          return callback(null, altParsed);
+        }
+        callback(err || apiError('format', 200), null);
       });
     });
   }
 
-  function qrCheck(code, callback) {
-    rawRequest({
-      method: 'POST',
-      url: HOSTS.auth + '/api/v1/auth/check-qrcode',
-      body: { code: code, fingerprint: device }
-    }, function (err, data, http) {
-      if (err) {
-        // HTTP 400 means "not scanned yet" for this endpoint.
-        if (err.http === 400) return callback(apiError('pending', 400), data, 400);
-        return callback(err, null, http);
-      }
-      if (data && typeof data.token === 'string' && data.token) {
-        generation += 1;
-        persist({ token: data.token, refresh_token: String(data.refresh_token || ''), fingerprint: device, saved_at: Date.now() });
-        return callback(null, data, 200);
-      }
-      callback(apiError('pending', 200), data, 200);
-    });
-  }
-
-  function qrCheckWeb(code, callback) {
-    // The web variant is a documented fallback for accounts bound to the web QR flow.
-    rawRequest({
-      method: 'POST',
-      url: HOSTS.auth + '/api/v1/auth/check-qrcode-web',
-      body: { code: code, fingerprint: device }
-    }, function (err, data, http) {
-      if (err) return callback(err, null, http);
-      if (data && typeof data.token === 'string' && data.token) {
-        generation += 1;
-        persist({ token: data.token, refresh_token: String(data.refresh_token || ''), fingerprint: device, saved_at: Date.now() });
-        return callback(null, data, http);
-      }
-      callback(apiError('pending', http), data, http);
+  function qrCheck(code, web, callback, host) {
+    function direct() {
+      rawRequest({
+        method: 'POST',
+        url: (host || HOSTS.auth) + '/api/v1/auth/check-qrcode' + (web ? '-web' : ''),
+        body: { code: code, fingerprint: device }
+      }, callback);
+    }
+    if (!global.beletCheckQrNative || (host && host !== HOSTS.auth)) return direct();
+    global.beletCheckQrNative(code, device, web, function (http, data) {
+      if (!http) return direct();
+      callback(http >= 200 && http < 300 ? null : errorFromStatus(http, null), data, http);
     });
   }
 
   function logout(callback) {
     var token = session && session.token;
+    var oldDevice = device;
+    var headers;
     generation += 1;
+    playerSession = '';
+    mediaScheme = '';
+    qrAuthHost = HOSTS.auth;
     persist(null);
-    if (!token) return callback(null);
-    rawRequest({ method: 'POST', url: HOSTS.auth + '/api/v1/auth/log-out', headers: { Authorization: token } }, function (err) {
-      callback(err || null);
+    // Rotate the install fingerprint on explicit sign-out so a revoked/logged-out device ID
+    // cannot poison subsequent OTP or QR endpoints on the login screen.
+    rotateDevice();
+    if (!token) {
+      if (callback) callback(null);
+      return;
+    }
+    headers = { Authorization: token };
+    if (oldDevice) headers.fingerprint = oldDevice;
+    rawRequest({
+      method: 'POST',
+      url: HOSTS.auth + '/api/v1/auth/log-out',
+      timeout: 4000,
+      headers: headers
+    }, function (err) {
+      if (callback) callback(err || null);
     });
   }
 
@@ -396,14 +520,14 @@
     // v2 is what belet.tm itself calls; v1 stays as a fallback for older deployments.
     var url = HOSTS.home + '/api/v2/home_page?type_id=0&h_limit=12&limit=' + encodeURIComponent(limit) +
       '&offset=' + encodeURIComponent(offset);
-    authorized({ method: 'GET', url: url, fallback: url.replace('/api/v2/', '/api/v1/') }, function (err, data) {
+    authorized({ method: 'GET', url: url, fallback: url.replace('/api/v2/', '/api/v1/'), timeout: 10000 }, function (err, data) {
       if (err) return callback(err, null);
       callback(null, listFrom(data));
     });
   }
 
   function categories(callback) {
-    authorized({ method: 'GET', url: HOSTS.home + '/api/v1/categories' }, function (err, data) {
+    authorized({ method: 'GET', url: HOSTS.home + '/api/v1/categories', timeout: 10000 }, function (err, data) {
       if (err) return callback(err, null);
       callback(null, data && Array.isArray(data.categories) ? data.categories : listFrom(data));
     });
@@ -676,34 +800,104 @@
 
   /* ── Search ─────────────────────────────────────────────────────────── */
 
+  function isSearchSectionItem(item) {
+    if (!item || typeof item !== 'object') return false;
+    return typeof item.id === 'undefined' && (
+      Array.isArray(item.result) || Array.isArray(item.data) ||
+      Array.isArray(item.movies) || Array.isArray(item.items) ||
+      Array.isArray(item.films) || typeof item.type === 'string'
+    );
+  }
+
+  function unwrapSectionItems(section) {
+    if (!section || typeof section !== 'object') return [];
+    if (Array.isArray(section.result)) return section.result;
+    if (Array.isArray(section.data)) return section.data;
+    if (Array.isArray(section.movies)) return section.movies;
+    if (Array.isArray(section.items)) return section.items;
+    if (Array.isArray(section.films)) return section.films;
+    return [];
+  }
+
+  function searchListFrom(data, expectedType) {
+    var raw = listFrom(data);
+    var hasSections = false;
+    var exact = [];
+    var nonHistory = [];
+    var i;
+    var item;
+    var secType;
+    var items;
+    if (!raw.length) return [];
+    for (i = 0; i < raw.length; i += 1) {
+      if (isSearchSectionItem(raw[i])) {
+        hasSections = true;
+        break;
+      }
+    }
+    if (!hasSections) return raw;
+    for (i = 0; i < raw.length; i += 1) {
+      item = raw[i];
+      if (!item || typeof item !== 'object') continue;
+      secType = typeof item.type === 'string' ? item.type.toLowerCase() : '';
+      items = unwrapSectionItems(item);
+      if (!items.length) continue;
+      if (expectedType && secType === expectedType) {
+        Array.prototype.push.apply(exact, items);
+      } else if (secType !== 'history') {
+        Array.prototype.push.apply(nonHistory, items);
+      }
+    }
+    if (exact.length) return exact;
+    return nonHistory;
+  }
+
   function search(text, page, callback) {
-    page = page || 1;
-    var encoded = 'text=' + encodeURIComponent(text) + '&page=' + encodeURIComponent(page);
-    // The Android client posts a hash map (text/page/type); the web client posts a form.
-    authorized({
-      method: 'POST',
-      url: HOSTS.search + '/api/v2/search',
-      form: encoded
-    }, function (err, data) {
-      if (!err) return callback(null, listFrom(data));
-      if (err.kind === 'auth') return callback(err, null);
+    var cleanText = String(text === null || typeof text === 'undefined' ? '' : text).replace(/^\s+|\s+$/g, '');
+    var pageNum = page || 1;
+    var searchType = cleanText ? 'search' : 'top_search';
+    var formV2 = (cleanText ? 'text=' + encodeURIComponent(cleanText) + '&' : '') +
+      'page=' + encodeURIComponent(pageNum) + '&type=' + encodeURIComponent(searchType);
+    var formV1 = (cleanText ? 'text=' + encodeURIComponent(cleanText) + '&' : '') +
+      'page=' + encodeURIComponent(pageNum);
+    var attempts = [
+      { url: HOSTS.search + '/api/v2/search', form: formV2 },
+      { url: HOSTS.searchWeb + '/api/v2/search', form: formV2 },
+      { url: HOSTS.search + '/api/v1/search', form: formV1 },
+      { url: HOSTS.searchWeb + '/api/v1/search', form: formV1 }
+    ];
+    var firstErr = null;
+    function tryAttempt(index) {
+      if (index >= attempts.length) return callback(firstErr, null);
+      // The Android client posts text/page/type form-encoded to film-search.belet.me/api/v2/search;
+      // fall back to search.belet.me and /api/v1/search when v2 returns HTTP or network failure.
       authorized({
         method: 'POST',
-        url: HOSTS.searchWeb + '/api/v2/search',
-        form: encoded
-      }, function (webErr, webData) {
-        if (!webErr) return callback(null, listFrom(webData));
-        callback(err, null);
+        url: attempts[index].url,
+        form: attempts[index].form,
+        timeout: 12000
+      }, function (err, data) {
+        if (err) {
+          if (!firstErr) firstErr = err;
+          if (err.kind === 'auth') return callback(err, null);
+          return tryAttempt(index + 1);
+        }
+        callback(null, searchListFrom(data, searchType));
       });
-    });
+    }
+    tryAttempt(0);
   }
 
   /* ── Profile ────────────────────────────────────────────────────────── */
 
   function profile(callback) {
-    authorized({ method: 'GET', url: HOSTS.auth + '/api/v2/users/profile' }, function (err, data) {
-      if (err) return callback(err, null);
-      callback(null, data || null);
+    authorized({ method: 'GET', url: HOSTS.auth + '/api/v2/users/profile', timeout: 10000 }, function (err, data) {
+      if (!err) return callback(null, data || null);
+      if (err.kind === 'auth') return callback(err, null);
+      authorized({ method: 'GET', url: HOSTS.authAlt + '/api/v2/users/profile', timeout: 10000 }, function (altErr, altData) {
+        if (!altErr) return callback(null, altData || null);
+        callback(err, null);
+      });
     });
   }
 
@@ -737,23 +931,49 @@
     return name || 'Samsung Tizen TV';
   }
 
+  // Keep the ordinary authenticated retry path, including the refreshed token,
+  // but let webOS make this fixed POST outside the browser's CORS policy.
+  function sendDeviceRegistration(options, callback) {
+    if (!global.beletRegisterDeviceNative) return rawRequest(options, callback);
+    global.beletRegisterDeviceNative(options.body, options.headers.Authorization, function (http) {
+      if (!http) return rawRequest(options, callback);
+      callback(http >= 200 && http < 300 ? null : errorFromStatus(http, null), null, http);
+    });
+  }
+
   /* DeviceBody on the Android client is app_version + fingerprint + model + os_version. */
   function registerDevice(callback) {
     var name = model();
+    var lg = global.beletWebosIdentity && global.beletWebosIdentity();
+    var body = {
+      app_version: CLIENT.appVersion,
+      fingerprint: device,
+      model: lg ? lg.model : 'Samsung Tizen ' + name,
+      os_version: lg ? lg.osVersion : tizenVersion()
+    };
     authorized({
       method: 'POST',
       url: HOSTS.auth + '/api/v1/users/device',
-      body: {
-        app_version: CLIENT.appVersion,
-        fingerprint: device,
-        model: 'Samsung Tizen ' + name,
-        os_version: tizenVersion()
-      },
+      timeout: 10000,
+      body: body,
       headers: { 'X-Device-Model': name }
     }, function (err, data) {
-      if (!callback) return;
-      callback(err || null, data || null);
-    });
+      if (!err || err.kind === 'auth' || global.beletRegisterDeviceNative) {
+        if (callback) callback(err || null, data || null);
+        return;
+      }
+      authorized({
+        method: 'POST',
+        url: HOSTS.authAlt + '/api/v1/users/device',
+        timeout: 10000,
+        body: body,
+        headers: { 'X-Device-Model': name }
+      }, function (altErr, altData) {
+        if (!callback) return;
+        if (!altErr) return callback(null, altData || null);
+        callback(err || altErr, null);
+      }, sendDeviceRegistration);
+    }, sendDeviceRegistration);
   }
 
   var playerSession = '';
@@ -820,23 +1040,45 @@
     init: function () {
       device = loadDevice();
       session = loadSession();
-      if (session && session.fingerprint) device = session.fingerprint;
+      if (session && session.fingerprint && session.fingerprint !== device) {
+        // Older builds sometimes regenerated DEVICE_KEY before restoring the session.
+        device = session.fingerprint;
+        storageSet(DEVICE_KEY, device);
+      }
       return session;
     },
     hasSession: function () { return !!(session && session.token); },
     session: function () { return session; },
     device: function () { return device; },
+    resetDevice: rotateDevice,
     forget: function () { generation += 1; persist(null); },
     otpMethods: otpMethods,
     signIn: signIn,
     checkCode: checkCode,
     qrCode: qrCode,
     qrCheck: function (code, callback) {
-      qrCheck(code, function (err, data, http) {
-        if (!err || err.kind === 'pending' || err.http === 400) return callback(err, data, http);
-        if (err.kind !== 'missing' && err.http !== 404 && err.http !== 405) return callback(err, data, http);
-        qrCheckWeb(code, callback);
+      function result(err, data, http) {
+        if ((err && http === 400) || (!err && !(data && typeof data.token === 'string' && data.token))) {
+          return callback(apiError('pending', http), null, http);
+        }
+        callback(err, data, http);
+      }
+      function checkOnHost(host, onDone) {
+        qrCheck(code, false, function (err, data, http) {
+          if (http === 404 || http === 405) return qrCheck(code, true, onDone, host);
+          onDone(err, data, http);
+        }, host);
+      }
+      checkOnHost(HOSTS.auth, function (err, data, http) {
+        if (qrAuthHost !== HOSTS.auth && err && (err.kind === 'network' || http === 404 || http === 405 || http >= 500)) {
+          return checkOnHost(qrAuthHost, result);
+        }
+        result(err, data, http);
       });
+    },
+    acceptQrSession: function (data) {
+      generation += 1;
+      persist({ token: data.token, refresh_token: String(data.refresh_token || ''), fingerprint: device, saved_at: Date.now() });
     },
     logout: logout,
     home: home,
@@ -863,6 +1105,9 @@
     nextMediaScheme: nextMediaScheme,
     newPlayerSession: newPlayerSession,
     healthCheck: healthCheck,
+    setClockProxy: setClockProxy,
+    clockProxy: function () { return clockProxyBase; },
+    proxyUrl: proxyUrl,
     listFrom: listFrom,
     sourcesFrom: sourcesFrom,
     statusOk: statusOk,

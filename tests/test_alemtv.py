@@ -120,6 +120,7 @@ def test_build_alemtv_ipk_structure():
         assert appinfo['id'] == ALEMTV_WEBOS_ID
         assert appinfo['title'] == 'Alem TV'
         assert appinfo['resolution'] == '1920x1080'
+        assert b'askAccountLogout()' in tf.extractfile(f'{base}/index.html').read()
 
 def test_build_alemtv_wgt_and_sign():
     unsigned_wgt = build_alemtv_wgt()
@@ -128,6 +129,7 @@ def test_build_alemtv_wgt_and_sign():
     with zipfile.ZipFile(io.BytesIO(unsigned_wgt), 'r') as zf:
         names = set(zf.namelist())
         assert {'config.xml', 'index.html', 'icon.png'}.issubset(names)
+        assert b'askAccountLogout()' in zf.read('index.html')
         cfg = zf.read('config.xml').decode('utf-8')
         assert f'package="{ALEMTV_PKG_ID}"' in cfg
         assert f'id="{ALEMTV_APP_ID}"' in cfg
@@ -915,6 +917,7 @@ const localStorage = {
 const MAC = '00:1A:79:00:00:01';
 const ARES_KEY = new Uint8Array(16).fill(128); // Math.random() -> 0.5
 let registerParams = null;
+let unbindCalls = 0;
 
 function server(method, params) {
   if (method === 'get_domain_config') return { name: 'AlemTV' };
@@ -930,6 +933,10 @@ function server(method, params) {
       ['1', '1', 'Первый канал', 'Общие'],
     ],
   };
+  if (method === 'unregister_terminal') {
+    if (params.macaddr !== MAC) throw Error('wrong terminal');
+    return ++unbindCalls === 1 ? {error: {code:-1, message:'refused'}} : true;
+  }
   if (method === 'check_update') return { authorized: true };
   return { error: { code: -32601, message: 'method not found' } };
 }
@@ -985,6 +992,7 @@ function makeContext() {
       const method = parts.length > 1 ? parts[parts.length - 1] : '';
       const encrypted = !!this.headers['Ares-Cipher'];
       const req = JSON.parse(encrypted ? ctx.window.aresDecrypt(body, ARES_KEY) : body);
+      if (method === 'unregister_terminal' && !encrypted) throw Error('unbind must be encrypted');
       const result = server(method, req.params || {});
       this.status = 200;
       let text = result && result.error
@@ -1036,6 +1044,19 @@ if (!isShown('mainScreen')) throw new Error('launch 2: channels did not load wit
 if (!getEl('channelGrid').children.some((c) => (c.innerHTML || '').indexOf('Первый канал') !== -1)) {
   throw new Error('launch 2: channel grid not rendered');
 }
+
+// Leaving settings / cancelling is not logout. Failed unbind keeps a usable binding.
+let reloaded = 0;
+env.ctx.location.reload = () => { reloaded++; };
+const portal = store.get('alem_portal');
+env.ctx.askAccountLogout(); env.ctx.cancelAccountLogout(); env.ctx.confirmAccountLogout();
+if (unbindCalls || !store.get('alem_sid')) throw Error('cancelled logout changed session');
+env.ctx.askAccountLogout(); env.ctx.confirmAccountLogout();
+if (reloaded || store.get('alem_mac') !== MAC || !store.get('alem_sid')) throw Error('failed logout lost binding');
+env.ctx.askAccountLogout(); env.ctx.confirmAccountLogout();
+if (unbindCalls !== 2 || reloaded !== 1 || store.has('alem_sid') || store.has('alem_mac') || store.get('alem_portal') !== portal) throw Error('logout incomplete');
+env = makeContext(); env.ctx.bootAlemTV(); env.flush();
+if (!isShown('loginModal')) throw Error('old account restored after logout');
 
 // Launch 3: server omits macaddr in register_terminal -> authorize_terminal fallback
 store.clear();

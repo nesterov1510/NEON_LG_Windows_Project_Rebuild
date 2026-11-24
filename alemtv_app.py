@@ -8,6 +8,7 @@ Provides:
 - Samsung Tizen .wgt builder (AlemTV0001.wgt) with W3C XML-DSig signature support.
 """
 
+import base64
 import io
 import json
 import os
@@ -21,6 +22,7 @@ from xml.sax.saxutils import escape as xml_escape
 ALEMTV_WEBOS_ID = 'tm.alemtv.webos'
 ALEMTV_PKG_ID = 'AlemTV0001'
 ALEMTV_APP_ID = 'AlemTV0001.AlemTV'
+ALEMTV_VIDAA_ID = 'tmalemtvvidaa'
 ALEMTV_DEFAULT_PORTAL = 'http://iptv.tmalem.tv'
 
 ALEMTV_PORTALS = [
@@ -236,7 +238,64 @@ button, .btn {
 .info-val { color: #ffffff; font-weight: 700; }
 """
 
-def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
+# TV-only settings controls; the Kali desktop package keeps its existing UI.
+_TV_SIGN_OUT_HTML = """
+      <button id="accountLogout" class="btn focusable" onclick="askAccountLogout()">Выйти из аккаунта</button>
+      <div id="logoutConfirm" style="display:none;align-items:center;gap:12px;">
+        <span>Выйти и отвязать этот телевизор?</span>
+        <button id="cancelLogout" class="btn focusable" onclick="cancelAccountLogout()">Отмена</button>
+        <button class="btn focusable" onclick="confirmAccountLogout()">Да, выйти</button>
+      </div>
+      <div id="logoutStatus" role="status"></div>"""
+
+_TV_SIGN_OUT_JS = """
+  var signingOut = false;
+  function resetLogoutControls() {
+    var button = document.getElementById("accountLogout");
+    button.style.display = !signingOut && (getStoredMac() || (sessionId && sessionId !== "silky_open")) ? "block" : "none";
+    document.getElementById("logoutConfirm").style.display = "none";
+    document.getElementById("logoutStatus").textContent = signingOut ? "Выполняется выход…" : "";
+  }
+  function focusLogoutControl(id) {
+    var index = getFocusableElements().indexOf(document.getElementById(id));
+    if (index >= 0) { currentFocusIndex = index; updateFocus(); }
+  }
+  window.askAccountLogout = function() {
+    if (signingOut) return;
+    document.getElementById("accountLogout").style.display = "none";
+    document.getElementById("logoutStatus").textContent = "";
+    document.getElementById("logoutConfirm").style.display = "flex";
+    focusLogoutControl("cancelLogout");
+  };
+  window.cancelAccountLogout = function() {
+    resetLogoutControls();
+    focusLogoutControl("accountLogout");
+  };
+  window.confirmAccountLogout = function() {
+    if (signingOut || !isShown("logoutConfirm")) return;
+    var mac = getStoredMac(), portal = currentPortal;
+    signingOut = true;
+    resetLogoutControls();
+    function finish(err, result) {
+      signingOut = false;
+      resetLogoutControls();
+      if (portal !== currentPortal || mac !== getStoredMac()) return;
+      if (err || result === false) {
+        document.getElementById("logoutStatus").textContent = "Не удалось отвязать телевизор. Проверьте сеть и повторите. Аккаунт сохранён.";
+        focusLogoutControl("accountLogout");
+        return;
+      }
+      clearTerminalBinding(); // SID alone is insufficient: boot logs in by MAC.
+      location.reload(); // discard media tokens, active streams and account UI
+    }
+    // Match SessionStore.signOut in the upstream client: do not lose the MAC
+    // (and strand a terminal slot) if the operator rejects the unbind.
+    if (mac) jsonRpc("unregister_terminal", { macaddr: mac }, true, finish);
+    else finish(null, true);
+  };
+"""
+
+def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL, *, desktop=False):
     """Generate the complete Alem TV Smart TV client JavaScript (compatible with ES5+ engines)."""
     safe_default_portal = json.dumps(str(default_portal or ALEMTV_DEFAULT_PORTAL).rstrip('/'))
     safe_portals_json = json.dumps(ALEMTV_PORTALS)
@@ -704,7 +763,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     xhr.open("POST", url, true);
     xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
     if (encrypted && aresHeader) xhr.setRequestHeader("Ares-Cipher", aresHeader);
-    xhr.timeout = 5000;
+    xhr.timeout = __RPC_TIMEOUT__;
 
     xhr.onload = function() {
       if (xhr.status >= 200 && xhr.status < 300) {
@@ -724,7 +783,11 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
       }
     };
     xhr.onerror = function() { callback(new Error("Network Error"), null); };
-    xhr.ontimeout = function() { callback(new Error("Timeout"), null); };
+    xhr.ontimeout = function() {
+      var host = document.createElement("a");
+      host.href = url;
+      callback(new Error("Нет ответа от " + host.hostname + " (" + method + ", " + (xhr.timeout / 1000) + " с). Проверьте портал и сеть оператора."), null);
+    };
     try {
       xhr.send(bodyText);
     } catch (e) {
@@ -1009,7 +1072,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
       if (currentScreen === "splash" && (!authData.channels || authData.channels.length === 0)) {
         showBootError("Сервер " + currentPortal.replace(/^https?:\/\//, "") + " не ответил вовремя. Выберите другой сервер или запустите автопоиск.");
       }
-    }, 7000);
+    }, __BOOT_TIMEOUT__);
 
     // 1. Get Domain Config (Sync time & fetch portal settings)
     jsonRpc("get_domain_config", { terminal_type: "smarttv" }, false, function(err, res) {
@@ -2100,7 +2163,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     });
   }
 
-  // Settings Screen
+__TV_SIGN_OUT_JS__  // Settings Screen
   window.showSettings = function() {
     var modal = document.getElementById("settingsModal");
     if (modal) {
@@ -2120,7 +2183,7 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     }
   };
 
-  function populateSettings() {
+  function populateSettings() {__RESET_LOGOUT__
     var sel = document.getElementById("portalSelector");
     if (sel) {
       sel.innerHTML = "";
@@ -2548,8 +2611,8 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
           activateFocused();
         }
       }
-    } else if (code === 10009 || code === 461 || code === 27 || key === "Escape" || key === "Return" || key === "Back") {
-      // Samsung Tizen 10009 / webOS 461 / Escape — close overlay, then exit.
+    } else if (code === 10009 || code === 461 || code === 27 || (!inputTarget && code === 8) || key === "Escape" || key === "Return" || key === "Back") {
+      // Samsung Tizen 10009 / webOS 461 / VIDAA Back / Escape — close overlay, then exit.
       e.preventDefault();
       var frame = document.getElementById("portalIframe");
       if (frame && frame.style.display !== "none") {
@@ -2643,12 +2706,19 @@ def build_alemtv_js(default_portal=ALEMTV_DEFAULT_PORTAL):
     document.addEventListener("DOMContentLoaded", startBoot);
   }
 })();"""
-    return template.replace('__DEFAULT_PORTAL__', safe_default_portal).replace('__PORTAL_LIST__', safe_portals_json)
+    # Three sequential RPCs during boot. Do not report a desktop timeout while
+    # an individual request still has time left. Keep TV timing unchanged.
+    rpc_timeout = 15000 if desktop else 5000
+    return (template.replace('__DEFAULT_PORTAL__', safe_default_portal).replace('__PORTAL_LIST__', safe_portals_json)
+            .replace('__TV_SIGN_OUT_JS__', '' if desktop else _TV_SIGN_OUT_JS)
+            .replace('__RESET_LOGOUT__', '' if desktop else '\n    resetLogoutControls();')
+            .replace('__RPC_TIMEOUT__', str(rpc_timeout))
+            .replace('__BOOT_TIMEOUT__', str(3 * rpc_timeout + 2000 if desktop else 7000)))
 
-def build_alemtv_html(default_portal=ALEMTV_DEFAULT_PORTAL):
+def build_alemtv_html(default_portal=ALEMTV_DEFAULT_PORTAL, *, desktop=False):
     """Generate the self-contained Alem TV Smart TV client HTML with embedded CSS and JS."""
     css = build_alemtv_css()
-    js = build_alemtv_js(default_portal=default_portal)
+    js = build_alemtv_js(default_portal=default_portal, desktop=desktop)
 
     template = """<!DOCTYPE html>
 <html lang="ru">
@@ -2831,7 +2901,7 @@ __CSS__
       <div style="display:flex;gap:12px;margin-top:10px;flex-wrap:wrap;">
         <button class="btn btn-primary focusable" onclick="showLoginModal()">Вход по договору</button>
         <button class="btn focusable" onclick="reauthPortal()">Переподключиться</button>
-      </div>
+      </div>__TV_SIGN_OUT_HTML__
     </div>
   </div>
 </div>
@@ -2877,7 +2947,7 @@ __JS__
 </script>
 </body>
 </html>"""
-    return template.replace('__CSS__', css).replace('__JS__', js)
+    return template.replace('__CSS__', css).replace('__JS__', js).replace('__TV_SIGN_OUT_HTML__', '' if desktop else _TV_SIGN_OUT_HTML)
 
 def _ar_member(name, content, mtime=None):
     """Create a BSD/Debian ar archive member header + payload (aligned to 2 bytes)."""
@@ -2898,7 +2968,7 @@ def _ar_member(name, content, mtime=None):
 def build_alemtv_ipk(target_url=ALEMTV_DEFAULT_PORTAL, icon_bytes=None, large_icon_bytes=None, splash_bytes=None):
     """Package the Alem TV application into a standard webOS .ipk package."""
     app_id = ALEMTV_WEBOS_ID
-    version = '1.0.1'
+    version = '1.0.2'
     mtime = int(time.time())
 
     appinfo = {
@@ -3015,7 +3085,7 @@ def build_alemtv_wgt(target_url=ALEMTV_DEFAULT_PORTAL, pkg_id=ALEMTV_PKG_ID, app
         '<widget xmlns="http://www.w3.org/ns/widgets"\n'
         '        xmlns:tizen="http://tizen.org/ns/widgets"\n'
         f'        id="http://yourdomain/{safe_pkg}"\n'
-        '        version="1.0.3"\n'
+        '        version="1.0.4"\n'
         '        viewmodes="fullscreen">\n'
         f'    <tizen:application id="{safe_app_id}"\n'
         f'                       package="{safe_pkg}"\n'
@@ -3065,3 +3135,21 @@ def build_alemtv_wgt(target_url=ALEMTV_DEFAULT_PORTAL, pkg_id=ALEMTV_PKG_ID, app
         if splash_bytes:
             zf.writestr('splash.png', splash_bytes)
     return buf.getvalue()
+
+
+def build_alemtv_vidaa_html(default_portal=ALEMTV_DEFAULT_PORTAL):
+    """Build single-file self-contained Alem TV HTML for Hisense VIDAA (no external asset requests)."""
+    html = build_alemtv_html(default_portal=default_portal)
+    html = html.replace('<link rel="stylesheet" href="style.css">\n', '')
+    icon_bytes = get_alemtv_assets().get('icon')
+    if icon_bytes:
+        b64 = base64.b64encode(icon_bytes).decode('ascii')
+        html = html.replace('src="icon.png"', f'src="data:image/png;base64,{b64}"')
+    return html
+
+
+def build_alemtv_vidaa_data_url(default_portal=ALEMTV_DEFAULT_PORTAL):
+    """Build data:text/html;base64 URL for Alem TV on Hisense VIDAA."""
+    raw = build_alemtv_vidaa_html(default_portal=default_portal).encode('utf-8')
+    return 'data:text/html;charset=utf-8;base64,' + base64.b64encode(raw).decode('ascii')
+

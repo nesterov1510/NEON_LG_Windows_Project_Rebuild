@@ -42,20 +42,33 @@
   var state = {
     screen: 'boot',
     previous: 'home',
+    bootDone: false,
+    bootTimer: null,
+    bootSession: null,
+    clockSynced: true,
+    clockSyncTimer: null,
+    bypassFallbackReady: false,
     homeLoaded: false,
+    homeGen: 0,
+    homeRetryTimer: null,
     home: { groups: [], hero: null, items: [] },
     categories: [],
     categoriesLoaded: false,
     browse: { mode: 'category', id: null, title: '', items: [], offset: 0, loading: false, done: false },
-    search: { text: '', items: [], page: 1, loading: false, done: false },
+    search: { text: '', items: [], page: 1, loading: false, done: false, gen: 0 },
+    kbLang: 'ru',
     detail: { movie: null, seasons: [], seasonId: null, episodes: [], loadingEpisodes: false },
     player: {
       movie: null, movieId: null, seasonId: null, episodeId: null, title: '', subtitle: '',
       sources: [], sourceIndex: 0, startAt: 0, reported: 0, timer: null, osdTimer: null,
       active: false, ending: false, duration: 0
     },
-    login: { phone: '', code: '', tempToken: '', methods: [], methodIndex: 0, busy: false },
+    login: {
+      phone: '', code: '', tempToken: '', methods: [], methodIndex: 0,
+      busy: false, generation: 0, loggingOut: false, otpTimer: null, otpFallback: false
+    },
     qr: { generation: 0, timer: null, code: null },
+    profileRetryTimer: null,
     toastTimer: null,
     backArmed: false,
     playbackInfo: 'плеер ещё не запускался',
@@ -76,6 +89,19 @@
   }
 
   function clear(node) {
+    var imgs, i;
+    if (node && node.querySelectorAll) {
+      try {
+        imgs = node.querySelectorAll('img');
+        for (i = 0; i < imgs.length; i += 1) {
+          imgs[i]._beletImgGen = (imgs[i]._beletImgGen || 0) + 1;
+          if (imgs[i]._beletRetryTimer) {
+            clearTimeout(imgs[i]._beletRetryTimer);
+            imgs[i]._beletRetryTimer = null;
+          }
+        }
+      } catch (e) {}
+    }
     while (node && node.firstChild) node.removeChild(node.firstChild);
   }
 
@@ -203,12 +229,49 @@
 
   /* Generic input overlay: numeric pad or full keyboard. */
   var NUM_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'delete', '0', 'ok'];
-  var KB_ROWS = ['йцукенгшщзхъ', 'фывапролджэ', 'ячсмитьбю', '1234567890', '- '];
+  var NUM_IP_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'ok'];
+  var KB_ROWS_RU = ['йцукенгшщзхъ', 'фывапролджэ', 'ячсмитьбю', '1234567890-'];
+  var KB_ROWS_EN = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm', '1234567890-'];
+
+  function renderKeyboardRows(keysHost, focusLangAfter) {
+    var rows = state.kbLang === 'en' ? KB_ROWS_EN : KB_ROWS_RU;
+    clear(keysHost);
+    rows.forEach(function (row, idx) {
+      var rowNode = el('div', 'kb-row');
+      row.split('').forEach(function (char) {
+        var button;
+        if (char === ' ') return;
+        button = el('button', 'key focusable', char.toUpperCase());
+        button.onclick = (function (value) {
+          return function () { inputAppend(value); };
+        }(char));
+        rowNode.appendChild(button);
+      });
+      if (idx === 2) {
+        var space = el('button', 'key space focusable', 'пробел');
+        space.onclick = function () { inputAppend(' '); };
+        rowNode.appendChild(space);
+        var lang = el('button', 'key lang focusable', state.kbLang === 'en' ? 'АБВ' : 'ABC');
+        lang.setAttribute('data-kb-lang', '1');
+        lang.onclick = function () {
+          state.kbLang = state.kbLang === 'en' ? 'ru' : 'en';
+          renderKeyboardRows(keysHost, true);
+        };
+        rowNode.appendChild(lang);
+      }
+      keysHost.appendChild(rowNode);
+    });
+    if (focusLangAfter) {
+      var langBtn = keysHost.querySelector('[data-kb-lang="1"]');
+      if (langBtn) langBtn.focus();
+    }
+  }
 
   function inputOverlay(kind, options) {
     var isNum = kind === 'num';
     var host = isNum ? $('numpad') : $('keyboard');
     var keysHost = isNum ? $('numpadKeys') : $('keyboardKeys');
+    var padKeys = options.allowDot ? NUM_IP_KEYS : NUM_KEYS;
     state.input = {
       kind: kind,
       value: options.value || '',
@@ -219,7 +282,7 @@
     $(isNum ? 'numpadTitle' : 'keyboardTitle').textContent = options.title || '';
     clear(keysHost);
     if (isNum) {
-      NUM_KEYS.forEach(function (key) {
+      padKeys.forEach(function (key) {
         var button;
         if (key === 'delete') button = el('button', 'key focusable', '⌫');
         else if (key === 'ok') button = el('button', 'key focusable', 'OK');
@@ -232,25 +295,7 @@
         keysHost.appendChild(button);
       });
     } else {
-      KB_ROWS.forEach(function (row) {
-        var rowNode = el('div', 'kb-row');
-        row.split('').forEach(function (char) {
-          var button;
-          if (char === '-') return;
-          if (char === ' ') return;
-          button = el('button', 'key focusable', char.toUpperCase());
-          button.onclick = (function (value) {
-            return function () { inputAppend(value); };
-          }(char));
-          rowNode.appendChild(button);
-        });
-        if (row === KB_ROWS[2]) {
-          var space = el('button', 'key space focusable', 'пробел');
-          space.onclick = function () { inputAppend(' '); };
-          rowNode.appendChild(space);
-        }
-        keysHost.appendChild(rowNode);
-      });
+      renderKeyboardRows(keysHost, false);
     }
     setHidden(host, false);
     inputRender();
@@ -426,24 +471,435 @@
     }
   }
 
+  function readTizenClock() {
+    try {
+      if (window.tizen && window.tizen.time && window.tizen.time.getCurrentDateTime) {
+        return window.tizen.time.getCurrentDateTime();
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function formatDateObj(d) {
+    if (!d) return '';
+    return pad2(d.getDate()) + '.' + pad2(d.getMonth() + 1) + '.' + d.getFullYear() + ' ' +
+      pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+
+  function readBypassMode() {
+    var metas, i, name, content;
+    try {
+      metas = doc && doc.querySelectorAll ? doc.querySelectorAll('meta') : [];
+      for (i = 0; i < metas.length; i += 1) {
+        name = metas[i] && metas[i].getAttribute ? metas[i].getAttribute('name') : '';
+        if (name === 'neon-bypass-mode') {
+          content = String(metas[i].getAttribute('content') || '').replace(/^\s+|\s+$/g, '').toLowerCase();
+          if (content === 'always' || content === 'off') return content;
+        }
+      }
+    } catch (e) {}
+    return 'auto';
+  }
+
+  function isBypassModeForced() {
+    return readBypassMode() === 'always';
+  }
+
+  function isBypassModeDisabled() {
+    return readBypassMode() === 'off';
+  }
+
+  function isClockInvalid() {
+    return new Date().getFullYear() < 2026;
+  }
+
+  function shouldUseBypass() {
+    if (isBypassModeDisabled()) return false;
+    return isClockInvalid() || isBypassModeForced() || !!clockProxyState.keepForMedia;
+  }
+
+  function isClockBypassed() {
+    return !!(window.Belet && Belet.clockProxy && Belet.clockProxy());
+  }
+
+  function isClockBlockingHttps() {
+    if (isBypassModeDisabled()) return false;
+    if (isClockBypassed()) return false;
+    if (isClockInvalid()) return true;
+    if (isBypassModeForced()) return !state.bypassFallbackReady;
+    return false;
+  }
+
+  function clockDateText() {
+    return formatDateObj(new Date());
+  }
+
+  var CLOCK_PROXY_PORT = 18767;
+  var CLOCK_PROXY_SVC = 'BeletFilm1.ClockProxy';
+  var WRT_INLINE_CODE = "import { Service } from 'wrt:service'; window.__neonWrtService = Service; window.dispatchEvent(new Event('neon-wrt-ready'));";
+  var clockProxyState = {
+    launched: false,
+    probing: false,
+    wrtTried: false,
+    tvIp: '',
+    base: '',
+    diag: 'не требуется',
+    launchDiag: '',
+    serverOffsetMs: 0,
+    serverSynced: false,
+    watchTicks: 0,
+    keepForMedia: false,
+    lastMediaProbe: 0
+  };
+
+  function canProbeAnyClockBridge() {
+    return hasTizenServiceApi();
+  }
+
+  function hasTizenServiceApi() {
+    return !!(window.tizen && (window.tizen.application || window.tizen.ApplicationControl));
+  }
+
+  function tizenPlatformMajor() {
+    try {
+      if (window.tizen && window.tizen.systeminfo && window.tizen.systeminfo.getCapability) {
+        return parseInt(window.tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version'), 10) || 0;
+      }
+    } catch (e) {}
+    return 0;
+  }
+
+  function probeTvIp() {
+    var props, i;
+    try {
+      if (window.webapis && window.webapis.network && window.webapis.network.getIp) {
+        var wip = window.webapis.network.getIp();
+        if (wip && typeof wip === 'string' && wip !== '0.0.0.0' && wip.indexOf('127.') !== 0) {
+          clockProxyState.tvIp = wip.replace(/^\s+|\s+$/g, '');
+        }
+      }
+    } catch (e) {}
+    try {
+      if (window.tizen && window.tizen.systeminfo && window.tizen.systeminfo.getPropertyValue) {
+        props = ['ETHERNET_NETWORK', 'WIFI_NETWORK', 'NETWORK'];
+        for (i = 0; i < props.length; i += 1) {
+          try {
+            window.tizen.systeminfo.getPropertyValue(props[i], function (val) {
+              var ip = val && (val.ipAddress || val.ip);
+              if (ip && ip !== '0.0.0.0' && String(ip).indexOf('127.') !== 0) {
+                clockProxyState.tvIp = String(ip).replace(/^\s+|\s+$/g, '');
+              }
+            }, function () {});
+          } catch (e) {}
+        }
+      }
+    } catch (e) {}
+  }
+
+  function getClockProxyCandidates(opts) {
+    var raw = [];
+    var out = [];
+    var i;
+    if (hasTizenServiceApi()) {
+      raw.push('http://127.0.0.1:' + CLOCK_PROXY_PORT);
+      raw.push('http://localhost:' + CLOCK_PROXY_PORT);
+      if (clockProxyState.tvIp && (!opts || opts.includeTvIp !== false)) {
+        raw.push('http://' + clockProxyState.tvIp + ':' + CLOCK_PROXY_PORT);
+      }
+    }
+    for (i = 0; i < raw.length; i += 1) {
+      if (out.indexOf(raw[i]) < 0) out.push(raw[i]);
+    }
+    return out;
+  }
+
+  function withWrtService(cb) {
+    var done = false;
+    var s;
+    var sFile;
+    function finish() {
+      if (done) return;
+      done = true;
+      cb();
+    }
+    if (tizenPlatformMajor() < 9 || window.__neonWrtService || clockProxyState.wrtTried) {
+      cb();
+      return;
+    }
+    clockProxyState.wrtTried = true;
+    try {
+      on(window, 'neon-wrt-ready', function () {
+        if (!done) {
+          finish();
+          return;
+        }
+        if (shouldUseBypass() && !isClockBypassed() && typeof window.__neonWrtService === 'function') {
+          try {
+            var lateP = new window.__neonWrtService(CLOCK_PROXY_SVC).start();
+            if (lateP && typeof lateP.then === 'function') {
+              lateP.then(
+                function () { clockProxyState.launchDiag = 'wrt_late_ok'; },
+                function () {}
+              );
+            }
+          } catch (e) {}
+        }
+      });
+    } catch (e) {}
+    setTimeout(function () {
+      if (done || window.__neonWrtService) return;
+      try {
+        if (doc && doc.createElement && (doc.head || doc.body)) {
+          sFile = doc.createElement('script');
+          sFile.type = 'module';
+          sFile.src = 'wrt-service.js';
+          sFile.onerror = function () {};
+          (doc.head || doc.body).appendChild(sFile);
+        }
+      } catch (e) {}
+    }, 150);
+    setTimeout(finish, 450);
+    try {
+      if (doc && doc.createElement && (doc.head || doc.body)) {
+        s = doc.createElement('script');
+        s.type = 'module';
+        s.text = WRT_INLINE_CODE;
+        s.onerror = function () {};
+        (doc.head || doc.body).appendChild(s);
+        return;
+      }
+    } catch (e) {}
+    finish();
+  }
+
+  function launchClockProxyLegacy() {
+    var AppCtrl;
+    if (!hasTizenServiceApi()) {
+      clockProxyState.launchDiag = 'no_tizen_app';
+      return;
+    }
+    AppCtrl = window.tizen.ApplicationControl || (window.tizen.application && window.tizen.application.ApplicationControl);
+    if (AppCtrl && window.tizen.application && window.tizen.application.launchAppControl) {
+      try {
+        window.tizen.application.launchAppControl(
+          new AppCtrl('http://tizen.org/appcontrol/operation/service'),
+          CLOCK_PROXY_SVC,
+          function () { clockProxyState.launchDiag = 'appctl_ok'; },
+          function (err) {
+            clockProxyState.launchDiag = 'appctl_err_' + ((err && (err.name || err.message)) || 'fail');
+            try {
+              if (window.tizen.application.launch) {
+                window.tizen.application.launch(
+                  CLOCK_PROXY_SVC,
+                  function () { clockProxyState.launchDiag = 'launch_ok'; },
+                  function (e2) { clockProxyState.launchDiag = 'launch_err_' + ((e2 && (e2.name || e2.message)) || 'fail'); }
+                );
+              }
+            } catch (e) {}
+          }
+        );
+        return;
+      } catch (e) { clockProxyState.launchDiag = 'appctl_exc'; }
+    }
+    try {
+      if (window.tizen.application && window.tizen.application.launch) {
+        window.tizen.application.launch(
+          CLOCK_PROXY_SVC,
+          function () { clockProxyState.launchDiag = 'launch_ok'; },
+          function (e3) { clockProxyState.launchDiag = 'launch_err_' + ((e3 && (e3.name || e3.message)) || 'fail'); }
+        );
+      }
+    } catch (e) { clockProxyState.launchDiag = 'launch_exc'; }
+  }
+
+  function launchClockProxyService(forceRetry) {
+    if (!shouldUseBypass() || !hasTizenServiceApi()) return;
+    if (clockProxyState.launched && !forceRetry) return;
+    clockProxyState.launched = true;
+    clockProxyState.diag = 'запуск локального прокси…';
+    probeTvIp();
+    withWrtService(function () {
+      var WrtSvc = window.__neonWrtService;
+      if (typeof WrtSvc === 'function') {
+        try {
+          var p = new WrtSvc(CLOCK_PROXY_SVC).start();
+          if (p && typeof p.then === 'function') {
+            p.then(
+              function () {
+                clockProxyState.launchDiag = 'wrt_ok';
+                if (forceRetry && !isClockBypassed()) launchClockProxyLegacy();
+              },
+              function (e) {
+                clockProxyState.launchDiag = 'wrt_err_' + ((e && (e.message || e.name)) || 'fail');
+                launchClockProxyLegacy();
+              }
+            );
+          } else {
+            clockProxyState.launchDiag = 'wrt_sync';
+            if (forceRetry && !isClockBypassed()) launchClockProxyLegacy();
+          }
+          return;
+        } catch (e) {
+          clockProxyState.launchDiag = 'wrt_exc';
+        }
+      }
+      launchClockProxyLegacy();
+    });
+  }
+
+  function pingClockProxyCandidate(baseUrl, cb) {
+    var xhr = new XMLHttpRequest();
+    var done = false;
+    var isLoopback = baseUrl.indexOf('127.0.0.1') >= 0 || baseUrl.indexOf('localhost') >= 0;
+    function finish(ok, data) {
+      if (done) return;
+      done = true;
+      cb(ok, data || null);
+    }
+    try {
+      xhr.open('GET', baseUrl + '/__ping', true);
+      xhr.timeout = isLoopback ? 350 : 600;
+      xhr.onreadystatechange = function () {
+        var parsed;
+        if (xhr.readyState !== 4) return;
+        if (xhr.status === 200) {
+          try { parsed = JSON.parse(xhr.responseText); } catch (e) { parsed = null; }
+          if (parsed && parsed.ok) return finish(true, parsed);
+        }
+        finish(false, null);
+      };
+      xhr.onerror = function () { finish(false, null); };
+      xhr.ontimeout = function () { finish(false, null); };
+      xhr.send();
+    } catch (e) {
+      finish(false, null);
+    }
+  }
+
+  function probeClockProxy(callback, options) {
+    var doneCb = typeof callback === 'function' ? callback : function () {};
+    var opts = options || {};
+    var candidates;
+    var index = 0;
+    if (!shouldUseBypass()) {
+      if (window.Belet && Belet.setClockProxy) Belet.setClockProxy('');
+      clockProxyState.base = '';
+      clockProxyState.diag = isBypassModeDisabled()
+        ? 'отключён (режим без обхода)'
+        : 'не требуется (часы ТВ в норме)';
+      doneCb(false);
+      return;
+    }
+    if (!canProbeAnyClockBridge()) {
+      clockProxyState.diag = 'локальный сервис недоступен';
+      doneCb(false);
+      return;
+    }
+    if (clockProxyState.probing) {
+      doneCb(isClockBypassed());
+      return;
+    }
+    if (hasTizenServiceApi()) {
+      launchClockProxyService(!!opts.forceLaunch);
+      probeTvIp();
+    }
+    clockProxyState.probing = true;
+    candidates = getClockProxyCandidates(opts);
+    function tryNext() {
+      var candidate;
+      if (index >= candidates.length) {
+        clockProxyState.probing = false;
+        clockProxyState.diag = 'не отвечает' +
+          (clockProxyState.launchDiag ? ' (' + clockProxyState.launchDiag + ')' : '');
+        doneCb(false);
+        return;
+      }
+      candidate = candidates[index];
+      index += 1;
+      pingClockProxyCandidate(candidate, function (ok, data) {
+        var wasBypassed = isClockBypassed();
+        if (!ok) return tryNext();
+        clockProxyState.probing = false;
+        clockProxyState.base = candidate;
+        clockProxyState.diag = 'активен (' + candidate + ')';
+        if (window.Belet && Belet.setClockProxy) Belet.setClockProxy(candidate);
+        if (data && data.serverTimeMs && data.serverTimeMs >= 1704067200000) {
+          clockProxyState.serverOffsetMs = data.serverTimeMs - Date.now();
+          clockProxyState.serverSynced = true;
+        }
+        tickClock();
+        doneCb(true, !wasBypassed);
+      });
+    }
+    tryNext();
+  }
+
+  function triggerImageProxyFallback(failedUrl) {
+    var now;
+    if (isBypassModeDisabled() || isClockBypassed() || !canProbeAnyClockBridge()) return;
+    if (failedUrl && !/^https:\/\/(?:[^\/]+\.)?(?:belet\.me|belet\.tm|beletapis\.com)(?:\/|:|$)/i.test(failedUrl)) {
+      return;
+    }
+    now = Date.now();
+    clockProxyState.keepForMedia = true;
+    if (clockProxyState.probing || (clockProxyState.lastMediaProbe && now - clockProxyState.lastMediaProbe < 4000)) {
+      return;
+    }
+    clockProxyState.lastMediaProbe = now;
+    probeClockProxy(function (ok) {
+      if (ok) {
+        clockProxyState.keepForMedia = true;
+        refreshVisibleImages();
+      } else {
+        scheduleClockWatch();
+      }
+    }, { forceLaunch: hasTizenServiceApi(), includeTvIp: true });
+  }
+
+  function clockHelpText() {
+    var tz = readTizenClock();
+    var tzValid = !!(tz && tz.getFullYear && tz.getFullYear() >= 2026);
+    if (!isClockInvalid() && isBypassModeForced()) {
+      return 'Выполняется подключение к серверам Belet…';
+    }
+    if (tzValid) {
+      return 'В настройках ТВ время задано (' + formatDateObj(tz) + '), но системное время браузера осталось ' +
+        clockDateText() + ' — из-за этого прямые HTTPS-запросы заблокированы. ' +
+        'Для системной синхронизации: Настройки ТВ → Общие → Диспетчер системы → Время → Часы → «Авто».';
+    }
+    return 'Время на ТВ не настроено (' + clockDateText() + '). Проверьте настройку часов в меню ТВ или подождите подключения.';
+  }
+
   var deviceRegistration = { state: 'не отправлена', model: '' };
 
   function registerDevice() {
+    if (isClockBlockingHttps()) {
+      deviceRegistration.state = 'ожидает обхода SSL (без прямых HTTPS)';
+      scheduleClockWatch();
+      return;
+    }
     deviceRegistration.state = 'отправляется…';
     Belet.registerDevice(function (err) {
       deviceRegistration.model = Belet.model();
       if (err) {
-        deviceRegistration.state = 'ошибка: ' + describeError(err);
+        if (err.kind === 'network' && isClockBlockingHttps()) {
+          deviceRegistration.state = 'ожидает синхронизации времени (HTTP 0)';
+        } else if (err.kind === 'network') {
+          deviceRegistration.state = 'нет ответа от сервера (HTTP 0)';
+        } else {
+          deviceRegistration.state = 'ошибка: ' + describeError(err);
+        }
         return;
       }
-      deviceRegistration.state = 'телевизор добавлен в список устройств';
+      deviceRegistration.state = 'сервер принял регистрацию телевизора';
     });
   }
 
   function describeError(err) {
     if (!err) return 'Неизвестная ошибка.';
     if (err.kind === 'network') {
-      return 'Нет ответа от серверов Belet (HTTP 0). Проверьте Wi-Fi и время на телевизоре. ' +
+      if (isClockBlockingHttps()) return clockHelpText();
+      return 'Нет ответа от серверов Belet (HTTP 0). Проверьте подключение к сети и время на телевизоре. ' +
         'Если сеть работает, встроенный браузер ТВ мог заблокировать запрос политикой CORS.';
     }
     if (err.kind === 'auth') return 'Сессия истекла. Войдите в аккаунт снова.';
@@ -455,9 +911,116 @@
     return 'Сервис Belet ответил ошибкой' + (err.http ? ' HTTP ' + err.http : '') + (err.message ? ': ' + err.message : '.');
   }
 
+  function networkConnectionType() {
+    try {
+      if (window.webapis && window.webapis.network && window.webapis.network.getActiveConnectionType) {
+        return window.webapis.network.getActiveConnectionType();
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function isNetworkReady() {
+    var connType = networkConnectionType();
+    if (connType === 0) return false;
+    if (typeof window.navigator !== 'undefined' && window.navigator.onLine === false) return false;
+    return true;
+  }
+
+  function networkLabel() {
+    var connType = networkConnectionType();
+    if (connType === 0) return 'нет подключения (Tizen)';
+    if (connType === 1) return 'Wi-Fi';
+    if (connType === 2) return 'мобильная сеть';
+    if (connType === 3) return 'Ethernet';
+    if (typeof window.navigator !== 'undefined' && window.navigator.onLine === false) return 'офлайн';
+    return 'подключена';
+  }
+
+  function clearClockSyncTimer() {
+    if (state.clockSyncTimer) {
+      clearTimeout(state.clockSyncTimer);
+      state.clockSyncTimer = null;
+    }
+  }
+
+  function scheduleClockWatch() {
+    clearClockSyncTimer();
+    if (!shouldUseBypass() || isClockBypassed()) {
+      state.clockSynced = true;
+      return;
+    }
+    state.clockSynced = false;
+    state.clockSyncTimer = setTimeout(function () {
+      state.clockSyncTimer = null;
+      tickClock();
+      if (!isClockBypassed() && shouldUseBypass()) {
+        clockProxyState.watchTicks += 1;
+        probeClockProxy(function (ok, newlyActivated) {
+          if (ok && newlyActivated) {
+            state.clockSynced = true;
+            if (state.screen !== 'boot' && (!state.homeLoaded || state.screen === 'login')) {
+              toast('Подключение к Belet установлено', 2200);
+            }
+            recoverNetworkScreens(true);
+            return;
+          }
+          if (!isClockBypassed() && shouldUseBypass()) scheduleClockWatch();
+        }, {
+          forceLaunch: hasTizenServiceApi() && (clockProxyState.watchTicks % 2 === 0)
+        });
+      }
+    }, 2000);
+  }
+
+  function clearBootTimer() {
+    if (state.bootTimer) {
+      clearTimeout(state.bootTimer);
+      state.bootTimer = null;
+    }
+  }
+
+  function clearHomeTimer() {
+    if (state.homeRetryTimer) {
+      clearTimeout(state.homeRetryTimer);
+      state.homeRetryTimer = null;
+    }
+  }
+
+  function clearProfileTimer() {
+    if (state.profileRetryTimer) {
+      clearTimeout(state.profileRetryTimer);
+      state.profileRetryTimer = null;
+    }
+  }
+
+  function clearOtpTimer() {
+    if (state.login.otpTimer) {
+      clearTimeout(state.login.otpTimer);
+      state.login.otpTimer = null;
+    }
+  }
+
+  function resetCatalogueState() {
+    state.homeGen += 1;
+    clearHomeTimer();
+    clearProfileTimer();
+    state.homeLoaded = false;
+    state.home = { groups: [], hero: null, items: [] };
+    state.categories = [];
+    state.categoriesLoaded = false;
+    state.browse = { mode: 'category', id: null, title: '', items: [], offset: 0, loading: false, done: false };
+    state.search = { text: '', items: [], page: 1, loading: false, done: false, gen: (state.search.gen || 0) + 1 };
+    state.detail = { movie: null, seasons: [], seasonId: null, episodes: [], loadingEpisodes: false };
+    clear($('rows'));
+    clear($('browseGrid'));
+    clear($('searchGrid'));
+  }
+
   function handleAuthError(err) {
     if (!err || err.kind !== 'auth') return false;
-    state.homeLoaded = false;
+    if (state.login.loggingOut || state.screen === 'login') return true;
+    resetCatalogueState();
     showLogin();
     toast('Сессия истекла — войдите снова', 4200);
     return true;
@@ -465,21 +1028,50 @@
 
   /* ── login ────────────────────────────────────────────────────────── */
 
+  function focusLoginStep() {
+    var target = $('phoneDisplay');
+    if (!hasClass($('loginQr'), 'hidden')) target = $('qrRefresh');
+    else if (!hasClass($('loginCode'), 'hidden')) target = $('codeDisplay');
+    state.mainFocus = target;
+    setTimeout(function () {
+      if (state.screen === 'login' && !activeOverlay() && target && isVisible(target)) target.focus();
+    }, 40);
+  }
+
   function showLogin() {
     stopQr();
+    clearOtpTimer();
+    clearHomeTimer();
+    clearProfileTimer();
     cancelPlayback(true);
+    state.input = null;
+    state.dialogActions = [];
+    setHidden($('dialog'), true);
+    setHidden($('numpad'), true);
+    setHidden($('keyboard'), true);
+    state.login.phone = '';
+    state.login.code = '';
+    state.login.tempToken = '';
+    state.login.methods = [];
+    state.login.methodIndex = 0;
+    state.login.busy = false;
+    state.login.otpFallback = false;
+    state.login.generation += 1;
     screen('login');
+    state.previous = 'login';
     state.mainFocus = $('phoneDisplay');
     $('loginPhone').classList.remove('hidden');
     $('loginCode').classList.add('hidden');
     $('loginQr').classList.add('hidden');
     $('loginTitle').textContent = 'Вход в Belet';
     $('loginHint').textContent = 'Введите номер телефона, привязанный к аккаунту Belet.';
+    renderCodeValue();
     updatePhoneDisplay();
-    loadOtpMethods();
+    loadOtpMethods(0);
     setTimeout(function () {
-      var target = state.login.phone ? $('phoneDisplay') : $('phoneDisplay');
-      if (target) target.focus();
+      if (state.screen === 'login' && !activeOverlay() && !hasClass($('loginPhone'), 'hidden')) {
+        $('phoneDisplay').focus();
+      }
     }, 40);
   }
 
@@ -493,16 +1085,53 @@
       node.textContent = 'Нажмите OK, чтобы ввести номер';
       node.classList.add('placeholder');
     }
-    $('sendCode').disabled = !(value.length >= 8 && state.login.methods.length);
+    $('sendCode').disabled = !(value.length >= 8 && state.login.methods.length && !state.login.busy);
   }
 
-  function loadOtpMethods() {
+  function fallbackOtpMethods() {
+    return [{ name: 'SMS (резерв)', type: 2 }, { name: 'Звонок (резерв)', type: 1 }];
+  }
+
+  function loadOtpMethods(attempt) {
+    var retryAttempt = typeof attempt === 'number' ? attempt : 0;
+    var gen = state.login.generation;
+    var select = $('methodValue');
+    clearOtpTimer();
+    state.login.otpFallback = false;
+    if (isClockBlockingHttps()) {
+      state.login.methods = fallbackOtpMethods();
+      state.login.otpFallback = true;
+      state.login.methodIndex = 0;
+      select.textContent = state.login.methods[0].name;
+      updatePhoneDisplay();
+      scheduleClockWatch();
+      return;
+    }
+    if (!state.login.methods.length) {
+      select.textContent = retryAttempt ? 'Повторяем запрос…' : 'Загружаем способы…';
+    }
     Belet.otpMethods(function (err, methods) {
-      var select = $('methodValue');
+      var isNetwork, maxRetries, delays, delay;
+      if (gen !== state.login.generation || state.screen !== 'login') return;
       state.login.methods = [];
       if (err) {
-        select.textContent = 'Способ недоступен';
-        $('sendCode').disabled = true;
+        isNetwork = err.kind === 'network';
+        maxRetries = isNetwork ? 3 : 1;
+        delays = [1200, 2500, 5000];
+        if (isClockBlockingHttps()) scheduleClockWatch();
+        if (retryAttempt === 0 && !Belet.hasSession() && Belet.resetDevice) Belet.resetDevice();
+        state.login.methods = fallbackOtpMethods();
+        state.login.otpFallback = true;
+        state.login.methodIndex = 0;
+        select.textContent = state.login.methods[0].name;
+        updatePhoneDisplay();
+        if (retryAttempt < maxRetries) {
+          delay = isNetwork ? delays[retryAttempt] : 900;
+          state.login.otpTimer = setTimeout(function () {
+            state.login.otpTimer = null;
+            if (gen === state.login.generation && state.screen === 'login') loadOtpMethods(retryAttempt + 1);
+          }, delay);
+        }
         return;
       }
       methods.forEach(function (item) {
@@ -569,6 +1198,19 @@
     }
     if (!method) {
       toast('Способ получения кода недоступен. Проверьте сеть.');
+      return;
+    }
+    if (isClockBlockingHttps()) {
+      toast('Подключение к Belet — попробуйте через пару секунд.', 2500);
+      scheduleClockWatch();
+      if (canProbeAnyClockBridge()) {
+        probeClockProxy(function (ok) {
+          if (ok) {
+            state.clockSynced = true;
+            recoverNetworkScreens(true);
+          }
+        });
+      }
       return;
     }
     state.login.busy = true;
@@ -644,8 +1286,10 @@
     state.qr.code = null;
   }
 
-  function startQr() {
+  function startQr(attempt) {
+    var retryAttempt = typeof attempt === 'number' ? attempt : 0;
     stopQr();
+    clearOtpTimer();
     var generation = state.qr.generation;
     var started = Date.now();
     $('loginPhone').classList.add('hidden');
@@ -653,16 +1297,55 @@
     $('loginQr').classList.remove('hidden');
     $('loginTitle').textContent = 'Вход по QR-коду';
     $('loginHint').textContent = 'Отсканируйте код телефоном — телевизор войдёт автоматически.';
-    $('qrImage').removeAttribute('src');
-    $('qrStatus').textContent = 'Получаем QR-код…';
+    if (retryAttempt === 0) $('qrImage').removeAttribute('src');
+    if (isClockBlockingHttps()) {
+      $('qrStatus').textContent = canProbeAnyClockBridge()
+        ? 'Подключение к серверам Belet…'
+        : clockHelpText();
+      state.mainFocus = $('qrRefresh');
+      setTimeout(function () {
+        if (state.screen === 'login' && !activeOverlay() && !hasClass($('loginQr'), 'hidden')) {
+          $('qrRefresh').focus();
+        }
+      }, 30);
+      scheduleClockWatch();
+      return;
+    }
+    $('qrStatus').textContent = retryAttempt ? 'Повторяем запрос QR-кода…' : 'Получаем QR-код…';
     state.mainFocus = $('qrRefresh');
-    setTimeout(function () { $('loginQr').querySelector('.focusable').focus(); }, 30);
+    setTimeout(function () {
+      if (state.screen === 'login' && !activeOverlay() && !hasClass($('loginQr'), 'hidden')) {
+        $('qrRefresh').focus();
+      }
+    }, 30);
 
     Belet.qrCode(function (err, data) {
-      var code;
-      if (generation !== state.qr.generation) return;
+      var code, isNetwork, maxRetries, delays, delay;
+      if (generation !== state.qr.generation || state.screen !== 'login') return;
       if (err || !data) {
-        $('qrStatus').textContent = 'Не удалось получить QR-код. Проверьте сеть и обновите.';
+        isNetwork = !!(err && err.kind === 'network');
+        maxRetries = isNetwork ? 3 : 1;
+        delays = [1200, 2500, 5000];
+        if (retryAttempt === 0 && !Belet.hasSession() && Belet.resetDevice) Belet.resetDevice();
+        if (isClockBlockingHttps()) scheduleClockWatch();
+        if (retryAttempt < maxRetries) {
+          delay = isNetwork ? delays[retryAttempt] : 900;
+          $('qrStatus').textContent = isNetwork
+            ? (isClockBlockingHttps()
+              ? 'Время ТВ сброшено (' + clockDateText() + ') — HTTPS блокируется. Повторяем запрос…'
+              : 'Нет связи с сервером (HTTP 0). Повторяем запрос QR-кода…')
+            : 'Повторяем запрос QR-кода…';
+          state.qr.timer = setTimeout(function () {
+            state.qr.timer = null;
+            if (generation === state.qr.generation && state.screen === 'login') startQr(retryAttempt + 1);
+          }, delay);
+          return;
+        }
+        $('qrStatus').textContent = (isNetwork && isClockBlockingHttps())
+          ? clockHelpText()
+          : ('Не удалось получить QR-код' +
+            (err && err.http ? ' (HTTP ' + err.http + ')' : (isNetwork ? ' (HTTP 0)' : '')) +
+            '. Проверьте сеть и обновите.');
         return;
       }
       code = data.code;
@@ -680,6 +1363,7 @@
         Belet.qrCheck(code, function (checkErr, checkData) {
           if (generation !== state.qr.generation) return;
           if (!checkErr && checkData && checkData.token) {
+            Belet.acceptQrSession(checkData);
             stopQr();
             $('qrStatus').textContent = 'Вход выполнен.';
             registerDevice();
@@ -690,7 +1374,13 @@
             state.qr.timer = setTimeout(poll, 3000);
             return;
           }
-          $('qrStatus').textContent = 'Не удалось проверить QR-код. Обновите его или войдите по SMS.';
+          var status = checkErr ? checkErr.http : 0;
+          if (!status || status === 408 || status === 429 || status >= 500) {
+            $('qrStatus').textContent = 'Проверка QR: HTTP ' + status + '. Повторяем запрос…';
+            state.qr.timer = setTimeout(poll, 5000);
+            return;
+          }
+          $('qrStatus').textContent = 'Не удалось проверить QR-код (HTTP ' + status + '). Обновите его или войдите по SMS.';
         });
       }
       state.qr.timer = setTimeout(poll, 2500);
@@ -702,19 +1392,112 @@
   var IMAGE_BASE = 'https://img.belet.me/';
   var BRAND_IMAGE = 'belet-logo.png';
 
-  function imageUrl(value) {
+  function extractImageValue(node, depth) {
+    var keys;
+    var i;
+    var found;
+    if (!node || depth > 4) return null;
+    if (typeof node === 'string') return node;
+    if (Array.isArray(node)) {
+      for (i = 0; i < node.length; i += 1) {
+        found = extractImageValue(node[i], depth + 1);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (typeof node !== 'object') return null;
+    keys = [
+      'url', 'src', 'link', 'path', 'file', 'filename', 'image', 'webp', 'png', 'jpg', 'jpeg',
+      'high', 'large', 'original', 'full', 'default', 'standard', 'medium', 'small', 'low', 'thumb', 'thumbnail', 'preview', '2x', '1x'
+    ];
+    for (i = 0; i < keys.length; i += 1) {
+      if (node[keys[i]] !== undefined && node[keys[i]] !== null) {
+        found = extractImageValue(node[keys[i]], depth + 1);
+        if (found) return found;
+      }
+    }
+    keys = Object.keys(node);
+    for (i = 0; i < keys.length; i += 1) {
+      found = extractImageValue(node[keys[i]], depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function normalizeRawImageUrl(value) {
+    var raw = (value && typeof value === 'object') ? extractImageValue(value, 0) : value;
     var url;
-    if (typeof value !== 'string') return null;
-    url = value.replace(/^\s+|\s+$/g, '');
+    if (typeof raw !== 'string') return null;
+    url = raw.replace(/^\s+|\s+$/g, '').replace(/ /g, '%20');
     if (!url) return null;
     if (/^(https?:|data:|file:)/i.test(url)) return url;
     if (url.indexOf('//') === 0) return 'https:' + url;
-    if (/^img\.belet\.me\//i.test(url)) return 'https://' + url;
+    if (/^[a-z0-9.-]*belet\.[a-z]+\//i.test(url)) return 'https://' + url;
     return IMAGE_BASE + (url.charAt(0) === '/' ? url.slice(1) : url);
   }
 
-  function setContentImage(img, source) {
+  function imageUrl(value) {
+    var resolved = normalizeRawImageUrl(value);
+    if (!resolved) return null;
+    if (window.Belet && Belet.proxyUrl && /^https?:/i.test(resolved)) {
+      return Belet.proxyUrl(resolved);
+    }
+    return resolved;
+  }
+
+  function pushRawCandidate(out, seen, value) {
+    var raw = normalizeRawImageUrl(value);
+    if (!raw || seen[raw]) return;
+    seen[raw] = true;
+    out.push(raw);
+  }
+
+  function buildRawCandidateList(rawOrList) {
+    var out = [];
+    var seen = {};
+    var i;
+    if (Array.isArray(rawOrList)) {
+      for (i = 0; i < rawOrList.length; i += 1) pushRawCandidate(out, seen, rawOrList[i]);
+    } else if (rawOrList !== undefined && rawOrList !== null) {
+      pushRawCandidate(out, seen, rawOrList);
+    }
+    return out;
+  }
+
+  function sameRawCandidateList(a, b) {
+    var i;
+    if (!a || !b || a.length !== b.length) return false;
+    for (i = 0; i < a.length; i += 1) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
+  function setContentImage(img, rawSource) {
+    var candidates = buildRawCandidateList(rawSource);
+    var primaryRaw = candidates.length ? candidates[0] : '';
+    var source = primaryRaw ? imageUrl(primaryRaw) : null;
+    var gen;
+    var candIndex = 0;
+    var retryCount = 0;
+    if (!img) return;
+    if (source && img._beletResolved === source &&
+        sameRawCandidateList(img._beletRawCandidates, candidates) &&
+        !img._beletBrandFallback && img.src === source && !(img.complete && img.naturalWidth === 0)) {
+      return;
+    }
+    gen = (img._beletImgGen || 0) + 1;
+    img._beletImgGen = gen;
+    img._beletRawCandidates = candidates;
+    img._beletRawSource = primaryRaw;
+    img._beletResolved = source || '';
+    if (img._beletRetryTimer) {
+      clearTimeout(img._beletRetryTimer);
+      img._beletRetryTimer = null;
+    }
+
     function showBrandFallback() {
+      if (img._beletImgGen !== gen) return;
       if (img._beletBrandFallback) {
         img.style.visibility = 'hidden';
         return;
@@ -725,69 +1508,264 @@
       img.src = BRAND_IMAGE;
     }
 
+    function handleImageError() {
+      var currentRaw;
+      var currentUrl;
+      var nextRaw;
+      var delay;
+      if (img._beletImgGen !== gen) return;
+      currentRaw = candidates[candIndex] || primaryRaw;
+      currentUrl = currentRaw ? imageUrl(currentRaw) : source;
+      triggerImageProxyFallback(currentRaw);
+      if (img._beletImgGen !== gen) return;
+      if (!img._beletBrandFallback && currentUrl && /^https?:\/\//i.test(currentUrl)) {
+        if (candidates.length > 1) {
+          if (candIndex + 1 < candidates.length && retryCount < 4) {
+            delay = retryCount === 0 ? 350 : 900;
+            retryCount += 1;
+            candIndex += 1;
+            nextRaw = candidates[candIndex];
+            img._beletRetryTimer = setTimeout(function () {
+              img._beletRetryTimer = null;
+              if (img._beletImgGen !== gen || img._beletBrandFallback) return;
+              var resolvedNext = imageUrl(nextRaw);
+              img._beletResolved = resolvedNext || '';
+              if (img.removeAttribute) img.removeAttribute('src');
+              img.src = resolvedNext;
+            }, delay);
+            return;
+          }
+        } else if (retryCount < 2) {
+          delay = retryCount === 0 ? 350 : 900;
+          retryCount += 1;
+          img._beletRetryTimer = setTimeout(function () {
+            img._beletRetryTimer = null;
+            if (img._beletImgGen !== gen || img._beletBrandFallback) return;
+            var resolvedRetry = imageUrl(currentRaw) || currentUrl;
+            img._beletResolved = resolvedRetry || '';
+            if (img.removeAttribute) img.removeAttribute('src');
+            img.src = resolvedRetry;
+          }, delay);
+          return;
+        }
+      }
+      showBrandFallback();
+    }
+
     img._beletBrandFallback = false;
     img.classList.remove('brand-fallback');
     img.alt = '';
     img.style.visibility = '';
-    img.onerror = showBrandFallback;
-    source = imageUrl(source);
+    try {
+      img.referrerPolicy = 'no-referrer';
+      if (img.setAttribute) img.setAttribute('referrerpolicy', 'no-referrer');
+    } catch (e) {}
+    img.onload = function () {
+      if (img._beletImgGen !== gen) return;
+      if (img._beletRetryTimer) {
+        clearTimeout(img._beletRetryTimer);
+        img._beletRetryTimer = null;
+      }
+    };
+    img.onerror = handleImageError;
     if (source) img.src = source;
     else showBrandFallback();
   }
 
-  function pickImage(images, kind, size) {
-    var entry, sizes = size || ['medium', 'standard', 'default', 'high'];
+  function refreshVisibleImages() {
+    var imgs;
+    var i;
+    var img;
+    var rawSrc;
+    var nextUrl;
+    if (!doc || !doc.querySelectorAll) return;
+    imgs = doc.querySelectorAll('img');
+    for (i = 0; i < imgs.length; i += 1) {
+      img = imgs[i];
+      if (!img || (!img._beletRawSource && !(img._beletRawCandidates && img._beletRawCandidates.length))) continue;
+      rawSrc = (img._beletRawCandidates && img._beletRawCandidates.length) ? img._beletRawCandidates[0] : img._beletRawSource;
+      nextUrl = imageUrl(rawSrc);
+      if (!nextUrl) continue;
+      if (img._beletBrandFallback || img._beletResolved !== nextUrl ||
+          (img.complete && img.naturalWidth === 0)) {
+        setContentImage(img, (img._beletRawCandidates && img._beletRawCandidates.length) ? img._beletRawCandidates : img._beletRawSource);
+      }
+    }
+  }
+
+  function collectImageFromEntry(entry, sizes, out, seen) {
+    var j;
+    var val;
+    var fallbackKeys = ['original', 'large', 'high', 'full', 'default', 'standard', 'medium', 'small', 'low', 'thumb', 'thumbnail', 'preview', 'webp', 'url', 'src', 'link', 'path'];
+    if (!entry) return;
+    if (typeof entry === 'string') { pushRawCandidate(out, seen, entry); return; }
+    if (typeof entry !== 'object') return;
+    for (j = 0; j < sizes.length; j += 1) {
+      val = entry[sizes[j]];
+      if (val !== undefined && val !== null) pushRawCandidate(out, seen, val);
+    }
+    for (j = 0; j < fallbackKeys.length; j += 1) {
+      val = entry[fallbackKeys[j]];
+      if (val !== undefined && val !== null) pushRawCandidate(out, seen, val);
+    }
+    pushRawCandidate(out, seen, extractImageValue(entry, 0));
+  }
+
+  function collectImageCandidates(images, kind, size, out, seen) {
+    var entry;
+    var sizes = size || ['medium', 'standard', 'default', 'high'];
     var order = kind === 'horizontal'
-      ? ['horizontal_with_name', 'horizontal-with-name', 'horizontal_without_name', 'horizontal-without-name', 'vertical', 'vertical_without_name', 'vertical-without-name']
-      : ['vertical', 'vertical_without_name', 'vertical-without-name', 'horizontal_without_name', 'horizontal-without-name', 'horizontal_with_name', 'horizontal-with-name'];
-    var i, j, url;
-    if (!images || typeof images !== 'object') return null;
+      ? [
+        'horizontal_with_name', 'horizontal-with-name', 'horizontal_without_name', 'horizontal-without-name', 'horizontal',
+        'banner', 'backdrop', 'header', 'landscape', 'wide', 'cover',
+        'vertical', 'vertical_without_name', 'vertical-without-name', 'vertical_with_name', 'vertical-with-name', 'poster', 'portrait', 'name'
+      ]
+      : [
+        'vertical', 'vertical_without_name', 'vertical-without-name', 'vertical_with_name', 'vertical-with-name', 'poster', 'portrait', 'cover',
+        'horizontal_without_name', 'horizontal-without-name', 'horizontal_with_name', 'horizontal-with-name', 'horizontal', 'banner', 'backdrop', 'name'
+      ];
+    var i;
+    if (!images) return;
+    if (typeof images === 'string') { pushRawCandidate(out, seen, images); return; }
+    if (Array.isArray(images)) {
+      for (i = 0; i < images.length; i += 1) {
+        entry = images[i];
+        if (entry && typeof entry === 'object' && entry.type &&
+            ((kind === 'horizontal' && /horiz|banner|back|land|wide/i.test(String(entry.type))) ||
+             (kind !== 'horizontal' && /vert|poster|port|cover/i.test(String(entry.type))))) {
+          collectImageFromEntry(entry, sizes, out, seen);
+        }
+      }
+      for (i = 0; i < images.length; i += 1) {
+        collectImageFromEntry(images[i], sizes, out, seen);
+      }
+      return;
+    }
+    if (typeof images !== 'object') return;
     for (i = 0; i < order.length; i += 1) {
       entry = images[order[i]];
-      if (!entry || typeof entry !== 'object') continue;
-      for (j = 0; j < sizes.length; j += 1) {
-        if (entry[sizes[j]] && typeof entry[sizes[j]].url === 'string') {
-          url = imageUrl(entry[sizes[j]].url);
-          if (url) return url;
+      if (!entry) continue;
+      collectImageFromEntry(entry, sizes, out, seen);
+    }
+    pushRawCandidate(out, seen, extractImageValue(images, 0));
+  }
+
+  function pickImage(images, kind, size) {
+    var out = [];
+    var seen = {};
+    collectImageCandidates(images, kind, size, out, seen);
+    return out.length ? imageUrl(out[0]) : null;
+  }
+
+  function unwrapItem(item) {
+    if (item && item.movie && typeof item.movie === 'object') return item.movie;
+    if (item && item.item && typeof item.item === 'object') return item.item;
+    return item;
+  }
+
+  function posterCandidates(item) {
+    var inner = unwrapItem(item);
+    var fields = [
+      'poster', 'poster_url', 'posterUrl', 'vertical_image', 'verticalImage',
+      'cover', 'cover_url', 'coverUrl', 'image_url', 'imageUrl', 'image',
+      'thumb', 'thumbnail', 'img', 'photo', 'picture', 'backdrop', 'backdrop_url', 'banner', 'banner_url'
+    ];
+    var list = [inner];
+    var out = [];
+    var seen = {};
+    var i, j, src;
+    if (item && inner !== item) list.push(item);
+    for (i = 0; i < list.length; i += 1) {
+      src = list[i];
+      if (!src || typeof src !== 'object') continue;
+      collectImageCandidates(src.images, 'vertical', ['medium', 'standard', 'default', 'high'], out, seen);
+      for (j = 0; j < fields.length; j += 1) {
+        if (src[fields[j]] !== undefined && src[fields[j]] !== null) {
+          pushRawCandidate(out, seen, src[fields[j]]);
         }
       }
     }
-    if (images.name && typeof images.name.url === 'string') return imageUrl(images.name.url);
-    return null;
+    return out;
+  }
+
+  function backdropCandidates(item) {
+    var inner = unwrapItem(item);
+    var fields = [
+      'banner', 'banner_url', 'bannerUrl', 'backdrop', 'backdrop_url', 'backdropUrl',
+      'horizontal_image', 'horizontalImage', 'header_image', 'headerImage',
+      'cover', 'cover_url', 'image_url', 'imageUrl', 'image', 'poster', 'poster_url'
+    ];
+    var list = [inner];
+    var out = [];
+    var seen = {};
+    var i, j, src;
+    if (item && inner !== item) list.push(item);
+    for (i = 0; i < list.length; i += 1) {
+      src = list[i];
+      if (!src || typeof src !== 'object') continue;
+      collectImageCandidates(src.images, 'horizontal', ['high', 'large', 'original', 'default', 'medium', 'standard'], out, seen);
+      for (j = 0; j < fields.length; j += 1) {
+        if (src[fields[j]] !== undefined && src[fields[j]] !== null) {
+          pushRawCandidate(out, seen, src[fields[j]]);
+        }
+      }
+    }
+    return out;
   }
 
   function posterOf(item) {
-    return pickImage(item && item.images, 'vertical', ['medium', 'standard', 'default', 'high']) ||
-      (item && typeof item.image_url === 'string' ? imageUrl(item.image_url) : null) ||
-      (item && typeof item.image === 'string' ? imageUrl(item.image) : null);
+    var list = posterCandidates(item);
+    return list.length ? imageUrl(list[0]) : null;
   }
 
   function backdropOf(item) {
-    return pickImage(item && item.images, 'horizontal', ['high', 'default', 'medium', 'standard']) ||
-      (item && typeof item.image_url === 'string' ? imageUrl(item.image_url) : null);
+    var list = backdropCandidates(item);
+    return list.length ? imageUrl(list[0]) : null;
   }
 
   function itemsOf(group) {
     if (!group) return [];
     if (Array.isArray(group.items)) return group.items;
     if (Array.isArray(group.movies)) return group.movies;
+    if (Array.isArray(group.banners)) return group.banners;
+    if (Array.isArray(group.promotions)) return group.promotions;
+    if (Array.isArray(group.data)) return group.data;
+    if (Array.isArray(group.list)) return group.list;
     return [];
   }
 
   function isPlayable(item) {
-    return item && typeof item.id === 'number' && typeof item.type_id === 'number' && item.type_id > 0 && item.type_id < 6;
+    var inner = unwrapItem(item);
+    var idNum;
+    var typeNum;
+    if (!inner || typeof inner !== 'object') return false;
+    idNum = Number(inner.id);
+    if (!idNum || isNaN(idNum) || idNum <= 0) return false;
+    if (inner.type_id === undefined || inner.type_id === null || inner.type_id === '') {
+      return !!(inner.title || inner.name || inner.title_ru || inner.title_tk || inner.images || inner.image || inner.poster);
+    }
+    typeNum = Number(inner.type_id);
+    return !isNaN(typeNum) && typeNum > 0 && typeNum < 6;
+  }
+
+  function isHeroGroup(group) {
+    var src = group && group.source ? String(group.source).toLowerCase() : '';
+    return src === 'header' || src === 'banner' || src === 'banners' || src === 'slider';
   }
 
   function movieTitle(item) {
-    return (item && (item.title || item.name || item.title_ru || item.title_tk)) || 'Без названия';
+    var inner = unwrapItem(item);
+    return (inner && (inner.title || inner.name || inner.title_ru || inner.title_tk)) ||
+      (item && (item.title || item.name || item.title_ru || item.title_tk)) || 'Без названия';
   }
 
   function cardNode(item, options) {
     options = options || {};
+    var movie = unwrapItem(item);
     var card = doc.createElement('button');
     var poster = el('div', 'poster');
-    var image = posterOf(item);
-    var name = el('span', 'name', movieTitle(item));
+    var candidates = posterCandidates(item);
+    var name = el('span', 'name', movieTitle(movie));
     var badge;
     var progress;
     var progressValue;
@@ -795,15 +1773,15 @@
     card.className = 'card focusable' + (options.continueWatching ? ' continue' : '');
     card.setAttribute('type', 'button');
     var img = doc.createElement('img');
-    setContentImage(img, image);
+    setContentImage(img, candidates);
     poster.appendChild(img);
-    if (item && item.age) {
-      badge = el('span', 'badge', item.age + '+');
+    if (movie && movie.age) {
+      badge = el('span', 'badge', movie.age + '+');
       poster.appendChild(badge);
     }
     if (options.continueWatching) {
-      duration = parseDuration(item.duration) || parseDuration(item.episode_info && item.episode_info.duration);
-      progressValue = duration ? Math.min(100, Math.round((Number(item.watch_time || 0) / duration) * 100)) : 0;
+      duration = parseDuration(movie.duration) || parseDuration(movie.episode_info && movie.episode_info.duration);
+      progressValue = duration ? Math.min(100, Math.round((Number(movie.watch_time || 0) / duration) * 100)) : 0;
       progress = el('div', 'progress-mini');
       var fill = el('i');
       fill.style.width = Math.max(2, progressValue) + '%';
@@ -812,89 +1790,226 @@
     }
     card.appendChild(poster);
     card.appendChild(name);
-    card.onclick = function () { openDetail(item); };
+    card.onclick = function () { openDetail(movie); };
     return card;
+  }
+
+  function buildRowBlock(group) {
+    var rawItems = itemsOf(group);
+    var items = [];
+    var i;
+    var title;
+    var row;
+    var block;
+    for (i = 0; i < rawItems.length; i += 1) {
+      if (isPlayable(rawItems[i])) items.push(unwrapItem(rawItems[i]));
+    }
+    if (!items.length) return null;
+    title = el('h2', 'row-title', group.title || group.title_ru || group.title_tk || 'Подборка');
+    row = el('div', 'row-track');
+    for (i = 0; i < items.length; i += 1) {
+      row.appendChild(cardNode(items[i], { continueWatching: group.source === 'continue_watching' }));
+    }
+    block = el('div', 'row-block');
+    block.appendChild(title);
+    block.appendChild(row);
+    return block;
   }
 
   function renderRows(groups) {
     var rows = $('rows');
     var heroGroup = null;
     var heroItem = null;
+    var firstFallback = null;
     clear(rows);
     groups.forEach(function (group) {
-      var items = itemsOf(group).filter(isPlayable);
-      var row;
-      var title;
-      if (!items.length) return;
-      if (!heroGroup && group.source === 'header') {
+      var rawItems = itemsOf(group);
+      var items = rawItems.filter(isPlayable).map(unwrapItem);
+      var block;
+      if (!heroGroup && isHeroGroup(group)) {
         heroGroup = group;
-        heroItem = items[0];
+        heroItem = items[0] || (rawItems[0] ? unwrapItem(rawItems[0]) : null);
         return;
       }
-      title = el('h2', 'row-title', group.title || group.title_ru || group.title_tk || 'Подборка');
-      row = el('div', 'row-track');
-      items.forEach(function (item) {
-        row.appendChild(cardNode(item, { continueWatching: group.source === 'continue_watching' }));
-      });
-      var block = el('div', 'row-block');
-      block.appendChild(title);
-      block.appendChild(row);
-      rows.appendChild(block);
+      if (!items.length) return;
+      if (!firstFallback) firstFallback = items[0];
+      block = buildRowBlock(group);
+      if (block) rows.appendChild(block);
     });
-    renderHero(heroItem || (groups.length ? itemsOf(groups[0])[0] : null));
-    $('homeEmpty').classList.toggle('hidden', !!rows.children.length);
+    renderHero(heroItem || firstFallback);
+    $('homeEmpty').classList.toggle('hidden', !!rows.children.length || !hasClass($('hero'), 'hidden'));
   }
 
   function renderHero(item) {
     var hero = $('hero');
-    if (!item) {
+    var movie = unwrapItem(item);
+    if (!movie) {
       setHidden(hero, true);
       return;
     }
-    var image = backdropOf(item) || posterOf(item);
+    var candidates = backdropCandidates(item);
+    var fallbackPosters = posterCandidates(item);
+    var merged = buildRawCandidateList(candidates.concat(fallbackPosters));
     var meta = [];
-    state.home.hero = item;
-    setContentImage($('heroImage'), image);
-    var duration = durationText(item.duration);
-    var genres = genreNames(item.genres);
-    if (item.age) meta.push(item.age + '+');
-    if (item.rating_kp) meta.push('КП ' + item.rating_kp);
+    state.home.hero = movie;
+    setContentImage($('heroImage'), merged);
+    var duration = durationText(movie.duration);
+    var genres = genreNames(movie.genres);
+    if (movie.age) meta.push(movie.age + '+');
+    if (movie.rating_kp) meta.push('КП ' + movie.rating_kp);
     if (duration) meta.push(duration);
-    if (item.year) meta.push(item.year);
+    if (movie.year) meta.push(movie.year);
     if (genres) meta.push(genres);
-    $('heroTitle').textContent = movieTitle(item);
+    $('heroTitle').textContent = movieTitle(movie);
     $('heroMeta').textContent = meta.join('  ·  ');
-    $('heroText').textContent = item.description || '';
+    $('heroText').textContent = movie.description || '';
     setHidden(hero, false);
   }
 
-  function loadHome(showSpinner) {
+  function loadHome(showSpinner, attempt, holdBoot) {
+    var retryAttempt = typeof attempt === 'number' ? attempt : 0;
+    var holdBootScreen = !!holdBoot;
     var collected = [];
-    screen('home');
+    var gen;
+    var heroClaimed = false;
+    var fallbackHero = null;
+    var focusAssigned = false;
+    stopQr();
+    clearOtpTimer();
+    clearHomeTimer();
+    state.homeLoaded = false;
+    state.homeGen += 1;
+    gen = state.homeGen;
+    if (!holdBootScreen) screen('home');
     setHidden($('hero'), true);
     setHidden($('homeEmpty'), true);
+    setHidden($('homeLoading'), true);
     clear($('rows'));
+    state.home.hero = null;
     state.mainFocus = null;
-    if (showSpinner) toast('Загружаем каталог…', 1800);
+
+    function revealHomeScreen() {
+      if (state.screen === 'boot') screen('home');
+    }
+
+    function focusReload() {
+      revealHomeScreen();
+      setHidden($('homeLoading'), true);
+      state.mainFocus = $('homeReload');
+      if (state.screen === 'home' && !activeOverlay() && $('homeReload')) {
+        $('homeReload').focus();
+      }
+    }
+
+    function ensureInitialFocus() {
+      var first;
+      if (focusAssigned) return;
+      first = $('rows').querySelector('.card') || ($('hero') && !hasClass($('hero'), 'hidden') ? $('heroPlay') : null);
+      if (first) {
+        focusAssigned = true;
+        state.mainFocus = first;
+        if (state.screen === 'home' && !activeOverlay()) {
+          first.focus();
+          reveal(first);
+        }
+      }
+    }
+
+    if (isClockBlockingHttps()) {
+      revealHomeScreen();
+      $('homeEmpty').classList.remove('hidden');
+      if (canProbeAnyClockBridge()) {
+        $('homeEmpty').querySelector('h2').textContent = 'Загрузка каталога…';
+        $('homeEmpty').querySelector('p').textContent = 'Подключение к серверам Belet… Подождите пару секунд.';
+      } else {
+        $('homeEmpty').querySelector('h2').textContent = 'Сбиты дата и время на телевизоре';
+        $('homeEmpty').querySelector('p').textContent = clockHelpText();
+      }
+      focusReload();
+      scheduleClockWatch();
+      return;
+    }
+    if (holdBootScreen) {
+      $('bootStatus').textContent = 'Вход в систему…';
+    } else {
+      setHidden($('homeLoading'), false);
+    }
+
+    function appendGroups(newGroups) {
+      var rows = $('rows');
+      var i, group, rawItems, items, block, heroCandidate;
+      for (i = 0; i < newGroups.length; i += 1) {
+        group = newGroups[i];
+        rawItems = itemsOf(group);
+        items = rawItems.filter(isPlayable).map(unwrapItem);
+        if (!heroClaimed && isHeroGroup(group)) {
+          heroCandidate = items[0] || (rawItems[0] ? unwrapItem(rawItems[0]) : null);
+          if (heroCandidate) {
+            heroClaimed = true;
+            renderHero(heroCandidate);
+          }
+          continue;
+        }
+        if (!items.length) continue;
+        if (!fallbackHero) fallbackHero = items[0];
+        block = buildRowBlock(group);
+        if (block) rows.appendChild(block);
+      }
+      if (!heroClaimed && fallbackHero && rows.children.length) {
+        heroClaimed = true;
+        renderHero(fallbackHero);
+      }
+      if (rows.children.length || !hasClass($('hero'), 'hidden')) {
+        revealHomeScreen();
+        setHidden($('homeLoading'), true);
+        setHidden($('homeEmpty'), true);
+        ensureInitialFocus();
+      }
+    }
 
     function fetchPage(offset, pagesLeft) {
       Belet.home(offset, 3, function (err, groups) {
+        var delays, delay;
+        if (gen !== state.homeGen) return;
+        if (state.screen !== 'home' && !(holdBootScreen && state.screen === 'boot')) return;
         if (err) {
           if (handleAuthError(err)) return;
           if (!collected.length) {
+            revealHomeScreen();
+            setHidden($('homeLoading'), true);
+            delays = [1500, 3000, 5000, 7000];
             $('homeEmpty').classList.remove('hidden');
-            $('homeEmpty').querySelector('h2').textContent = 'Каталог не загрузился';
+            if (isClockBlockingHttps()) scheduleClockWatch();
+            if (err.kind === 'network' && retryAttempt < delays.length) {
+              delay = delays[retryAttempt];
+              $('homeEmpty').querySelector('h2').textContent = (!canProbeAnyClockBridge() && isClockBlockingHttps())
+                ? 'Сбиты дата и время на телевизоре'
+                : 'Подключение к серверам Belet…';
+              $('homeEmpty').querySelector('p').textContent = describeError(err) +
+                '\nАвтоматический повтор через ' + Math.round(delay / 1000) + ' с…';
+              focusReload();
+              state.homeRetryTimer = setTimeout(function () {
+                state.homeRetryTimer = null;
+                if (gen === state.homeGen && state.screen === 'home' && !state.homeLoaded && Belet.hasSession()) {
+                  loadHome(false, retryAttempt + 1, false);
+                }
+              }, delay);
+              return;
+            }
+            $('homeEmpty').querySelector('h2').textContent = (!canProbeAnyClockBridge() && isClockBlockingHttps())
+              ? 'Сбиты дата и время на телевизоре'
+              : 'Каталог не загрузился';
             $('homeEmpty').querySelector('p').textContent = describeError(err);
+            focusReload();
             return;
           }
           finish();
           return;
         }
         collected = collected.concat(groups);
-        // Paint each page as it arrives so the TV shows content instead of a spinner.
         if (groups.length) {
           state.home.groups = collected;
-          renderRows(collected);
+          appendGroups(groups);
         }
         if (groups.length && pagesLeft > 1) return fetchPage(offset + 3, pagesLeft - 1);
         finish();
@@ -902,16 +2017,29 @@
     }
 
     function finish() {
+      var rows = $('rows');
+      var hasContent;
+      clearHomeTimer();
+      revealHomeScreen();
+      setHidden($('homeLoading'), true);
       state.home.groups = collected;
       state.homeLoaded = true;
+      if (!heroClaimed && fallbackHero) {
+        heroClaimed = true;
+        renderHero(fallbackHero);
+      }
+      hasContent = !!rows.children.length || !hasClass($('hero'), 'hidden');
       $('homeEmpty').querySelector('h2').textContent = 'Каталог пуст';
       $('homeEmpty').querySelector('p').textContent = 'Сервис ответил, но не вернул ни одного раздела. Проверьте подписку и повторите.';
-      renderRows(collected);
-      var first = $('rows').querySelector('.card') || $('heroPlay');
-      state.mainFocus = first;
-      if (first) {
-        first.focus();
-        reveal(first);
+      setHidden($('homeEmpty'), hasContent);
+      if (deviceRegistration.state !== 'сервер принял регистрацию телевизора' &&
+          deviceRegistration.state !== 'отправляется…') {
+        registerDevice();
+      }
+      ensureInitialFocus();
+      if (!focusAssigned) {
+        state.mainFocus = $('homeReload');
+        if ($('homeReload')) $('homeReload').focus();
       }
     }
 
@@ -1074,17 +2202,27 @@
       value: state.search.text,
       maxLength: 40,
       onDone: function (value) {
-        state.search.text = value;
-        $('searchValue').textContent = value;
-        $('searchValue').classList.remove('placeholder');
-        runSearch();
+        var clean = String(value || '').replace(/^\s+|\s+$/g, '');
+        state.search.text = clean;
+        if (clean) {
+          $('searchValue').textContent = clean;
+          $('searchValue').classList.remove('placeholder');
+          runSearch();
+        } else {
+          $('searchValue').textContent = 'Нажмите OK и введите название';
+          $('searchValue').classList.add('placeholder');
+          toast('Введите название для поиска');
+        }
       }
     });
   }
 
   function runSearch() {
-    var text = state.search.text;
+    var text = String(state.search.text || '').replace(/^\s+|\s+$/g, '');
     if (!text) return;
+    state.search.text = text;
+    state.search.gen += 1;
+    state.search.loading = false;
     state.search.page = 1;
     state.search.items = [];
     state.search.done = false;
@@ -1095,10 +2233,16 @@
 
   function searchPage() {
     var search = state.search;
+    var gen;
     if (search.loading || search.done) return;
     search.loading = true;
+    gen = search.gen;
     toast('Ищем «' + search.text + '»…', 1500);
     Belet.search(search.text, search.page, function (err, list) {
+      var items;
+      var target;
+      var active;
+      if (gen !== state.search.gen) return;
       search.loading = false;
       if (err) {
         if (handleAuthError(err)) return;
@@ -1107,7 +2251,7 @@
         $('searchEmpty').querySelector('p').textContent = describeError(err);
         return;
       }
-      var items = flattenList(list).filter(isPlayable);
+      items = flattenList(list).filter(isPlayable);
       if (!items.length) search.done = true;
       else search.page += 1;
       search.items = search.items.concat(items);
@@ -1115,12 +2259,13 @@
       if (!search.items.length) {
         $('searchEmpty').classList.remove('hidden');
         $('searchEmpty').querySelector('h2').textContent = 'Ничего не найдено';
-        $('searchEmpty').querySelector('p').textContent = 'Попробуйте другое название.';
+        $('searchEmpty').querySelector('p').textContent = 'Попробуйте другое название (на русском или латинице).';
       }
       if (search.items.length) {
-        var target = $('searchGrid').querySelector('.card');
+        target = $('searchGrid').querySelector('.card');
         state.mainFocus = target;
-        if (!doc.activeElement || doc.activeElement === $('searchField')) {
+        active = doc.activeElement;
+        if (!active || active === doc.body || active === $('searchField') || closest(active, '#keyboard')) {
           target.focus();
           reveal(target);
         }
@@ -1130,16 +2275,27 @@
 
   function flattenList(list) {
     var out = [];
+    var hasTypedSections = false;
+    var typedSearch = [];
+    var other = [];
     (list || []).forEach(function (item) {
-      if (!item) return;
-      if (Array.isArray(item.movies)) {
-        item.movies.forEach(function (movie) { if (movie) out.push(movie); });
-      } else if (Array.isArray(item.items)) {
-        item.items.forEach(function (movie) { if (movie) out.push(movie); });
-      } else if (item.id) {
+      var arr;
+      var t;
+      if (!item || typeof item !== 'object') return;
+      arr = item.result || item.movies || item.items || item.data || item.films;
+      if (Array.isArray(arr)) {
+        hasTypedSections = true;
+        t = typeof item.type === 'string' ? item.type.toLowerCase() : '';
+        if (t === 'search' || t === 'top_search') {
+          arr.forEach(function (movie) { if (movie) typedSearch.push(movie); });
+        } else if (t !== 'history') {
+          arr.forEach(function (movie) { if (movie) other.push(movie); });
+        }
+      } else if (item.id || item.movie || item.item) {
         out.push(item);
       }
     });
+    if (hasTypedSections) return typedSearch.length ? typedSearch : other;
     return out;
   }
 
@@ -1150,40 +2306,46 @@
   /* ── detail ───────────────────────────────────────────────────────── */
 
   function openDetail(item) {
-    state.detail = { movie: item, seasons: [], seasonId: null, episodes: [], loadingEpisodes: false };
+    var movie = unwrapItem(item);
+    var detail = { movie: movie, seasons: [], seasonId: null, episodes: [], loadingEpisodes: false };
+    state.detail = detail;
     screen('detail');
     $('episodesSection').classList.add('hidden');
-    $('detailTitle').textContent = movieTitle(item);
+    $('detailTitle').textContent = movieTitle(movie);
     $('detailMeta').textContent = '';
     $('detailGenres').textContent = '';
     $('detailText').textContent = 'Загружаем описание…';
-    $('detailPoster').removeAttribute('src');
-    $('detailBackdrop').style.backgroundImage = 'none';
+    setContentImage($('detailPoster'), posterCandidates(item));
+    setContentImage($('detailBackdropImg'), buildRawCandidateList(backdropCandidates(item).concat(posterCandidates(item))));
     setHidden($('detailTrailer'), true);
     state.mainFocus = $('detailPlay');
     $('detailPlay').textContent = 'Смотреть';
     setTimeout(function () { $('detailPlay').focus(); }, 30);
 
-    Belet.movie(item.id, function (err, movie) {
+    Belet.movie(movie.id, function (err, fullMovie) {
+      if (state.detail !== detail) return;
       if (err) {
         if (handleAuthError(err)) return;
         $('detailText').textContent = describeError(err);
         return;
       }
-      renderDetail(movie);
+      renderDetail(fullMovie);
     });
   }
 
   function renderDetail(movie) {
     var detail = state.detail;
+    var prevMovie = detail && detail.movie;
     var meta = [];
-    var poster = posterOf(movie) || posterOf(detail.movie);
-    var backdrop = backdropOf(movie) || posterOf(movie);
+    var posterList = buildRawCandidateList(posterCandidates(movie).concat(posterCandidates(prevMovie)));
+    var backdropList = buildRawCandidateList(
+      backdropCandidates(movie).concat(posterCandidates(movie)).concat(backdropCandidates(prevMovie)).concat(posterCandidates(prevMovie))
+    );
     var watch = Number(movie.watch_time || 0);
     detail.movie = movie;
 
-    setContentImage($('detailPoster'), poster);
-    if (backdrop) $('detailBackdrop').style.backgroundImage = 'url("' + backdrop + '")';
+    setContentImage($('detailPoster'), posterList);
+    setContentImage($('detailBackdropImg'), backdropList);
     $('detailTitle').textContent = movieTitle(movie);
     var year = movie.year || (movie.release_date ? String(movie.release_date).slice(0, 4) : '');
     var duration = durationText(movie.duration);
@@ -1509,7 +2671,11 @@
 
   function startSources(sources, options, meta) {
     var player = state.player;
-    sources = (sources || []).filter(function (source) { return source && source.url; });
+    sources = (sources || []).filter(function (source) { return source && source.url; }).map(function (source) {
+      var proxied = (window.Belet && window.Belet.proxyUrl) ? window.Belet.proxyUrl(source.url) : source.url;
+      if (proxied === source.url) return source;
+      return { url: proxied, filename: source.filename, quality: source.quality, type: source.type };
+    });
     if (!sources.length) {
       playerError('Сервис не предоставил видеопоток для этого фильма.');
       return;
@@ -1535,6 +2701,8 @@
   }
 
   function hostOf(url) {
+    var proxied = String(url || '').match(/^https?:\/\/[^\/]+\/__proxy\/([^\/?#]+)/i);
+    if (proxied) return proxied[1];
     var match = String(url || '').match(/^https?:\/\/([^\/]+)/i);
     return match ? match[1] : '—';
   }
@@ -1654,8 +2822,10 @@
   }
 
   function mediaRequestSetup(xhr, url) {
+    var target;
     if (!xhr || !window.Belet || !window.Belet.mediaHeaders) return;
-    try { if (xhr.readyState === 0) xhr.open('GET', url, true); } catch (e) {}
+    target = window.Belet.proxyUrl ? window.Belet.proxyUrl(url) : url;
+    try { if (xhr.readyState === 0) xhr.open('GET', target, true); } catch (e) {}
     var headers = window.Belet.mediaHeaders(state.player.beletSessionId, false, null);
     for (var key in headers) {
       if (!Object.prototype.hasOwnProperty.call(headers, key)) continue;
@@ -1678,6 +2848,9 @@
         var chunkLength = isFragment && state.player.chunkLengths ? state.player.chunkLengths[level] : null;
         var headers;
         if (self.cancelled || !state.player.active || (hls && state.player.hls !== hls)) return;
+        if (window.Belet && window.Belet.proxyUrl && context && context.url) {
+          context.url = window.Belet.proxyUrl(context.url);
+        }
         context.headers = context.headers || {};
         headers = window.Belet.mediaHeaders(state.player.beletSessionId, isFragment, chunkLength);
         Object.keys(headers).forEach(function (key) { context.headers[key] = headers[key]; });
@@ -2109,12 +3282,21 @@
     loadProfile();
   }
 
-  function loadProfile() {
-    $('profilePlan').textContent = 'Загрузка данных…';
+  function loadProfile(attempt) {
+    var retryAttempt = typeof attempt === 'number' ? attempt : 0;
+    clearProfileTimer();
+    $('profilePlan').textContent = retryAttempt ? 'Повторяем загрузку профиля…' : 'Загрузка данных…';
     Belet.profile(function (err, data) {
+      if (state.screen !== 'profile') return;
       if (err) {
         if (handleAuthError(err)) return;
         $('profilePlan').textContent = describeError(err);
+        if (err.kind === 'network' && retryAttempt < 2) {
+          state.profileRetryTimer = setTimeout(function () {
+            state.profileRetryTimer = null;
+            if (state.screen === 'profile' && Belet.hasSession()) loadProfile(retryAttempt + 1);
+          }, 2000);
+        }
         return;
       }
       var view = data && data.profile_page_view;
@@ -2132,6 +3314,7 @@
   }
 
   function openAbout() {
+    if (!Belet.hasSession()) state.previous = 'login';
     screen('about');
     state.mainFocus = $('aboutRetest');
     setTimeout(function () { $('aboutRetest').focus(); }, 30);
@@ -2140,57 +3323,135 @@
 
   function runHealthCheck() {
     var host = $('aboutStatus');
-    var rows = [];
+    var alertBox = $('aboutClockAlert');
     host.innerHTML = '<div class="about-row"><span>Проверка…</span><span></span></div>';
-    Belet.healthCheck(function (results) {
-      var labels = {
-        auth: 'Авторизация (beletapis.com)',
-        home: 'Каталог (homepage.belet.me)',
-        film: 'Видеосервис (film.beletapis.com)'
-      };
-      var order = ['auth', 'home', 'film'];
-      host.innerHTML = '';
-      order.forEach(function (key) {
-        var value = results[key] || 'нет ответа';
-        var row = el('div', 'about-row');
-        var name = el('span', '', labels[key]);
-        var status = el('span', value === 'ok' ? 'ok' : 'bad', value === 'ok' ? 'доступен' : value);
-        row.appendChild(name);
-        row.appendChild(status);
-        host.appendChild(row);
-      });
-      var modelRow = el('div', 'about-row');
-      modelRow.appendChild(el('span', '', 'Модель телевизора'));
-      modelRow.appendChild(el('span', '', Belet.model()));
-      host.appendChild(modelRow);
-      var deviceRow = el('div', 'about-row');
-      deviceRow.appendChild(el('span', '', 'Идентификатор устройства'));
-      deviceRow.appendChild(el('span', '', Belet.device() || '—'));
-      host.appendChild(deviceRow);
-      var listRow = el('div', 'about-row');
-      listRow.appendChild(el('span', '', 'Список устройств Belet'));
-      listRow.appendChild(el('span', '', deviceRegistration.state));
-      host.appendChild(listRow);
-      var playRow = el('div', 'about-row');
-      playRow.appendChild(el('span', '', 'Последнее воспроизведение'));
-      playRow.appendChild(el('span', '', state.playbackInfo));
-      host.appendChild(playRow);
-      var sessionRow = el('div', 'about-row');
-      sessionRow.appendChild(el('span', '', 'Сессия'));
-      sessionRow.appendChild(el('span', '', Belet.hasSession() ? 'активна' : 'не выполнен вход'));
-      host.appendChild(sessionRow);
-    });
+    if (isClockBlockingHttps()) {
+      scheduleClockWatch();
+      if (alertBox) {
+        alertBox.textContent = clockHelpText();
+        setHidden(alertBox, false);
+      }
+    } else if (alertBox) {
+      setHidden(alertBox, true);
+    }
+    function runProbeAndCheck() {
+      function renderDiag(results) {
+        var labels = {
+          auth: 'Авторизация (beletapis.com)',
+          home: 'Каталог (homepage.belet.me)',
+          film: 'Видеосервис (film.beletapis.com)'
+        };
+        var order = ['auth', 'home', 'film'];
+        var now = new Date();
+        var year = now.getFullYear();
+        var timeValid = year >= 2026;
+        var bypassed = isClockBypassed();
+        var tz = readTizenClock();
+        var tzYear = (tz && tz.getFullYear) ? tz.getFullYear() : 0;
+        var tzValid = tzYear >= 2026;
+        var timeText = formatDateObj(now) +
+          (timeValid ? '' : (bypassed ? ' (обход через локальный прокси ТВ)' : ' (не синхронизировано — HTTPS пропущен)'));
+        var netOk = isNetworkReady();
+        if (alertBox) {
+          if (!timeValid && !bypassed) {
+            alertBox.textContent = clockHelpText();
+            setHidden(alertBox, false);
+          } else {
+            setHidden(alertBox, true);
+          }
+        }
+        host.innerHTML = '';
+        order.forEach(function (key) {
+          var value = results[key] || 'нет ответа';
+          var row = el('div', 'about-row');
+          var name = el('span', '', labels[key]);
+          var status = el('span', value === 'ok' ? 'ok' : 'bad', value === 'ok' ? 'доступен' : value);
+          row.appendChild(name);
+          row.appendChild(status);
+          host.appendChild(row);
+        });
+        var netRow = el('div', 'about-row');
+        netRow.appendChild(el('span', '', 'Сеть телевизора'));
+        netRow.appendChild(el('span', netOk ? 'ok' : 'bad', networkLabel()));
+        host.appendChild(netRow);
+        var timeRow = el('div', 'about-row');
+        timeRow.appendChild(el('span', '', 'Время браузера (SSL)'));
+        timeRow.appendChild(el('span', (timeValid || bypassed) ? 'ok' : 'bad', timeText));
+        host.appendChild(timeRow);
+        if (tz && tzYear !== year) {
+          var tzRow = el('div', 'about-row');
+          tzRow.appendChild(el('span', '', 'Время Tizen (настройки ТВ)'));
+          tzRow.appendChild(el('span', tzValid ? 'ok' : 'bad',
+            formatDateObj(tz) + (tzValid && !timeValid ? ' (задано вручную — браузер ещё на ' + year + ')' : '')));
+          host.appendChild(tzRow);
+        }
+        if (!timeValid && clockProxyState.serverSynced) {
+          var srvTimeRow = el('div', 'about-row');
+          srvTimeRow.appendChild(el('span', '', 'Время с сервера Belet'));
+          srvTimeRow.appendChild(el('span', 'ok', formatDateObj(new Date(Date.now() + clockProxyState.serverOffsetMs))));
+          host.appendChild(srvTimeRow);
+        }
+        if (!timeValid || bypassed || isBypassModeForced()) {
+          var proxyRow = el('div', 'about-row');
+          proxyRow.appendChild(el('span', '', 'Обход часов ТВ (SSL)'));
+          proxyRow.appendChild(el('span', bypassed ? 'ok' : 'bad', clockProxyState.diag));
+          host.appendChild(proxyRow);
+        }
+        var modelRow = el('div', 'about-row');
+        modelRow.appendChild(el('span', '', 'Модель телевизора'));
+        modelRow.appendChild(el('span', '', Belet.model()));
+        host.appendChild(modelRow);
+        var deviceRow = el('div', 'about-row');
+        deviceRow.appendChild(el('span', '', 'Идентификатор устройства'));
+        deviceRow.appendChild(el('span', '', Belet.device() || '—'));
+        host.appendChild(deviceRow);
+        var listRow = el('div', 'about-row');
+        listRow.appendChild(el('span', '', 'Список устройств Belet'));
+        listRow.appendChild(el('span', '', deviceRegistration.state));
+        host.appendChild(listRow);
+        var playRow = el('div', 'about-row');
+        playRow.appendChild(el('span', '', 'Последнее воспроизведение'));
+        playRow.appendChild(el('span', '', state.playbackInfo));
+        host.appendChild(playRow);
+        var sessionRow = el('div', 'about-row');
+        sessionRow.appendChild(el('span', '', 'Сессия'));
+        sessionRow.appendChild(el('span', '', Belet.hasSession() ? 'активна' : 'не выполнен вход'));
+        host.appendChild(sessionRow);
+      }
+      if (isClockBlockingHttps()) {
+        scheduleClockWatch();
+        renderDiag({
+          auth: 'ожидает обхода SSL (HTTPS пропущен)',
+          home: 'ожидает обхода SSL (HTTPS пропущен)',
+          film: 'ожидает обхода SSL (HTTPS пропущен)'
+        });
+        return;
+      }
+      Belet.healthCheck(renderDiag);
+    }
+    if (isClockBlockingHttps() && canProbeAnyClockBridge()) {
+      probeClockProxy(function () { runProbeAndCheck(); });
+      return;
+    }
+    runProbeAndCheck();
   }
 
   function logout() {
+    if (state.login.loggingOut) return;
     dialog('Выйти из Belet?', 'Локальная сессия будет удалена с телевизора.', [
       {
         label: 'Выйти',
         primary: true,
         onSelect: function () {
+          if (state.login.loggingOut) return;
+          state.login.loggingOut = true;
+          deviceRegistration.state = 'не отправлена';
+          resetCatalogueState();
+          $('profilePhone').textContent = '';
+          $('profilePlan').textContent = '';
           Belet.logout(function (err) {
+            state.login.loggingOut = false;
             if (err) toast('Локальная сессия удалена; сервер не подтвердил выход', 4000);
-            state.homeLoaded = false;
             showLogin();
           });
         }
@@ -2224,7 +3485,18 @@
       setTimeout(function () { focusScreen(); }, 40);
       return true;
     }
-    if (state.screen === 'browse' || state.screen === 'search' || state.screen === 'profile' || state.screen === 'about') {
+    if (state.screen === 'about') {
+      if (!Belet.hasSession()) {
+        screen('login');
+        focusLoginStep();
+        return true;
+      }
+      if (state.previous && state.previous !== 'about' && state.previous !== 'login') screen(state.previous);
+      else screen('home');
+      setTimeout(function () { focusScreen(); }, 40);
+      return true;
+    }
+    if (state.screen === 'browse' || state.screen === 'search' || state.screen === 'profile') {
       if (state.screen === 'browse' && state.browse.mode === 'favorites') {
         screen('profile');
         setTimeout(function () { state.mainFocus = $('profileFavorites'); $('profileFavorites').focus(); }, 40);
@@ -2310,9 +3582,18 @@
 
     if (!hasClass($('numpad'), 'hidden') || !hasClass($('keyboard'), 'hidden')) {
       if (isBack(key)) { closeInput(); handled = true; }
+      else if (!hasClass($('numpad'), 'hidden') && key >= 48 && key <= 57) { inputAppend(String(key - 48)); handled = true; }
+      else if (!hasClass($('numpad'), 'hidden') && key >= 96 && key <= 105) { inputAppend(String(key - 96)); handled = true; }
+      else if (key === 8 || (!hasClass($('keyboard'), 'hidden') && key === 46)) { inputDelete(); handled = true; }
       else if (key === KEYS.LEFT || key === KEYS.RIGHT || key === KEYS.UP || key === KEYS.DOWN) handled = move({
         37: 'left', 38: 'up', 39: 'right', 40: 'down'
       }[key]);
+      else if (!hasClass($('keyboard'), 'hidden') && key !== KEYS.OK &&
+               !event.ctrlKey && !event.metaKey && !event.altKey &&
+               typeof event.key === 'string' && event.key.length === 1) {
+        inputAppend(event.key);
+        handled = true;
+      }
       if (handled) event.preventDefault();
       return;
     }
@@ -2357,9 +3638,13 @@
 
     $('phoneDisplay').onclick = editPhone;
     $('methodPrev').onclick = function () { cycleMethod(-1); };
+    $('methodDisplay').onclick = function () {
+      if (state.login.otpFallback || !state.login.methods.length) loadOtpMethods(0);
+      else cycleMethod(1);
+    };
     $('methodNext').onclick = function () { cycleMethod(1); };
     $('sendCode').onclick = function () { sendCode(); };
-    $('toQr').onclick = startQr;
+    $('toQr').onclick = function () { startQr(0); };
     $('codeDisplay').onclick = editCode;
     $('verifyCode').onclick = verifyCode;
     $('resendCode').onclick = function () { sendCode(true); };
@@ -2370,16 +3655,22 @@
       $('loginPhone').classList.remove('hidden');
       $('loginTitle').textContent = 'Вход в Belet';
       $('loginHint').textContent = 'Введите номер телефона, привязанный к аккаунту Belet.';
+      state.mainFocus = $('phoneDisplay');
       renderCodeValue();
+      updatePhoneDisplay();
+      if (!state.login.methods.length || state.login.otpFallback) loadOtpMethods(0);
       $('phoneDisplay').focus();
     };
-    $('qrRefresh').onclick = startQr;
+    $('qrRefresh').onclick = function () { startQr(0); };
     $('toPhone').onclick = function () {
       stopQr();
       $('loginQr').classList.add('hidden');
       $('loginPhone').classList.remove('hidden');
       $('loginTitle').textContent = 'Вход в Belet';
       $('loginHint').textContent = 'Введите номер телефона, привязанный к аккаунту Belet.';
+      state.mainFocus = $('phoneDisplay');
+      updatePhoneDisplay();
+      if (!state.login.methods.length || state.login.otpFallback) loadOtpMethods(0);
       $('phoneDisplay').focus();
     };
     $('loginHelp').onclick = openAbout;
@@ -2398,6 +3689,7 @@
     };
     $('heroInfo').onclick = function () { if (state.home.hero) openDetail(state.home.hero); };
     $('homeReload').onclick = function () { state.homeLoaded = false; loadHome(true); };
+    $('homeHelp').onclick = openAbout;
 
     $('browseMoreBtn').onclick = function () { loadCategory(state.browse.id, false); };
     $('searchField').onclick = editSearch;
@@ -2405,14 +3697,19 @@
     $('detailPlay').onclick = playMovieOrResume;
     $('detailFav').onclick = toggleFavorite;
 
-    $('profileRefresh').onclick = loadProfile;
+    $('profileRefresh').onclick = function () { loadProfile(0); };
     $('profileFavorites').onclick = openFavorites;
     $('profileHelp').onclick = openAbout;
     $('profileLogout').onclick = logout;
 
     $('aboutRetest').onclick = runHealthCheck;
     $('aboutBack').onclick = function () {
-      if (state.previous && state.previous !== 'about') screen(state.previous);
+      if (!Belet.hasSession()) {
+        screen('login');
+        focusLoginStep();
+        return;
+      }
+      if (state.previous && state.previous !== 'about' && state.previous !== 'login') screen(state.previous);
       else screen('home');
       setTimeout(function () { focusScreen(); }, 40);
     };
@@ -2425,9 +3722,77 @@
     on($('video'), 'play', function () { hideOsdSoon(); });
 
     on(window, 'beforeunload', function () { reportProgress(); });
+    on(window, 'online', recoverNetworkScreens);
     on(doc, 'visibilitychange', function () {
       if (doc.hidden) reportProgress();
+      else {
+        tickClock();
+        recoverNetworkScreens();
+      }
     });
+  }
+
+  function recoverNetworkScreens(fromClockSync) {
+    if (!isNetworkReady()) return;
+    if (state.screen === 'boot' && !state.bootDone) {
+      startBootSession();
+      return;
+    }
+    if (state.screen === 'boot' && state.bootDone && !state.homeLoaded && Belet.hasSession() && fromClockSync) {
+      if (deviceRegistration.state !== 'сервер принял регистрацию телевизора' &&
+          deviceRegistration.state !== 'отправляется…') {
+        registerDevice();
+      }
+      loadHome(false, 0, true);
+      return;
+    }
+    if (state.screen === 'home' && Belet.hasSession()) {
+      if (!state.homeLoaded) {
+        if (fromClockSync && deviceRegistration.state !== 'сервер принял регистрацию телевизора' &&
+            deviceRegistration.state !== 'отправляется…') {
+          registerDevice();
+        }
+        loadHome(false, 0, false);
+        return;
+      }
+      if (fromClockSync) {
+        if ($('rows').children.length || !hasClass($('hero'), 'hidden')) {
+          refreshVisibleImages();
+          return;
+        }
+        if (state.home.groups && state.home.groups.length) {
+          renderRows(state.home.groups);
+          return;
+        }
+      }
+    }
+    if (state.screen === 'detail' && fromClockSync && state.detail && state.detail.movie) {
+      renderDetail(state.detail.movie);
+      return;
+    }
+    if (fromClockSync) refreshVisibleImages();
+    if (state.screen === 'login' && !state.login.busy) {
+      if (!hasClass($('loginQr'), 'hidden') && (!state.qr.code || fromClockSync)) startQr(0);
+      else if (!hasClass($('loginPhone'), 'hidden') && (!state.login.methods.length || state.login.otpFallback || fromClockSync)) loadOtpMethods(0);
+      return;
+    }
+    if (state.screen === 'browse' && !state.browse.loading && !state.browse.items.length && Belet.hasSession()) {
+      if (state.browse.mode === 'favorites') openFavorites();
+      else loadCategories(function () { loadCategory(state.browse.id || 1, true); });
+      return;
+    }
+    if (state.screen === 'profile' && Belet.hasSession()) {
+      loadProfile(0);
+      return;
+    }
+    if (state.screen === 'about') {
+      if (fromClockSync && Belet.hasSession() &&
+          deviceRegistration.state !== 'сервер принял регистрацию телевизора' &&
+          deviceRegistration.state !== 'отправляется…') {
+        registerDevice();
+      }
+      runHealthCheck();
+    }
   }
 
   function toggleFavorite() {
@@ -2464,24 +3829,112 @@
   function tickClock() {
     var node = $('clock');
     var date = new Date();
-    if (node) node.textContent = pad2(date.getHours()) + ':' + pad2(date.getMinutes());
+    var nowSynced = date.getFullYear() >= 2026;
+    var displayDate = date;
+    var tz;
+    if (nowSynced && isClockBypassed() && !isBypassModeForced() && !clockProxyState.keepForMedia) {
+      if (window.Belet && Belet.setClockProxy) Belet.setClockProxy('');
+      clockProxyState.base = '';
+      clockProxyState.diag = 'не требуется (часы ТВ синхронизировались)';
+    }
+    if (!nowSynced) {
+      tz = readTizenClock();
+      if (tz && tz.getFullYear && tz.getFullYear() >= 2026) displayDate = tz;
+      else if (clockProxyState.serverSynced) displayDate = new Date(Date.now() + clockProxyState.serverOffsetMs);
+    }
+    if (node) node.textContent = pad2(displayDate.getHours()) + ':' + pad2(displayDate.getMinutes());
+    if (!state.clockSynced && nowSynced && (!isBypassModeForced() || isClockBypassed())) {
+      state.clockSynced = true;
+      clearClockSyncTimer();
+      toast('Время синхронизировано — подключаемся к Belet…', 3000);
+      recoverNetworkScreens(true);
+    }
+  }
+
+  function startBootSession() {
+    var session;
+    if (state.bootDone) return;
+    state.bootDone = true;
+    clearBootTimer();
+    if (shouldUseBypass() && !isClockBypassed()) scheduleClockWatch();
+    session = state.bootSession;
+    if (session) {
+      $('bootStatus').textContent = 'Вход в систему…';
+      registerDevice();
+      loadHome(false, 0, true);
+    } else {
+      $('bootStatus').textContent = 'Подготовка входа…';
+      setTimeout(function () { showLogin(); }, 350);
+    }
+  }
+
+  function waitForNetworkAtBoot(waited) {
+    var netOk = isNetworkReady();
+    var clockOk = !isClockBlockingHttps();
+    var hasSvc = hasTizenServiceApi();
+    var pollMs = (hasSvc && !clockOk) ? 350 : 500;
+    var clockBudget = hasSvc
+      ? (isClockInvalid() ? 18000 : 8000)
+      : (isClockInvalid() ? 4000 : 0);
+    var shouldRetryLaunch = hasSvc && waited > 0 && (waited % 2800 < pollMs);
+    if (state.bootDone) return;
+    if ((netOk && clockOk) || (!netOk && waited >= 8000) || (netOk && !clockOk && waited >= clockBudget)) {
+      if (!isClockInvalid() && isBypassModeForced() && !isClockBypassed()) {
+        state.bypassFallbackReady = true;
+      }
+      startBootSession();
+      return;
+    }
+    if (!clockOk) {
+      $('bootStatus').textContent = canProbeAnyClockBridge()
+        ? (hasSvc && waited >= 1000
+          ? 'Подключение к Belet (' + Math.ceil(waited / 1000) + ' с)…'
+          : 'Подключение к Belet…')
+        : 'Ожидаем синхронизацию времени телевизора…';
+      if (canProbeAnyClockBridge() && waited > 0) {
+        probeClockProxy(function (ok) {
+          if (ok && isNetworkReady() && !state.bootDone) startBootSession();
+        }, {
+          includeTvIp: waited >= 4200 && (waited % 2100 < pollMs),
+          forceLaunch: shouldRetryLaunch
+        });
+      }
+    }
+    state.bootTimer = setTimeout(function () {
+      state.bootTimer = null;
+      waitForNetworkAtBoot(waited + pollMs);
+    }, pollMs);
   }
 
   function boot() {
-    var session;
     registerTvKeys();
     wire();
+    try {
+      if (window.tizen && window.tizen.time && window.tizen.time.setDateTimeChangeListener) {
+        window.tizen.time.setDateTimeChangeListener(function () { tickClock(); });
+      }
+    } catch (e) {}
+    state.clockSynced = !shouldUseBypass();
     tickClock();
     setInterval(tickClock, 30000);
-    session = Belet.init();
-    if (session) {
-      $('bootStatus').textContent = 'Восстанавливаем сессию…';
-      registerDevice();
-      loadHome(true);
-    } else {
-      $('bootStatus').textContent = 'Требуется вход в аккаунт Belet';
-      setTimeout(function () { showLogin(); }, 350);
+    state.bootSession = Belet.init();
+    if (isNetworkReady() && !shouldUseBypass()) {
+      startBootSession();
+      return;
     }
+    if (shouldUseBypass() && canProbeAnyClockBridge()) {
+      $('bootStatus').textContent = 'Загрузка Belet…';
+      probeClockProxy(function (ok) {
+        if (ok && isNetworkReady() && !state.bootDone) startBootSession();
+      }, {
+        includeTvIp: false
+      });
+    } else {
+      $('bootStatus').textContent = isNetworkReady()
+        ? 'Ожидаем синхронизацию времени телевизора…'
+        : 'Ожидаем подключение телевизора к сети…';
+    }
+    waitForNetworkAtBoot(0);
   }
 
   if (doc.readyState === 'loading') on(doc, 'DOMContentLoaded', boot);
