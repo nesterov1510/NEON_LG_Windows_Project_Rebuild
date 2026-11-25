@@ -159,4 +159,12 @@ def configuration(link, server_addresses=None, strict_route=True):
             'dns': {'servers': [{'type': 'local', 'tag': 'bootstrap'},
                                 {'type': 'tcp', 'tag': 'tunnel-dns', 'server': '1.1.1.1', 'detour': 'vpn'}],
                     'final': 'tunnel-dns'},
-            'route': {'auto_detect_interface': True, 'rules': rules, 'final': 'vpn'}}
+            'route': {'auto_detect_interface': True,
+                      # Name a resolver for the route itself. sing-box 1.14 turns
+                      # "a dialer resolved a name while several DNS servers exist and
+                      # no resolver was chosen" into a fatal error at start-up, and it
+                      # checks that even for outbounds without a server (our `direct`
+                      # one), so relying on the per-outbound `domain_resolver` above is
+                      # enough to make the whole engine refuse to run.
+                      'default_domain_resolver': 'bootstrap',
+                      'rules': rules, 'final': 'vpn'}}

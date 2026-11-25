@@ -57,6 +57,24 @@ def test_dns_stays_reachable_for_shared_clients_and_self_signed_profiles():
     assert allowed['insecure'] is True and allowed['server_name'] == 'vpn.example'
 
 
+def test_every_dialer_that_resolves_names_has_a_resolver():
+    # sing-box 1.14 turns "a name was resolved with several DNS servers configured and
+    # no domain resolver chosen" into a fatal error at start-up, so a profile that only
+    # resolves inside the tunnel must still name its resolver.
+    for link in (LINK, LINK.replace('=tls', '=reality') + '&pbk=' + 'A' * 43):
+        cfg = vless.configuration(link, server_addresses=None)
+        assert cfg['route']['default_domain_resolver'] == 'bootstrap'
+        assert cfg['outbounds'][0]['domain_resolver'] == 'bootstrap'
+    tags = {server['tag'] for server in cfg['dns']['servers']}
+    # The resolver has to be one of them, or the reference check fails the config.
+    assert cfg['route']['default_domain_resolver'] in tags
+    assert cfg['outbounds'][0]['domain_resolver'] in tags
+    # A profile dialed by literal address needs no lookup at all.
+    pinned = vless.configuration(LINK, server_addresses=['203.0.113.9'])
+    assert pinned['outbounds'][0]['server'] == '203.0.113.9'
+    assert pinned['outbounds'][0]['tls']['server_name'] == 'vpn.example'
+
+
 def test_reality_grpc():
     cfg = vless.configuration(LINK.replace('=tls', '=reality') + '&sni=example.org&pbk=' + 'A'*43 + '&sid=ab&type=grpc&serviceName=hello')
     proxy = cfg['outbounds'][0]
