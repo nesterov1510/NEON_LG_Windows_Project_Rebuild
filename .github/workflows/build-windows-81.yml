@@ -53,7 +53,11 @@ jobs:
           $exe = Resolve-Path "dist\NeonLGControl81\NeonLGControl81.exe"
           $engine = Get-ChildItem -Path "dist\NeonLGControl81" -Filter "sing-box.exe" -Recurse | Select-Object -First 1
           if (-not $engine -or (Get-FileHash $engine.FullName).Hash -ne (Get-FileHash "assets/vless/sing-box.exe").Hash) {
-            throw "Missing or altered embedded VLESS engine"
+            throw "Missing or altered embedded sing-box engine"
+          }
+          $xray = Get-ChildItem -Path "dist\NeonLGControl81" -Filter "xray.exe" -Recurse | Select-Object -First 1
+          if (-not $xray -or (Get-FileHash $xray.FullName).Hash -ne (Get-FileHash "assets/vless/xray.exe").Hash) {
+            throw "Missing or altered embedded Xray-core engine"
           }
           $ico = [System.Drawing.Icon]::ExtractAssociatedIcon($exe.Path)
           if ($null -eq $ico) { throw "ExtractAssociatedIcon returned null for $($exe.Path)" }

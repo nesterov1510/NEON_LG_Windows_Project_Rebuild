@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import (
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSizePolicy,
     QTextEdit,
@@ -134,9 +135,34 @@ TR = {
         'lbl_vpn_pass': 'Conf Password',
         'ph_vpn_user': 'Required by this Conf profile',
         'ph_vpn_pass': 'Password (never saved to disk)',
+        'lbl_vpn_key_pass': 'Key / PKCS#12 Passphrase (askpass)',
+        'ph_vpn_key_pass': 'Private-key password (never saved to disk)',
+        'vpn_auth_dialog_title': 'Conf Profile Credentials',
+        'vpn_auth_dialog_hint': 'Enter the credentials required by this .ovpn profile:',
         'btn_vpn_conn': 'Start Conf',
         'btn_vpn_disc': 'Disconnect',
         'vpn_stat_lbl': 'Conf state:',
+        'happ_card': 'Built-in Proxy & Tunnel (Happ / Xray + sing-box)',
+        'happ_desc': 'Import subscriptions (https://, happ://add/), happ://routing/, VLESS/VMess/Trojan/SS/Hysteria2/SOCKS5 links, or Xray JSON. Powered by embedded Xray-core + sing-box TUN.',
+        'happ_lbl_input': 'Subscription URL, Proxy URI(s), or Xray JSON',
+        'happ_ph_input': 'https://..., happ://add/..., happ://routing/..., vless://, hy2://, or Xray JSON',
+        'happ_btn_import': 'Import',
+        'happ_btn_paste': 'Paste',
+        'happ_btn_update': 'Update Subs',
+        'happ_lbl_sub': 'Subscription / Group',
+        'happ_btn_del_sub': 'Remove Sub',
+        'happ_lbl_nodes': 'Servers & Latency (double-click to connect)',
+        'happ_btn_ping': 'Ping All',
+        'happ_btn_best': 'Fastest',
+        'happ_btn_conn': 'Connect Selected',
+        'happ_btn_disc': 'Disconnect',
+        'happ_lbl_mode': 'Engine Mode',
+        'happ_lbl_route': 'Routing Policy',
+        'happ_chk_frag': 'TLS Fragment (anti-DPI split)',
+        'happ_chk_hwid': 'Send device HWID header to subscriptions',
+        'happ_chk_lan': 'Allow LAN proxy (share HTTP/SOCKS with Smart TV)',
+        'happ_chk_sysproxy': 'Set Windows System Proxy (in Proxy / Mixed modes)',
+        'happ_btn_desktop': 'Open in Happ Desktop',
         'dns_card': 'DNS for Hotspot & Ethernet Sharing',
         'dns_desc': 'Sets IPv4 DNS for clients (TVs/devices) over Wi-Fi Hotspot or Ethernet ICS. Applied automatically when Conf connects & sharing starts.',
         'lbl_dns_preset': 'DNS Provider Preset',
@@ -404,9 +430,34 @@ TR = {
         'lbl_vpn_pass': 'Пароль Conf',
         'ph_vpn_user': 'Требуется выбранным профилем',
         'ph_vpn_pass': 'Пароль (не сохраняется на диск)',
+        'lbl_vpn_key_pass': 'Пароль ключа / PKCS#12 (askpass)',
+        'ph_vpn_key_pass': 'Пароль закрытого ключа (не сохраняется)',
+        'vpn_auth_dialog_title': 'Данные доступа для профиля Conf',
+        'vpn_auth_dialog_hint': 'Введите данные, требуемые этим .ovpn профилем:',
         'btn_vpn_conn': 'Запустить Conf',
         'btn_vpn_disc': 'Отключить',
         'vpn_stat_lbl': 'Статус Conf:',
+        'happ_card': 'Встроенный Прокси и Туннель (Happ / Xray + sing-box)',
+        'happ_desc': 'Импорт подписок (https://, happ://add/), happ://routing/, ссылок VLESS/VMess/Trojan/SS/Hysteria2/SOCKS5 или Xray JSON. Работает на встроенных Xray-core + sing-box TUN.',
+        'happ_lbl_input': 'Ссылка подписки, URI сервера или Xray JSON',
+        'happ_ph_input': 'https://..., happ://add/..., happ://routing/..., vless://, hy2:// или Xray JSON',
+        'happ_btn_import': 'Импорт',
+        'happ_btn_paste': 'Вставить',
+        'happ_btn_update': 'Обновить',
+        'happ_lbl_sub': 'Подписка / Группа',
+        'happ_btn_del_sub': 'Удалить',
+        'happ_lbl_nodes': 'Серверы и задержка (двойной клик — старт)',
+        'happ_btn_ping': 'Пинг всех',
+        'happ_btn_best': 'Лучший',
+        'happ_btn_conn': 'Подключить',
+        'happ_btn_disc': 'Отключить',
+        'happ_lbl_mode': 'Режим движка',
+        'happ_lbl_route': 'Маршрутизация',
+        'happ_chk_frag': 'TLS Fragment (обход блокировок DPI)',
+        'happ_chk_hwid': 'Отправлять HWID устройства подписке',
+        'happ_chk_lan': 'Allow LAN (раздача HTTP/SOCKS прокси на Smart TV)',
+        'happ_chk_sysproxy': 'Системный прокси Windows (в режимах Прокси / Mixed)',
+        'happ_btn_desktop': 'Открыть в Happ Desktop',
         'dns_card': 'DNS для точки Wi-Fi и Ethernet',
         'dns_desc': 'Задаёт IPv4 DNS для устройств на точке Wi-Fi или кабеле Ethernet (ICS). Применяется автоматически при запуске Conf и раздачи.',
         'lbl_dns_preset': 'Пресет DNS-сервера',
@@ -1117,6 +1168,30 @@ QPushButton#SamKeyWarn:hover {
     background-color: #541f2b;
     border: 1px solid #c94e63;
 }
+
+QListWidget#HappNodeList {
+    background-color: #080d12;
+    color: #e4f0f5;
+    border: 1px solid #20313b;
+    border-radius: 10px;
+    padding: 4px;
+    font-family: "Consolas", "Segoe UI", monospace;
+    font-size: 11px;
+    outline: none;
+}
+QListWidget#HappNodeList::item {
+    border-radius: 7px;
+    padding: 6px 8px;
+    margin: 2px 0;
+}
+QListWidget#HappNodeList::item:hover {
+    background-color: rgba(24, 42, 52, 190);
+}
+QListWidget#HappNodeList::item:selected {
+    background-color: rgba(21, 62, 45, 235);
+    border: 1px solid #358763;
+    color: #72ffab;
+}
 """
 
 
@@ -1699,6 +1774,107 @@ class ConfirmDialog(QDialog):
         btns.addWidget(cancel_btn)
         btns.addWidget(ok_btn)
         lay.addLayout(btns)
+
+
+class ConfAuthDialog(QDialog):
+    """Elevated modal prompt for OpenVPN auth-user-pass and/or askpass key passphrase."""
+
+    def __init__(
+        self,
+        parent,
+        title,
+        hint,
+        needs_auth=True,
+        needs_askpass=False,
+        user_label='Username',
+        pass_label='Password',
+        key_label='Key / PKCS#12 Passphrase',
+        initial_user='',
+        initial_pass='',
+        initial_key='',
+        ok_text='Confirm',
+        cancel_text='Cancel',
+    ):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(500)
+        self.setStyleSheet(
+            'QDialog{background-color:#101920;border:1px solid #2c6d52;border-radius:14px;}'
+        )
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 22, 24, 20)
+        lay.setSpacing(10)
+
+        hdr = QLabel(title)
+        hdr.setWordWrap(True)
+        hdr.setStyleSheet('color:#6effad;font-size:15px;font-weight:bold;')
+        lay.addWidget(hdr)
+
+        sub = QLabel(hint)
+        sub.setWordWrap(True)
+        sub.setStyleSheet('color:#b8ced9;font-size:12px;')
+        lay.addWidget(sub)
+
+        self.user_edit = None
+        self.pass_edit = None
+        self.key_edit = None
+
+        if needs_auth:
+            lu = QLabel(user_label)
+            lu.setObjectName('FieldLabel')
+            self.user_edit = QLineEdit(str(initial_user or ''))
+            lay.addWidget(lu)
+            lay.addWidget(self.user_edit)
+
+            lp = QLabel(pass_label)
+            lp.setObjectName('FieldLabel')
+            self.pass_edit = QLineEdit(str(initial_pass or ''))
+            self.pass_edit.setEchoMode(QLineEdit.Password)
+            lay.addWidget(lp)
+            lay.addWidget(self.pass_edit)
+
+        if needs_askpass:
+            lk = QLabel(key_label)
+            lk.setObjectName('FieldLabel')
+            self.key_edit = QLineEdit(str(initial_key or ''))
+            self.key_edit.setEchoMode(QLineEdit.Password)
+            lay.addWidget(lk)
+            lay.addWidget(self.key_edit)
+
+        btns = QHBoxLayout()
+        btns.setSpacing(10)
+        btns.addStretch(1)
+
+        cancel_btn = QPushButton(cancel_text)
+        cancel_btn.setObjectName('GhostBtn')
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+
+        ok_btn = QPushButton(ok_text)
+        ok_btn.setObjectName('PrimaryBtn')
+        ok_btn.setCursor(Qt.PointingHandCursor)
+        ok_btn.clicked.connect(self.accept)
+
+        btns.addWidget(cancel_btn)
+        btns.addWidget(ok_btn)
+        lay.addLayout(btns)
+
+        if self.user_edit and not self.user_edit.text().strip():
+            self.user_edit.setFocus()
+        elif self.pass_edit and not self.pass_edit.text():
+            self.pass_edit.setFocus()
+        elif self.key_edit and not self.key_edit.text():
+            self.key_edit.setFocus()
+
+    def values(self):
+        return (
+            self.user_edit.text().strip() if self.user_edit else '',
+            self.pass_edit.text() if self.pass_edit else '',
+            self.key_edit.text() if self.key_edit else '',
+        )
 
 
 class _WaveformWidget(QWidget):

@@ -557,3 +557,46 @@ def test_new_buttons_have_neon_styles(qt_app, tmp_path, monkeypatch):
         assert any(button.objectName() == style for button in by_text(text))
         assert 'QPushButton#' + style in win.styleSheet()
     win.close()
+
+
+def test_happ_widgets_and_ovpn_askpass_prompt(qt_app, tmp_path, monkeypatch):
+    monkeypatch.setenv('APPDATA', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path))
+    api = Api()
+    win = NeonWindow(api=api)
+    win.show()
+    win.switch_tab(3)
+    qt_app.processEvents()
+
+    # Happ built-in widgets present and functional
+    assert win.happ_input is not None
+    assert win.happ_sub_combo is not None
+    assert win.happ_node_list is not None
+    assert win.happ_mode_combo.count() == 3
+    assert win.happ_route_combo.count() == 3
+
+    # Importing a direct proxy link populates Happ UI list immediately
+    res = api.happ_import('vless://11111111-1111-4111-8111-111111111111@203.0.113.10:443?security=tls#NL%20Node')
+    assert res['ok'] is True
+    win.happ_refresh_ui()
+    qt_app.processEvents()
+    assert win.happ_node_list.count() == 1
+    assert 'NL Node' in win.happ_node_list.item(0).text()
+
+    # OpenVPN profile with encrypted private key reveals askpass box & calls ConfAuthDialog
+    ovpn_enc = tmp_path / 'enc.ovpn'
+    ovpn_enc.write_text(
+        'client\n<key>\n-----BEGIN ENCRYPTED PRIVATE KEY-----\nMII...\n-----END ENCRYPTED PRIVATE KEY-----\n</key>\n',
+        encoding='utf-8',
+    )
+    api.remember_profile(str(ovpn_enc))
+    win.profile_combo.addItem('enc')
+    win.profile_combo.setCurrentText('enc')
+    qt_app.processEvents()
+    assert win.vpn_auth_box.isVisible() is True
+    assert win.vpn_auth_user_wrap.isVisible() is False
+    assert win.vpn_auth_key_wrap.isVisible() is True
+
+    win._force_exit = True
+    win.close()
+    qt_app.processEvents()

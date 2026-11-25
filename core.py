@@ -28,6 +28,7 @@ import paramiko
 
 from lg_remote import LGRemote, ALLOWED_KEYS as LG_REMOTE_KEYS
 import vless
+import happ_client
 import msb_callback
 import belet_lg_client
 from local_tv_packages import read_package, validate_ipk, validate_wgt
@@ -104,6 +105,7 @@ class Api:
         self.app_shared_pair = None
         self.remote_script = '/tmp/change_region.sh'
         self.openvpn_process = None
+        self._vpn_aux_process = None
         self.vpn_logs = []
         self.vpn_state = 'DISCONNECTED'
         self.vpn_profile = None
@@ -122,6 +124,10 @@ class Api:
         self.profile_map = {}
         self._vpn_stop_requested = False
         self._auth_temp_file = None
+        self._askpass_temp_file = None
+        self._sys_proxy_backup = None
+        self._happ_store_obj = None
+        self._happ_store_path_cached = None
         self._mgmt_port = None
         self.lg_remote = None
         self._lg_remote_lock = threading.RLock()
@@ -1487,37 +1493,144 @@ class Api:
             p = os.path.abspath(str(profile))
         return p if p and os.path.isfile(p) else None
 
+    @staticmethod
+    def _unquote_ovpn_arg(line):
+        try:
+            parts = shlex.split(line, posix=(os.name != 'nt'))
+        except ValueError:
+            parts = line.split()
+        return [p.strip('"\'') for p in parts]
+
+    @staticmethod
+    def _ovpn_resolve_ref(base_dir, ref_path):
+        if not ref_path:
+            return ''
+        cand = ref_path
+        if not os.path.isabs(cand):
+            cand = os.path.join(base_dir, cand)
+        return cand
+
+    @staticmethod
+    def _pkcs12_requires_password(raw_bytes):
+        if not raw_bytes:
+            return False
+        try:
+            from cryptography.hazmat.primitives.serialization.pkcs12 import load_key_and_certificates
+            try:
+                load_key_and_certificates(raw_bytes, None)
+                return False
+            except ValueError:
+                return True
+            except Exception:
+                return True
+        except ImportError:
+            return True
+
     def inspect_profile(self, profile):
         p = self._resolve_profile_path(profile)
         if not p:
-            return {'exists': False, 'needs_auth': False, 'needs_askpass': False}
+            return {'exists': False, 'needs_auth': False, 'needs_askpass': False, 'needs_password': False}
         needs_auth = False
         needs_askpass = False
+        base_dir = os.path.dirname(os.path.abspath(p))
         try:
-            with open(p, 'r', encoding='utf-8', errors='replace') as config:
+            with open(p, 'r', encoding='utf-8-sig', errors='replace') as config:
+                inline_tag = None
+                inline_buf = []
                 for raw in config:
-                    line = raw.strip()
-                    if not line or line.startswith('#') or line.startswith(';'):
+                    stripped = raw.strip()
+                    low = stripped.lower()
+                    if inline_tag is not None:
+                        if low == f'</{inline_tag}>':
+                            content = '\n'.join(inline_buf)
+                            if inline_tag == 'key' and 'ENCRYPTED' in content.upper():
+                                needs_askpass = True
+                            elif inline_tag == 'pkcs12':
+                                b64 = ''.join(line.strip() for line in inline_buf if not line.strip().startswith('-'))
+                                try:
+                                    raw_p12 = base64.b64decode(b64, validate=False) if b64 else b''
+                                except Exception:
+                                    raw_p12 = b''
+                                if raw_p12 and self._pkcs12_requires_password(raw_p12):
+                                    needs_askpass = True
+                            elif inline_tag == 'auth-user-pass':
+                                non_empty = [ln.strip() for ln in inline_buf if ln.strip()]
+                                if len(non_empty) < 2:
+                                    needs_auth = True
+                            inline_tag = None
+                            inline_buf = []
+                        else:
+                            inline_buf.append(raw.rstrip('\r\n'))
                         continue
-                    # Strip inline comments
+
+                    if not stripped or stripped.startswith('#') or stripped.startswith(';'):
+                        continue
+                    if low in ('<key>', '<pkcs12>', '<auth-user-pass>'):
+                        inline_tag = low[1:-1]
+                        inline_buf = []
+                        continue
+
+                    # Strip inline comments outside quotes
+                    line = stripped
                     for marker in (' #', ' ;', '\t#', '\t;'):
                         if marker in line:
                             line = line.split(marker, 1)[0].strip()
-                    words = line.split()
+                    words = self._unquote_ovpn_arg(line)
                     if not words:
                         continue
                     directive = words[0].lower()
-                    if directive == 'auth-user-pass' and len(words) == 1:
-                        needs_auth = True
-                    elif directive == 'askpass' and len(words) == 1:
-                        needs_askpass = True
+                    if directive == 'auth-user-pass':
+                        if len(words) == 1 or words[1].lower() == 'stdin':
+                            needs_auth = True
+                        else:
+                            ref = self._ovpn_resolve_ref(base_dir, words[1])
+                            if not os.path.isfile(ref):
+                                needs_auth = True
+                    elif directive == 'askpass':
+                        if len(words) == 1 or words[1].lower() == 'stdin':
+                            needs_askpass = True
+                        else:
+                            ref = self._ovpn_resolve_ref(base_dir, words[1])
+                            if not os.path.isfile(ref):
+                                needs_askpass = True
+                    elif directive == 'key' and len(words) >= 2:
+                        ref = self._ovpn_resolve_ref(base_dir, words[1])
+                        if os.path.isfile(ref):
+                            try:
+                                with open(ref, 'r', encoding='utf-8', errors='replace') as kf:
+                                    head = kf.read(1024)
+                                if 'ENCRYPTED' in head.upper():
+                                    needs_askpass = True
+                            except Exception:
+                                pass
+                    elif directive == 'pkcs12' and len(words) >= 2:
+                        ref = self._ovpn_resolve_ref(base_dir, words[1])
+                        if os.path.isfile(ref):
+                            try:
+                                with open(ref, 'rb') as pf:
+                                    raw_p12 = pf.read(256 * 1024)
+                                if self._pkcs12_requires_password(raw_p12):
+                                    needs_askpass = True
+                            except Exception:
+                                pass
         except Exception as exc:
-            return {'exists': True, 'path': p, 'needs_auth': False, 'needs_askpass': False, 'error': str(exc)}
-        return {'exists': True, 'path': p, 'needs_auth': needs_auth, 'needs_askpass': needs_askpass}
+            return {
+                'exists': True,
+                'path': p,
+                'needs_auth': False,
+                'needs_askpass': False,
+                'needs_password': False,
+                'error': str(exc),
+            }
+        return {
+            'exists': True,
+            'path': p,
+            'needs_auth': needs_auth,
+            'needs_askpass': needs_askpass,
+            'needs_password': bool(needs_auth or needs_askpass),
+        }
 
-    def _cleanup_auth_file(self):
-        path = self._auth_temp_file
-        self._auth_temp_file = None
+    def _wipe_temp_secret_file(self, path):
         if not path:
             return
         try:
@@ -1532,6 +1645,14 @@ class Api:
                     os.remove(path)
             except Exception:
                 pass
+
+    def _cleanup_auth_file(self):
+        auth_path = self._auth_temp_file
+        ask_path = self._askpass_temp_file
+        self._auth_temp_file = None
+        self._askpass_temp_file = None
+        self._wipe_temp_secret_file(auth_path)
+        self._wipe_temp_secret_file(ask_path)
 
     def _find_free_port(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -1575,11 +1696,11 @@ class Api:
                     proc.wait()
                 return {'error': 'Cannot start the embedded VLESS engine. Check the Windows build and permissions.'}
 
-    def connect_vpn(self, profile, username='', password=''):
+    def connect_vpn(self, profile, username='', password='', key_passphrase=''):
         with self._vpn_control:
-            return self._connect_openvpn(profile, username, password)
+            return self._connect_openvpn(profile, username, password, key_passphrase)
 
-    def _connect_openvpn(self, profile, username, password):
+    def _connect_openvpn(self, profile, username, password, key_passphrase=''):
         if platform.system() != 'Windows':
             return {'error': 'Headless Conf engine control is available in the Windows build.'}
         info = self.inspect_profile(profile)
@@ -1594,28 +1715,47 @@ class Api:
                     'profiles silently in the background.'
                 )
             }
-        if self.openvpn_process and self.openvpn_process.poll() is None:
+        if (self.openvpn_process and self.openvpn_process.poll() is None) or (
+            self._vpn_aux_process and self._vpn_aux_process.poll() is None
+        ):
             return {'error': 'A Conf session is already active in NEON. Disconnect it first.'}
-        if info.get('needs_askpass'):
-            return {'error': 'This Conf profile uses an interactive private-key passphrase (askpass), which is not supported.'}
 
         cmd = [engine, '--config', os.path.abspath(p), '--verb', '4']
         self._cleanup_auth_file()
+        data_dir = self._data_dir()
         if info.get('needs_auth'):
             user = str(username or '').strip()
             pw = str(password or '')
             if not user or not pw:
                 return {
                     'needs_auth': True,
+                    'needs_askpass': bool(info.get('needs_askpass')),
                     'error': 'This Conf profile requires username and password (auth-user-pass).',
                 }
-            data_dir = self._data_dir()
             os.makedirs(data_dir, exist_ok=True)
             fd, auth_path = tempfile.mkstemp(prefix='neon_auth_', suffix='.txt', dir=data_dir)
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 f.write(f'{user}\n{pw}\n')
             self._auth_temp_file = auth_path
             cmd.extend(['--auth-user-pass', auth_path, '--auth-nocache'])
+
+        if info.get('needs_askpass'):
+            kp = str(key_passphrase or '')
+            if not kp and not info.get('needs_auth'):
+                kp = str(password or '')
+            if not kp:
+                self._cleanup_auth_file()
+                return {
+                    'needs_askpass': True,
+                    'needs_auth': bool(info.get('needs_auth')),
+                    'error': 'This Conf profile requires a private-key / certificate password (askpass).',
+                }
+            os.makedirs(data_dir, exist_ok=True)
+            fd_k, ask_path = tempfile.mkstemp(prefix='neon_askpass_', suffix='.txt', dir=data_dir)
+            with os.fdopen(fd_k, 'w', encoding='utf-8') as f:
+                f.write(f'{kp}\n')
+            self._askpass_temp_file = ask_path
+            cmd.extend(['--askpass', ask_path, '--auth-nocache'])
 
         mgmt_port = None
         try:
@@ -1678,13 +1818,25 @@ class Api:
         except Exception as exc:
             self._logger.warning('Emergency sharing teardown error: %s', exc)
 
-    def _read_openvpn_log(self, process, is_vless=False):
+    def _read_openvpn_log(self, process, is_vless=False, display_name='VLESS', has_tun=True):
         fatal_markers = (
             'AUTH_FAILED',
             'Exiting due to fatal error',
             'Options error:',
             'All TAP-Windows adapters on this system are currently in use',
             'Cannot open TUN/TAP dev',
+            'Enter Private Key Password',
+            'private key password verification failed',
+            'mac verify failure',
+            'bad decrypt',
+            'Error reading PKCS12',
+        )
+        key_err_markers = (
+            'Enter Private Key Password',
+            'private key password verification failed',
+            'mac verify failure',
+            'bad decrypt',
+            'Error reading PKCS12',
         )
         try:
             for raw in iter(process.stdout.readline, ''):
@@ -1697,8 +1849,9 @@ class Api:
                         # Do not forward engine logs: they can contain profile data or browsing activity.
                         if self.openvpn_process is process and 'sing-box started (' in line:
                             self.vpn_state = 'CONNECTED'
-                            self.vpn_adapter_name = vless.ADAPTER
-                            self.vpn_logs.append('[NEON] VLESS tunnel interface ready.')
+                            self.vpn_adapter_name = vless.ADAPTER if has_tun else None
+                            kind_lbl = 'tunnel interface' if has_tun else 'proxy'
+                            self.vpn_logs.append(f'[NEON] {display_name} {kind_lbl} ready.')
                         continue
                     self.vpn_logs.append(line)
                     if len(self.vpn_logs) > 1500:
@@ -1743,6 +1896,8 @@ class Api:
                         drop_auth = True
                         if 'AUTH_FAILED' in line:
                             self.vpn_logs.append('[!] Conf authentication failed. Check profile username/password.')
+                        elif any(km in line for km in key_err_markers):
+                            self.vpn_logs.append('[!] Conf private-key / certificate password failed. Check key passphrase.')
                 if drop_auth:
                     self._cleanup_auth_file()
         except Exception as exc:
@@ -1758,24 +1913,99 @@ class Api:
                 self._cleanup_auth_file()
             rc = process.wait() if is_vless else process.poll()
             need_teardown = False
+            aux_to_stop = None
             with self.vpn_lock:
                 is_current = self.openvpn_process is process
                 stop_requested = self._vpn_stop_requested
                 if is_current:
                     self.openvpn_process = None
                     self._mgmt_port = None
+                    aux_to_stop = self._vpn_aux_process
+                    self._vpn_aux_process = None
                     if stop_requested:
                         self.vpn_state = 'DISCONNECTED'
                     else:
                         if is_vless and rc:
-                            self.vpn_logs.append('[!] VLESS stopped (exit %s). Check the profile and administrator permissions.' % rc)
+                            self.vpn_logs.append('[!] %s stopped (exit %s). Check the profile and administrator permissions.' % (display_name, rc))
                         if self.vpn_state != 'ERROR':
                             self.vpn_state = 'ERROR' if (rc is not None and rc != 0) else 'DISCONNECTED'
                         if self.hotspot_active or self.ethernet_active or self.app_shared_pair:
                             need_teardown = True
                             self.vpn_logs.append('[!] Conf channel stopped unexpectedly — disabling hotspot/Ethernet ICS automatically.')
+            if is_current:
+                if aux_to_stop and aux_to_stop.poll() is None:
+                    self._terminate_proc(aux_to_stop)
+                if platform.system() == 'Windows':
+                    self._restore_windows_proxy()
             if need_teardown:
                 threading.Thread(target=self._emergency_stop_sharing, daemon=True).start()
+
+    def _read_proxy_log(self, process, is_aux=False, display_name='Xray'):
+        """Read stdout/stderr from Xray-core without leaking node/traffic details."""
+        try:
+            for raw in iter(process.stdout.readline, ''):
+                line = raw.rstrip()
+                if not line:
+                    continue
+                low = line.lower()
+                with self.vpn_lock:
+                    if not is_aux and self.openvpn_process is process and ' started' in low and 'xray' in low:
+                        self.vpn_state = 'CONNECTED'
+                        self.vpn_logs.append(f'[NEON] {display_name} proxy ready.')
+                    elif is_aux and self._vpn_aux_process is process and ' started' in low and 'xray' in low:
+                        self.vpn_logs.append(f'[NEON] {display_name} upstream core started.')
+                    elif 'failed to' in low or 'panic:' in low:
+                        self.vpn_logs.append(f'[!] {display_name}: {line[:220]}')
+        except Exception as exc:
+            with self.vpn_lock:
+                self.vpn_logs.append(f'[NEON] {display_name} reader: {exc}')
+        finally:
+            try:
+                if process.stdout:
+                    process.stdout.close()
+            except Exception:
+                pass
+            rc = process.wait()
+            main_to_stop = None
+            with self.vpn_lock:
+                stop_requested = self._vpn_stop_requested
+                if is_aux and self._vpn_aux_process is process:
+                    self._vpn_aux_process = None
+                    if not stop_requested:
+                        self.vpn_logs.append(f'[!] {display_name} upstream stopped unexpectedly (exit {rc}).')
+                        main_to_stop = self.openvpn_process
+                elif not is_aux and self.openvpn_process is process:
+                    self.openvpn_process = None
+                    if stop_requested:
+                        self.vpn_state = 'DISCONNECTED'
+                    else:
+                        if rc:
+                            self.vpn_logs.append(f'[!] {display_name} stopped (exit {rc}).')
+                        self.vpn_state = 'ERROR' if (rc is not None and rc != 0) else 'DISCONNECTED'
+            if main_to_stop and main_to_stop.poll() is None:
+                self._terminate_proc(main_to_stop)
+            if not is_aux and platform.system() == 'Windows':
+                self._restore_windows_proxy()
+
+    @staticmethod
+    def _terminate_proc(proc, mgmt_port=None, sigterm_fn=None):
+        if not proc or proc.poll() is not None:
+            return
+        if mgmt_port and sigterm_fn and sigterm_fn(mgmt_port):
+            try:
+                proc.wait(timeout=4)
+            except Exception:
+                pass
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                except Exception:
+                    pass
 
     def read_vpn_logs(self):
         with self.vpn_lock:
@@ -1811,6 +2041,7 @@ class Api:
         with self.vpn_lock:
             self._vpn_stop_requested = True
             proc = self.openvpn_process
+            aux_proc = self._vpn_aux_process
             mgmt_port = self._mgmt_port
 
         # Stop hotspot/Ethernet/ICS first so clients are never left on an unencrypted tunnel.
@@ -1821,23 +2052,11 @@ class Api:
         elif self.app_shared_pair:
             self._disable_app_shared_pair()
 
-        if proc and proc.poll() is None:
-            sent_mgmt = self._send_mgmt_sigterm(mgmt_port)
-            if sent_mgmt:
-                try:
-                    proc.wait(timeout=4)
-                except Exception:
-                    pass
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=5)
-                except Exception:
-                    try:
-                        proc.kill()
-                        proc.wait(timeout=3)
-                    except Exception:
-                        pass
+        self._terminate_proc(proc, mgmt_port=mgmt_port, sigterm_fn=self._send_mgmt_sigterm)
+        self._terminate_proc(aux_proc)
+
+        if platform.system() == 'Windows':
+            self._restore_windows_proxy()
 
         self._cleanup_auth_file()
         if self._uplink_dns_backups and platform.system() == 'Windows':
@@ -1847,6 +2066,7 @@ class Api:
                 pass
         with self.vpn_lock:
             self.openvpn_process = None
+            self._vpn_aux_process = None
             self._mgmt_port = None
             self.vpn_state = 'DISCONNECTED'
             self.vpn_adapter_name = None
@@ -1858,6 +2078,512 @@ class Api:
             'ok': True,
             'output': 'NEON stopped its hosted-network sharing (if active) and disconnected the background Conf engine.',
         }
+
+    # --- Built-in Happ-compatible (Xray-core + sing-box) client + official Happ Desktop bridge ---
+
+    def _happ_store(self):
+        path = os.path.join(self._data_dir(), 'happ_store.json')
+        if self._happ_store_obj is None or self._happ_store_path_cached != path:
+            self._happ_store_obj = happ_client.HappStore(path)
+            self._happ_store_path_cached = path
+        return self._happ_store_obj
+
+    @staticmethod
+    def _xray_exe():
+        exe = resource(os.path.join('assets', 'vless', 'xray.exe'))
+        return exe if os.path.isfile(exe) else None
+
+    @staticmethod
+    def _singbox_exe():
+        exe = resource(os.path.join('assets', 'vless', 'sing-box.exe'))
+        return exe if os.path.isfile(exe) else None
+
+    @staticmethod
+    def _lan_ipv4s():
+        ips = []
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(('8.8.8.8', 80))
+                primary = s.getsockname()[0]
+                if primary and not primary.startswith('127.'):
+                    ips.append(primary)
+        except Exception:
+            pass
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if ip and not ip.startswith('127.') and not ip.startswith('169.254.') and ip not in ips:
+                    ips.append(ip)
+        except Exception:
+            pass
+        return ips
+
+    @staticmethod
+    def _resolve_server_ips(node, xcfg=None):
+        hosts = []
+        if node and node.get('host'):
+            hosts.append(node['host'])
+        for h in happ_client._collect_xray_server_hosts(xcfg):
+            if h not in hosts:
+                hosts.append(h)
+        cidrs = []
+        for h in hosts:
+            for c in happ_client._resolve_server_ips(h):
+                if c not in cidrs:
+                    cidrs.append(c)
+        return cidrs
+
+    def _refresh_windows_wininet(self):
+        try:
+            wininet = ctypes.windll.wininet
+            wininet.InternetSetOptionW(0, 39, 0, 0)  # INTERNET_OPTION_SETTINGS_CHANGED
+            wininet.InternetSetOptionW(0, 37, 0, 0)  # INTERNET_OPTION_REFRESH
+        except Exception:
+            pass
+
+    def _enable_windows_proxy(self, http_port):
+        if platform.system() != 'Windows':
+            return False
+        try:
+            import winreg
+        except ImportError:
+            return False
+        key_path = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+                if self._sys_proxy_backup is None:
+                    backup = {}
+                    for val_name in ('ProxyEnable', 'ProxyServer', 'ProxyOverride'):
+                        try:
+                            val, reg_type = winreg.QueryValueEx(key, val_name)
+                            backup[val_name] = (val, reg_type)
+                        except FileNotFoundError:
+                            backup[val_name] = None
+                    self._sys_proxy_backup = backup
+                winreg.SetValueEx(key, 'ProxyEnable', 0, winreg.REG_DWORD, 1)
+                winreg.SetValueEx(key, 'ProxyServer', 0, winreg.REG_SZ, f'127.0.0.1:{int(http_port)}')
+                winreg.SetValueEx(
+                    key,
+                    'ProxyOverride',
+                    0,
+                    winreg.REG_SZ,
+                    '<local>;localhost;127.*;10.*;172.16.*;192.168.*',
+                )
+            self._refresh_windows_wininet()
+            return True
+        except Exception as exc:
+            self._logger.warning('Failed to set Windows system proxy: %s', exc)
+            return False
+
+    def _restore_windows_proxy(self):
+        backup = self._sys_proxy_backup
+        if backup is None:
+            return
+        self._sys_proxy_backup = None
+        if platform.system() != 'Windows':
+            return
+        try:
+            import winreg
+        except ImportError:
+            return
+        key_path = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+                for val_name, item in backup.items():
+                    if item is None:
+                        try:
+                            winreg.DeleteValue(key, val_name)
+                        except FileNotFoundError:
+                            pass
+                    else:
+                        val, reg_type = item
+                        winreg.SetValueEx(key, val_name, 0, reg_type, val)
+            self._refresh_windows_wininet()
+        except Exception as exc:
+            self._logger.warning('Failed to restore Windows system proxy: %s', exc)
+
+    def _happ_engines_info(self):
+        xray = self._xray_exe()
+        sb = self._singbox_exe()
+        desktop = happ_client.find_happ_desktop_exe()
+        geoip = os.path.isfile(os.path.join(os.path.dirname(xray), 'geoip.dat')) if xray else False
+        geosite = os.path.isfile(os.path.join(os.path.dirname(xray), 'geosite.dat')) if xray else False
+        return {
+            'xray_ready': bool(xray),
+            'xray_path': xray or '',
+            'singbox_ready': bool(sb),
+            'singbox_path': sb or '',
+            'geo_ready': bool(geoip and geosite),
+            'happ_desktop_installed': bool(desktop),
+            'happ_desktop_path': desktop or '',
+        }
+
+    def happ_get_state(self):
+        store = self._happ_store()
+        data = store.summary()
+        data['engines'] = self._happ_engines_info()
+        data['lan_ips'] = self._lan_ipv4s()
+        data['vpn_state'] = self.vpn_state
+        data['vpn_profile'] = self.vpn_profile or ''
+        data['system_proxy_active'] = self._sys_proxy_backup is not None
+        return {'ok': True, **data}
+
+    def happ_desktop_status(self):
+        exe = happ_client.find_happ_desktop_exe()
+        return {
+            'ok': True,
+            'installed': bool(exe),
+            'path': exe or '',
+            'download_url': happ_client.HAPP_DESKTOP_RELEASES_URL,
+        }
+
+    def happ_open_in_official(self, uri=''):
+        if platform.system() != 'Windows':
+            return {'error': 'Launching local Happ Desktop is available on Windows.'}
+        exe = happ_client.find_happ_desktop_exe()
+        target = str(uri or '').strip()
+        if target and target.lower().startswith(('happ://', 'vless://', 'vmess://', 'trojan://', 'ss://', 'hy2://', 'hysteria2://')):
+            try:
+                if exe:
+                    subprocess.Popen([exe, target], creationflags=self._creation_flags())
+                    return {'ok': True, 'output': f'Sent link to installed Happ Desktop: {exe}'}
+                os.startfile(target)
+                return {'ok': True, 'output': 'Opened URI via Windows happ:// protocol handler.'}
+            except Exception as exc:
+                return {'error': str(exc)}
+        if not exe:
+            return {'error': 'Happ Desktop is not installed on this PC.', 'installed': False}
+        try:
+            subprocess.Popen([exe], creationflags=self._creation_flags())
+            return {'ok': True, 'output': f'Launched Happ Desktop: {exe}'}
+        except Exception as exc:
+            return {'error': str(exc)}
+
+    def happ_import(self, text, title=''):
+        raw = str(text or '').strip()
+        if not raw:
+            return {'error': 'Paste a subscription URL, happ:// link, proxy URI(s), or Xray JSON.'}
+
+        store = self._happ_store()
+        try:
+            res = store.import_input(raw, title=title)
+        except Exception as exc:
+            return {'error': str(exc)}
+
+        if res.get('encrypted_happ'):
+            exe = happ_client.find_happ_desktop_exe()
+            return {
+                'crypt_link': True,
+                'happ_desktop_installed': bool(exe),
+                'happ_desktop_path': exe or '',
+                'raw_uri': res.get('uri', raw),
+                'error': (
+                    'Encrypted happ://crypt links use Happ Desktop private keys that NEON cannot decrypt directly. '
+                    + ('Click "Open in Happ Desktop" to import it into your installed Happ client (and share its TUN adapter in NEON).'
+                       if exe else 'Install official Happ Desktop to decrypt happ://crypt links, then share its TUN adapter via NEON Hotspot/Ethernet.')
+                ),
+            }
+
+        state = self.happ_get_state()
+        if res.get('kind') == 'routing':
+            state['routing_imported'] = res.get('profile')
+        else:
+            sub = store.get_sub(res.get('subscription_id'))
+            state['subscription'] = sub
+        return state
+
+    def happ_update_subscription(self, sub_id=None):
+        store = self._happ_store()
+        try:
+            updated = store.update_subscription(sub_id)
+        except Exception as exc:
+            return {'error': str(exc)}
+        res = self.happ_get_state()
+        res['updated_count'] = len(updated)
+        res['updated'] = updated
+        return res
+
+    def happ_delete_subscription(self, sub_id):
+        store = self._happ_store()
+        if not store.delete_subscription(sub_id):
+            return {'error': 'Subscription not found.'}
+        return self.happ_get_state()
+
+    def happ_delete_node(self, sub_id, node_id):
+        store = self._happ_store()
+        if not store.delete_node(sub_id, node_id):
+            return {'error': 'Node not found.'}
+        return self.happ_get_state()
+
+    def happ_select_node(self, sub_id, node_id):
+        store = self._happ_store()
+        try:
+            store.select_node(sub_id, node_id)
+        except ValueError as exc:
+            return {'error': str(exc)}
+        return self.happ_get_state()
+
+    def happ_ping_nodes(self, sub_id=None):
+        store = self._happ_store()
+        latencies = store.ping_subscription(sub_id)
+        if not latencies:
+            return {'error': 'No nodes in this subscription to test.'}
+        state = self.happ_get_state()
+        state['latencies'] = latencies
+        return state
+
+    def happ_select_fastest(self, sub_id=None):
+        store = self._happ_store()
+        try:
+            best = store.select_fastest_node(sub_id)
+        except ValueError as exc:
+            return {'error': str(exc)}
+        state = self.happ_get_state()
+        state['fastest_node'] = best
+        return state
+
+    def happ_update_settings(self, patch):
+        store = self._happ_store()
+        saved = store.update_settings(patch or {})
+        state = self.happ_get_state()
+        state['settings'] = saved
+        return state
+
+    def happ_connect(self, sub_id=None, node_id=None):
+        if platform.system() != 'Windows':
+            return {'error': 'Built-in Xray/sing-box proxy & tunnel engine is available in the Windows build.'}
+        with self._vpn_control:
+            store = self._happ_store()
+            sub, node = store.get_active_node(sub_id, node_id)
+            if not node:
+                return {'error': 'Import a subscription or proxy link and select a node first.'}
+            if sub_id or node_id:
+                try:
+                    store.select_node(sub['id'], node['id'])
+                except ValueError as exc:
+                    return {'error': str(exc)}
+
+            active_main = self.openvpn_process and self.openvpn_process.poll() is None
+            active_aux = self._vpn_aux_process and self._vpn_aux_process.poll() is None
+            if active_main or active_aux:
+                prof = str(self.vpn_profile or '')
+                if prof.startswith('Happ:') or prof == 'VLESS':
+                    self._disconnect_vpn()
+                else:
+                    return {'error': 'Disconnect the active .ovpn Conf session first.'}
+
+            xray_exe = self._xray_exe()
+            sb_exe = self._singbox_exe()
+            settings = dict(store.data['settings'])
+            routing_profile = store.active_routing_profile()
+            mode = str(settings.get('mode') or 'tun').lower()
+            try:
+                plan = happ_client.choose_engine_plan(node, settings, bool(xray_exe), bool(sb_exe))
+            except ValueError as exc:
+                return {'error': str(exc)}
+
+            display = f"Happ: {node.get('name', 'Node')}"
+            asset_dir = os.path.dirname(xray_exe or sb_exe or '.')
+            socks_port = int(settings.get('socks_port') or 10808)
+            http_port = int(settings.get('http_port') or 10809)
+            sys_proxy_want = bool(settings.get('system_proxy', True))
+
+            if plan == 'xray_proxy':
+                try:
+                    xcfg = happ_client.build_xray_config(
+                        node,
+                        socks_port=socks_port,
+                        http_port=http_port,
+                        settings=settings,
+                        routing_profile=routing_profile,
+                        asset_dir=asset_dir,
+                    )
+                except ValueError as exc:
+                    return {'error': str(exc)}
+                proc = None
+                try:
+                    proc = subprocess.Popen(
+                        [xray_exe, 'run', '-format', 'json', '-c', 'stdin:'],
+                        cwd=asset_dir,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        encoding='utf-8',
+                        errors='replace',
+                        creationflags=self._creation_flags(),
+                    )
+                    proc.stdin.write(json.dumps(xcfg))
+                    proc.stdin.close()
+                except OSError as exc:
+                    if proc is not None:
+                        self._terminate_proc(proc)
+                    return {'error': f'Cannot start Xray-core: {exc}'}
+
+                listen_ip = '0.0.0.0' if settings.get('allow_lan') else '127.0.0.1'
+                with self.vpn_lock:
+                    self.openvpn_process = proc
+                    self._vpn_aux_process = None
+                    self._vpn_stop_requested = False
+                    self._mgmt_port = None
+                    self.vpn_profile = display
+                    self.vpn_adapter_name = self.vpn_adapter_guid = self.vpn_ifindex = None
+                    self.vpn_state = 'CONNECTING'
+                    self.vpn_logs = [f'[NEON] Starting Xray-core proxy ({node.get("name", "")}) on {listen_ip}:{http_port}/{socks_port}.']
+                if sys_proxy_want:
+                    self._enable_windows_proxy(http_port)
+                threading.Thread(target=self._read_proxy_log, args=(proc, False, 'Xray'), daemon=True).start()
+                return {'ok': True, 'plan': plan, 'http_port': http_port, 'socks_port': socks_port, 'output': f'Starting {display} (Proxy).'}
+
+            if plan == 'xray_with_singbox_tun':
+                xray_socks = self._find_free_port()
+                try:
+                    xcfg = happ_client.build_xray_config(
+                        node,
+                        socks_port=xray_socks,
+                        http_port=0,
+                        settings={**settings, 'allow_lan': False},
+                        routing_profile=routing_profile,
+                        asset_dir=asset_dir,
+                    )
+                except ValueError as exc:
+                    return {'error': str(exc)}
+                excludes = self._resolve_server_ips(node, xcfg=xcfg)
+                xproc = None
+                try:
+                    xproc = subprocess.Popen(
+                        [xray_exe, 'run', '-format', 'json', '-c', 'stdin:'],
+                        cwd=asset_dir,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        encoding='utf-8',
+                        errors='replace',
+                        creationflags=self._creation_flags(),
+                    )
+                    xproc.stdin.write(json.dumps(xcfg))
+                    xproc.stdin.close()
+                except OSError as exc:
+                    if xproc is not None:
+                        self._terminate_proc(xproc)
+                    xproc = None
+                    if happ_client.can_singbox_run(node):
+                        plan = 'singbox_tun'
+                    else:
+                        return {'error': f'Cannot start Xray-core: {exc}'}
+
+                if xproc is not None:
+                    time.sleep(0.25)
+                    if xproc.poll() is not None:
+                        out_err = ''
+                        try:
+                            out_err = (xproc.stdout.read() or '').strip()
+                        except Exception:
+                            pass
+                        if happ_client.can_singbox_run(node):
+                            plan = 'singbox_tun'
+                            xproc = None
+                        else:
+                            return {'error': f'Xray-core exited immediately: {out_err[-300:] or xproc.returncode}'}
+
+                if plan == 'xray_with_singbox_tun':
+                    try:
+                        scfg = happ_client.build_singbox_config(
+                            node=None,
+                            mode=mode,
+                            upstream_socks_port=xray_socks,
+                            extra_excludes=excludes,
+                            socks_port=socks_port,
+                            http_port=http_port,
+                            settings=settings,
+                            routing_profile=routing_profile,
+                        )
+                    except ValueError as exc:
+                        self._terminate_proc(xproc)
+                        return {'error': str(exc)}
+                    sb_proc = None
+                    try:
+                        sb_proc = subprocess.Popen(
+                            [sb_exe, 'run', '-c', 'stdin'],
+                            cwd=os.path.dirname(sb_exe),
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            encoding='utf-8',
+                            errors='replace',
+                            creationflags=self._creation_flags(),
+                        )
+                        sb_proc.stdin.write(json.dumps(scfg))
+                        sb_proc.stdin.close()
+                    except OSError as exc:
+                        self._terminate_proc(xproc)
+                        if sb_proc is not None:
+                            self._terminate_proc(sb_proc)
+                        return {'error': f'Cannot start sing-box TUN engine: {exc}'}
+
+                    with self.vpn_lock:
+                        self._vpn_aux_process = xproc
+                        self.openvpn_process = sb_proc
+                        self._vpn_stop_requested = False
+                        self._mgmt_port = None
+                        self.vpn_profile = display
+                        self.vpn_adapter_name = self.vpn_adapter_guid = self.vpn_ifindex = None
+                        self.vpn_state = 'CONNECTING'
+                        self.vpn_logs = [f'[NEON] Starting Xray-core + sing-box TUN ({node.get("name", "")}).']
+                    if mode == 'mixed' and sys_proxy_want:
+                        self._enable_windows_proxy(http_port)
+                    threading.Thread(target=self._read_proxy_log, args=(xproc, True, 'Xray'), daemon=True).start()
+                    threading.Thread(target=self._read_openvpn_log, args=(sb_proc, True, display), daemon=True).start()
+                    return {'ok': True, 'plan': plan, 'output': f'Starting {display} (Xray + TUN).'}
+
+            # singbox_tun or singbox_proxy (including fallback)
+            try:
+                sb_mode = 'proxy' if plan == 'singbox_proxy' else mode
+                scfg = happ_client.build_singbox_config(
+                    node=node,
+                    mode=sb_mode,
+                    socks_port=socks_port,
+                    http_port=http_port,
+                    settings=settings,
+                    routing_profile=routing_profile,
+                )
+            except ValueError as exc:
+                return {'error': str(exc)}
+            sb_proc = None
+            try:
+                sb_proc = subprocess.Popen(
+                    [sb_exe, 'run', '-c', 'stdin'],
+                    cwd=os.path.dirname(sb_exe),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    encoding='utf-8',
+                    errors='replace',
+                    creationflags=self._creation_flags(),
+                )
+                sb_proc.stdin.write(json.dumps(scfg))
+                sb_proc.stdin.close()
+            except OSError as exc:
+                if sb_proc is not None:
+                    self._terminate_proc(sb_proc)
+                return {'error': f'Cannot start sing-box engine: {exc}'}
+
+            with self.vpn_lock:
+                self.openvpn_process = sb_proc
+                self._vpn_aux_process = None
+                self._vpn_stop_requested = False
+                self._mgmt_port = None
+                self.vpn_profile = display
+                self.vpn_adapter_name = self.vpn_adapter_guid = self.vpn_ifindex = None
+                self.vpn_state = 'CONNECTING'
+                self.vpn_logs = [f'[NEON] Starting sing-box ({sb_mode}) for {node.get("name", "")}.']
+            if sb_mode in ('proxy', 'mixed') and sys_proxy_want:
+                self._enable_windows_proxy(http_port)
+            threading.Thread(
+                target=self._read_openvpn_log,
+                args=(sb_proc, True, display, sb_mode != 'proxy'),
+                daemon=True,
+            ).start()
+            return {'ok': True, 'plan': plan, 'output': f'Starting {display} ({sb_mode}).'}
 
     @staticmethod
     def _classify_adapter(adapter):
@@ -1876,6 +2602,7 @@ class Api:
             'openvpn', 'tap-windows', 'tap-win32', 'tap-win64', 'tap0901',
             'wintun', 'ovpn-dco', 'data channel offload',
             'wireguard', 'zerotier', 'tailscale', 'nordlynx', 'amnezia',
+            'neon-vless', 'sing-box', 'singbox', 'happ', 'xray', 'tun2proxy',
         )
         if any(k in label for k in vpn_keys) or re.search(r'\bdco\b', label) or netcon_media == 5:
             return 'vpn'
@@ -3271,6 +3998,7 @@ class Api:
     def system_diagnostics(self):
         win = self.windows_info()
         ovpn = self._openvpn_exe()
+        engines = self._happ_engines_info()
         hosted = self._driver_supports_hosted_network() if win['is_windows'] else None
         adapters_res = self.network_connections() if win['is_windows'] else {'adapters': []}
         adapters = adapters_res.get('adapters', [])
@@ -3283,6 +4011,9 @@ class Api:
             'os': win,
             'is_admin': self.is_admin(),
             'openvpn_path': ovpn or '',
+            'xray_path': engines.get('xray_path', ''),
+            'singbox_path': engines.get('singbox_path', ''),
+            'happ_desktop_path': engines.get('happ_desktop_path', ''),
             'hosted_network_supported': hosted,
             'vpn_adapters': vpn_adapters,
             'adapters': adapters,
@@ -3317,26 +4048,20 @@ class Api:
         with self.vpn_lock:
             self._vpn_stop_requested = True
             proc = self.openvpn_process
+            aux_proc = self._vpn_aux_process
             mgmt_port = self._mgmt_port
 
-        if proc and proc.poll() is None:
-            self._send_mgmt_sigterm(mgmt_port)
-            try:
-                proc.wait(timeout=3)
-            except Exception:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=4)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+        self._terminate_proc(proc, mgmt_port=mgmt_port, sigterm_fn=self._send_mgmt_sigterm)
+        self._terminate_proc(aux_proc)
+        if proc or aux_proc:
             with self.vpn_lock:
                 self.openvpn_process = None
+                self._vpn_aux_process = None
                 self._mgmt_port = None
                 self.vpn_state = 'DISCONNECTED'
 
+        if platform.system() == 'Windows':
+            self._restore_windows_proxy()
         if platform.system() == 'Windows' and self._uplink_dns_backups:
             try:
                 self._restore_uplink_dns_backups()

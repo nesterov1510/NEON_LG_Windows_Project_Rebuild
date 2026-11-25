@@ -19,6 +19,8 @@ from PyQt5.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QPushButton,
@@ -37,6 +39,7 @@ from core import Api, DNS_PRESETS, resource
 from samsung_time_override import DEFAULT_SOURCE_DOMAINS as SAMSUNG_TIME_DEFAULT_SOURCES, TIME_TARGET_PRESETS
 from samsung_tv import SAMSUNG_LOCAL_SETS
 from ui_qt import (
+    ConfAuthDialog,
     ConfirmDialog,
     KpiCard,
     MatrixRainWidget,
@@ -87,6 +90,9 @@ class NeonWindow(QMainWindow):
         self._sam_found_devices = []
         self._his_found_devices = []
         self._his_pairing_id = ''
+        self._last_inspected_profile = None
+        self._last_happ_crypt_uri = ''
+        self._happ_state = {}
         self.current_tab = 0
         self._drag_pos = None
         self._resize_edges = None
@@ -156,6 +162,7 @@ class NeonWindow(QMainWindow):
 
         if win_info['is_windows']:
             QTimer.singleShot(150, self.refresh_profiles)
+        QTimer.singleShot(200, self.happ_refresh_ui)
         QTimer.singleShot(250, self.run_diagnostics)
 
     def _load_icon(self):
@@ -1747,8 +1754,177 @@ class NeonWindow(QMainWindow):
         left.setContentsMargins(0, 0, 6, 0)
         left.setSpacing(12)
 
-        # Card 1: OpenVPN
-        c1, l1 = self._make_card('lbl_vpn1', 1)
+        # Card 1: Built-in Happ-compatible Proxy & Tunnel (Xray-core + sing-box TUN) + Happ Desktop bridge
+        c_happ, l_happ = self._make_card('lbl_happ', 1)
+        self.happ_desc = QLabel()
+        self.happ_desc.setObjectName('HintLabel')
+        self.happ_desc.setWordWrap(True)
+        l_happ.addWidget(self.happ_desc)
+
+        self.lbl_happ_input = QLabel()
+        self.lbl_happ_input.setObjectName('FieldLabel')
+        l_happ.addWidget(self.lbl_happ_input)
+
+        self.happ_input = QLineEdit()
+        self.happ_input.returnPressed.connect(self.happ_import_clicked)
+        l_happ.addWidget(self.happ_input)
+
+        h_in_row = QHBoxLayout()
+        h_in_row.setSpacing(6)
+        self.btn_happ_paste = QPushButton()
+        self.btn_happ_paste.setObjectName('GhostBtn')
+        self.btn_happ_paste.setCursor(Qt.PointingHandCursor)
+        self.btn_happ_paste.clicked.connect(self.happ_paste_input)
+
+        self.btn_happ_import = QPushButton()
+        self.btn_happ_import.setObjectName('PrimaryBtn')
+        self.btn_happ_import.setCursor(Qt.PointingHandCursor)
+        self.btn_happ_import.clicked.connect(self.happ_import_clicked)
+
+        self.btn_happ_update = QPushButton()
+        self.btn_happ_update.setObjectName('NormalBtn')
+        self.btn_happ_update.setCursor(Qt.PointingHandCursor)
+        self.btn_happ_update.clicked.connect(self.happ_update_clicked)
+
+        h_in_row.addWidget(self.btn_happ_paste, 1)
+        h_in_row.addWidget(self.btn_happ_import, 2)
+        h_in_row.addWidget(self.btn_happ_update, 2)
+        l_happ.addLayout(h_in_row)
+
+        self.lbl_happ_sub = QLabel()
+        self.lbl_happ_sub.setObjectName('FieldLabel')
+        l_happ.addWidget(self.lbl_happ_sub)
+        h_sub_row = QHBoxLayout()
+        h_sub_row.setSpacing(6)
+        self.happ_sub_combo = QComboBox()
+        self.happ_sub_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.happ_sub_combo.setMinimumContentsLength(10)
+        self.happ_sub_combo.currentIndexChanged.connect(self._on_happ_sub_changed)
+        self.btn_happ_del_sub = QPushButton()
+        self.btn_happ_del_sub.setObjectName('DangerBtn')
+        self.btn_happ_del_sub.setCursor(Qt.PointingHandCursor)
+        self.btn_happ_del_sub.clicked.connect(self.happ_delete_sub_clicked)
+        h_sub_row.addWidget(self.happ_sub_combo, 1)
+        h_sub_row.addWidget(self.btn_happ_del_sub)
+        l_happ.addLayout(h_sub_row)
+
+        self.happ_sub_info = QLabel()
+        self.happ_sub_info.setObjectName('HintLabel')
+        self.happ_sub_info.setWordWrap(True)
+        self.happ_sub_info.setStyleSheet('color:#88d6b2;font-family:"Consolas",monospace;font-size:11px;')
+        l_happ.addWidget(self.happ_sub_info)
+
+        self.lbl_happ_nodes = QLabel()
+        self.lbl_happ_nodes.setObjectName('FieldLabel')
+        l_happ.addWidget(self.lbl_happ_nodes)
+
+        self.happ_node_list = QListWidget()
+        self.happ_node_list.setObjectName('HappNodeList')
+        self.happ_node_list.setMinimumHeight(140)
+        self.happ_node_list.setMaximumHeight(200)
+        self.happ_node_list.itemClicked.connect(self._on_happ_node_clicked)
+        self.happ_node_list.itemDoubleClicked.connect(lambda _item: self.happ_connect_clicked())
+        l_happ.addWidget(self.happ_node_list)
+
+        h_ping_row = QHBoxLayout()
+        h_ping_row.setSpacing(6)
+        self.btn_happ_ping = QPushButton()
+        self.btn_happ_ping.setObjectName('NormalBtn')
+        self.btn_happ_ping.setCursor(Qt.PointingHandCursor)
+        self.btn_happ_ping.clicked.connect(self.happ_ping_clicked)
+
+        self.btn_happ_best = QPushButton()
+        self.btn_happ_best.setObjectName('GhostBtn')
+        self.btn_happ_best.setCursor(Qt.PointingHandCursor)
+        self.btn_happ_best.clicked.connect(self.happ_best_clicked)
+
+        h_ping_row.addWidget(self.btn_happ_ping, 1)
+        h_ping_row.addWidget(self.btn_happ_best, 1)
+        l_happ.addLayout(h_ping_row)
+
+        h_act_row = QHBoxLayout()
+        h_act_row.setSpacing(8)
+        self.btn_happ_conn = QPushButton()
+        self.btn_happ_conn.setObjectName('PrimaryBtn')
+        self.btn_happ_conn.setCursor(Qt.PointingHandCursor)
+        self.btn_happ_conn.clicked.connect(self.happ_connect_clicked)
+
+        self.btn_happ_disc = QPushButton()
+        self.btn_happ_disc.setObjectName('DangerBtn')
+        self.btn_happ_disc.setCursor(Qt.PointingHandCursor)
+        self.btn_happ_disc.clicked.connect(self.disconnect_vpn)
+
+        h_act_row.addWidget(self.btn_happ_conn, 2)
+        h_act_row.addWidget(self.btn_happ_disc, 1)
+        l_happ.addLayout(h_act_row)
+
+        h_stat_row = QHBoxLayout()
+        self.happ_stat_val = QLabel('DISCONNECTED')
+        self.happ_stat_val.setStyleSheet('color:#8fa4b2;font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
+        h_stat_row.addWidget(self.happ_stat_val, 1)
+        l_happ.addLayout(h_stat_row)
+
+        h_opts_row = QHBoxLayout()
+        h_opts_row.setSpacing(8)
+        hm_col = QVBoxLayout()
+        hm_col.setSpacing(4)
+        self.lbl_happ_mode = QLabel()
+        self.lbl_happ_mode.setObjectName('FieldLabel')
+        self.happ_mode_combo = QComboBox()
+        self.happ_mode_combo.addItem('TUN (System + TV)', 'tun')
+        self.happ_mode_combo.addItem('Mixed (TUN + Proxy)', 'mixed')
+        self.happ_mode_combo.addItem('Proxy Only (HTTP/SOCKS)', 'proxy')
+        self.happ_mode_combo.currentIndexChanged.connect(self.happ_settings_changed)
+        hm_col.addWidget(self.lbl_happ_mode)
+        hm_col.addWidget(self.happ_mode_combo)
+
+        hr_col = QVBoxLayout()
+        hr_col.setSpacing(4)
+        self.lbl_happ_route = QLabel()
+        self.lbl_happ_route.setObjectName('FieldLabel')
+        self.happ_route_combo = QComboBox()
+        self.happ_route_combo.addItem('Bypass RU + LAN', 'bypass_lan_ru')
+        self.happ_route_combo.addItem('Global (All)', 'global')
+        self.happ_route_combo.addItem('Custom (happ://routing)', 'custom')
+        self.happ_route_combo.currentIndexChanged.connect(self.happ_settings_changed)
+        hr_col.addWidget(self.lbl_happ_route)
+        hr_col.addWidget(self.happ_route_combo)
+
+        h_opts_row.addLayout(hm_col, 1)
+        h_opts_row.addLayout(hr_col, 1)
+        l_happ.addLayout(h_opts_row)
+
+        self.chk_happ_frag = ToggleSwitch('', on_change=lambda _c: self.happ_settings_changed())
+        self.chk_happ_hwid = ToggleSwitch('', checked=True, on_change=lambda _c: self.happ_settings_changed())
+        self.chk_happ_sysproxy = ToggleSwitch('', checked=True, on_change=lambda _c: self.happ_settings_changed())
+        self.chk_happ_lan = ToggleSwitch('', on_change=lambda _c: self.happ_settings_changed())
+        l_happ.addWidget(self.chk_happ_frag)
+        l_happ.addWidget(self.chk_happ_hwid)
+        l_happ.addWidget(self.chk_happ_sysproxy)
+        l_happ.addWidget(self.chk_happ_lan)
+
+        self.happ_lan_hint = QLabel()
+        self.happ_lan_hint.setObjectName('HintLabel')
+        self.happ_lan_hint.setWordWrap(True)
+        self.happ_lan_hint.setStyleSheet('color:#36e2ff;font-family:"Consolas",monospace;font-size:11px;')
+        self.happ_lan_hint.setVisible(False)
+        l_happ.addWidget(self.happ_lan_hint)
+
+        self.happ_desktop_lbl = QLabel()
+        self.happ_desktop_lbl.setObjectName('HintLabel')
+        self.happ_desktop_lbl.setWordWrap(True)
+        l_happ.addWidget(self.happ_desktop_lbl)
+
+        self.btn_happ_desktop = QPushButton()
+        self.btn_happ_desktop.setObjectName('GhostBtn')
+        self.btn_happ_desktop.setCursor(Qt.PointingHandCursor)
+        self.btn_happ_desktop.clicked.connect(self.happ_open_desktop_clicked)
+        l_happ.addWidget(self.btn_happ_desktop)
+
+        left.addWidget(c_happ)
+
+        # Card 2: OpenVPN (.ovpn)
+        c1, l1 = self._make_card('lbl_vpn1', 2)
         self.vpn_card1_desc = QLabel()
         self.vpn_card1_desc.setObjectName('HintLabel')
         self.vpn_card1_desc.setWordWrap(True)
@@ -1785,6 +1961,11 @@ class NeonWindow(QMainWindow):
         al = QVBoxLayout(self.vpn_auth_box)
         al.setContentsMargins(12, 10, 12, 10)
         al.setSpacing(6)
+
+        self.vpn_auth_user_wrap = QWidget()
+        ul = QVBoxLayout(self.vpn_auth_user_wrap)
+        ul.setContentsMargins(0, 0, 0, 0)
+        ul.setSpacing(6)
         self.lbl_vpn_user = QLabel()
         self.lbl_vpn_user.setObjectName('FieldLabel')
         self.vpn_user = QLineEdit()
@@ -1800,10 +1981,33 @@ class NeonWindow(QMainWindow):
         self.vpn_pass_eye.clicked.connect(lambda: self._toggle_echo(self.vpn_pass, self.vpn_pass_eye))
         vp_row.addWidget(self.vpn_pass, 1)
         vp_row.addWidget(self.vpn_pass_eye)
-        al.addWidget(self.lbl_vpn_user)
-        al.addWidget(self.vpn_user)
-        al.addWidget(self.lbl_vpn_pass)
-        al.addLayout(vp_row)
+        ul.addWidget(self.lbl_vpn_user)
+        ul.addWidget(self.vpn_user)
+        ul.addWidget(self.lbl_vpn_pass)
+        ul.addLayout(vp_row)
+        al.addWidget(self.vpn_auth_user_wrap)
+
+        self.vpn_auth_key_wrap = QWidget()
+        kl = QVBoxLayout(self.vpn_auth_key_wrap)
+        kl.setContentsMargins(0, 0, 0, 0)
+        kl.setSpacing(6)
+        self.lbl_vpn_key_pass = QLabel()
+        self.lbl_vpn_key_pass.setObjectName('FieldLabel')
+        kp_row = QHBoxLayout()
+        kp_row.setSpacing(6)
+        self.vpn_key_pass = QLineEdit()
+        self.vpn_key_pass.setEchoMode(QLineEdit.Password)
+        self.vpn_key_pass_eye = QPushButton('SHOW')
+        self.vpn_key_pass_eye.setObjectName('EyeBtn')
+        self.vpn_key_pass_eye.setCursor(Qt.PointingHandCursor)
+        self.vpn_key_pass_eye.clicked.connect(lambda: self._toggle_echo(self.vpn_key_pass, self.vpn_key_pass_eye))
+        kp_row.addWidget(self.vpn_key_pass, 1)
+        kp_row.addWidget(self.vpn_key_pass_eye)
+        kl.addWidget(self.lbl_vpn_key_pass)
+        kl.addLayout(kp_row)
+        self.vpn_auth_key_wrap.setVisible(False)
+        al.addWidget(self.vpn_auth_key_wrap)
+
         l1.addWidget(self.vpn_auth_box)
 
         vc_row = QHBoxLayout()
@@ -1832,18 +2036,10 @@ class NeonWindow(QMainWindow):
         stat_row.addWidget(self.vpn_stat_val)
         stat_row.addStretch(1)
         l1.addLayout(stat_row)
-        self.vless_link = QLineEdit()
-        self.vless_link.setEchoMode(QLineEdit.Password)
-        self.vless_link.setPlaceholderText('vless://…')
-        l1.addWidget(self.vless_link)
-        self.btn_vless = QPushButton()
-        self.btn_vless.setObjectName('PrimaryBtn')
-        self.btn_vless.clicked.connect(self.connect_vless)
-        l1.addWidget(self.btn_vless)
         left.addWidget(c1)
 
-        # Card 2: Custom DNS for Wi-Fi Hotspot & Ethernet Sharing
-        c_dns, l_dns = self._make_card('lbl_dns', 2)
+        # Card 3: Custom DNS for Wi-Fi Hotspot & Ethernet Sharing
+        c_dns, l_dns = self._make_card('lbl_dns', 3)
         self.dns_desc = QLabel()
         self.dns_desc.setObjectName('HintLabel')
         self.dns_desc.setWordWrap(True)
@@ -1917,8 +2113,8 @@ class NeonWindow(QMainWindow):
         l_dns.addLayout(dns_stat_row)
         left.addWidget(c_dns)
 
-        # Card 3: Ethernet Cable Sharing (Wi-Fi + Conf -> Ethernet)
-        c_eth, l_eth = self._make_card('lbl_eth', 3)
+        # Card 4: Ethernet Cable Sharing (Wi-Fi + Conf -> Ethernet)
+        c_eth, l_eth = self._make_card('lbl_eth', 4)
         self.eth_desc = QLabel()
         self.eth_desc.setObjectName('HintLabel')
         self.eth_desc.setWordWrap(True)
@@ -1970,8 +2166,8 @@ class NeonWindow(QMainWindow):
         l_eth.addWidget(self.btn_eth_direct)
         left.addWidget(c_eth)
 
-        # Card 4: Hotspot
-        c2, l2 = self._make_card('lbl_hs', 4)
+        # Card 5: Hotspot
+        c2, l2 = self._make_card('lbl_hs', 5)
         self.hs_desc = QLabel()
         self.hs_desc.setObjectName('HintLabel')
         self.hs_desc.setWordWrap(True)
@@ -2031,8 +2227,8 @@ class NeonWindow(QMainWindow):
         l2.addWidget(self.btn_hs_win)
         left.addWidget(c2)
 
-        # Card 5: ICS Manual Fallback
-        c3, l3 = self._make_card('lbl_ics', 5)
+        # Card 6: ICS Manual Fallback
+        c3, l3 = self._make_card('lbl_ics', 6)
         self.ics_desc = QLabel()
         self.ics_desc.setObjectName('HintLabel')
         self.ics_desc.setWordWrap(True)
@@ -2526,7 +2722,50 @@ class NeonWindow(QMainWindow):
         self.btn_reboot.setText(self.t('btn_reboot'))
         self.reboot_hint.setText(self.t('reboot_hint'))
 
-        self.btn_vless.setText('Подключить VLESS' if self.lang == 'ru' else 'Connect VLESS')
+        self.lbl_happ.setText(self.t('happ_card'))
+        self.happ_desc.setText(self.t('happ_desc'))
+        self.lbl_happ_input.setText(self.t('happ_lbl_input'))
+        self.happ_input.setPlaceholderText(self.t('happ_ph_input'))
+        self.btn_happ_paste.setText(self.t('happ_btn_paste'))
+        self.btn_happ_import.setText(self.t('happ_btn_import'))
+        self.btn_happ_update.setText(self.t('happ_btn_update'))
+        self.lbl_happ_sub.setText(self.t('happ_lbl_sub'))
+        self.btn_happ_del_sub.setText(self.t('happ_btn_del_sub'))
+        self.lbl_happ_nodes.setText(self.t('happ_lbl_nodes'))
+        self.btn_happ_ping.setText(self.t('happ_btn_ping'))
+        self.btn_happ_best.setText(self.t('happ_btn_best'))
+        self.btn_happ_conn.setText(self.t('happ_btn_conn'))
+        self.btn_happ_disc.setText(self.t('happ_btn_disc'))
+        self.lbl_happ_mode.setText(self.t('happ_lbl_mode'))
+        self.lbl_happ_route.setText(self.t('happ_lbl_route'))
+        cur_hm = self.happ_mode_combo.currentData() or 'tun'
+        self.happ_mode_combo.blockSignals(True)
+        self.happ_mode_combo.setItemText(0, 'TUN (Весь ПК + ТВ)' if self.lang == 'ru' else 'TUN (System + TV)')
+        self.happ_mode_combo.setItemText(1, 'Mixed (TUN + Прокси)' if self.lang == 'ru' else 'Mixed (TUN + Proxy)')
+        self.happ_mode_combo.setItemText(2, 'Только Прокси (HTTP/SOCKS)' if self.lang == 'ru' else 'Proxy Only (HTTP/SOCKS)')
+        idx_hm = self.happ_mode_combo.findData(cur_hm)
+        if idx_hm >= 0:
+            self.happ_mode_combo.setCurrentIndex(idx_hm)
+        self.happ_mode_combo.blockSignals(False)
+
+        cur_hr = self.happ_route_combo.currentData() or 'bypass_lan_ru'
+        self.happ_route_combo.blockSignals(True)
+        self.happ_route_combo.setItemText(0, 'Без РФ и LAN (Bypass RU+LAN)' if self.lang == 'ru' else 'Bypass RU + LAN')
+        self.happ_route_combo.setItemText(1, 'Весь трафик (Global)' if self.lang == 'ru' else 'Global (All)')
+        self.happ_route_combo.setItemText(2, 'Правило подписки (happ://routing)' if self.lang == 'ru' else 'Custom (happ://routing)')
+        idx_hr = self.happ_route_combo.findData(cur_hr)
+        if idx_hr >= 0:
+            self.happ_route_combo.setCurrentIndex(idx_hr)
+        self.happ_route_combo.blockSignals(False)
+
+        self.chk_happ_frag.setText(self.t('happ_chk_frag'))
+        self.chk_happ_hwid.setText(self.t('happ_chk_hwid'))
+        self.chk_happ_sysproxy.setText(self.t('happ_chk_sysproxy'))
+        self.chk_happ_lan.setText(self.t('happ_chk_lan'))
+        self.btn_happ_desktop.setText(self.t('happ_btn_desktop'))
+        if self._happ_state:
+            self._render_happ_state(self._happ_state)
+
         self.lbl_vpn1.setText(self.t('vpn_card1'))
         self.vpn_card1_desc.setText(self.t('vpn_card1_desc'))
         self.lbl_profile.setText(self.t('lbl_profile'))
@@ -2536,6 +2775,8 @@ class NeonWindow(QMainWindow):
         self.vpn_user.setPlaceholderText(self.t('ph_vpn_user'))
         self.lbl_vpn_pass.setText(self.t('lbl_vpn_pass'))
         self.vpn_pass.setPlaceholderText(self.t('ph_vpn_pass'))
+        self.lbl_vpn_key_pass.setText(self.t('lbl_vpn_key_pass'))
+        self.vpn_key_pass.setPlaceholderText(self.t('ph_vpn_key_pass'))
         self.btn_vpn_conn.setText(self.t('btn_vpn_conn'))
         self.btn_vpn_disc.setText(self.t('btn_vpn_disc'))
         self.vpn_stat_lbl.setText(self.t('vpn_stat_lbl'))
@@ -3124,6 +3365,11 @@ class NeonWindow(QMainWindow):
         v_txt = f'{self.vpn_state}{extra}'
         self.vpn_stat_val.setText(v_txt)
         self.vpn_stat_val.setStyleSheet(f'color:{v_col};font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
+        if hasattr(self, 'happ_stat_val'):
+            prof = str(getattr(self.api, 'vpn_profile', '') or '')
+            h_txt = f'{v_txt} · {prof}' if prof.startswith('Happ:') and self.vpn_state != 'DISCONNECTED' else v_txt
+            self.happ_stat_val.setText(h_txt)
+            self.happ_stat_val.setStyleSheet(f'color:{v_col};font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
 
         if self.vpn_state == 'DISCONNECTED' and not hs and not eth:
             self.kpi_vpn.set_data(self.t('kpi_vpn_idle'), '#edf5fa', 'Conf Engine')
@@ -4233,10 +4479,22 @@ class NeonWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _on_profile_changed(self, profile_name):
         if not profile_name:
+            self._last_inspected_profile = None
             self.vpn_auth_box.setVisible(False)
+            self.vpn_auth_user_wrap.setVisible(False)
+            self.vpn_auth_key_wrap.setVisible(False)
             return
+        if self._last_inspected_profile != profile_name:
+            self.vpn_user.clear()
+            self.vpn_pass.clear()
+            self.vpn_key_pass.clear()
+            self._last_inspected_profile = profile_name
         info = self.api.inspect_profile(profile_name)
-        self.vpn_auth_box.setVisible(bool(info.get('needs_auth')))
+        need_auth = bool(info.get('needs_auth'))
+        need_ask = bool(info.get('needs_askpass'))
+        self.vpn_auth_user_wrap.setVisible(need_auth)
+        self.vpn_auth_key_wrap.setVisible(need_ask)
+        self.vpn_auth_box.setVisible(need_auth or need_ask)
 
     def browse_profile(self):
         path, _ = QFileDialog.getOpenFileName(self, 'Conf Profile', '', 'Conf profile (*.ovpn)')
@@ -4247,11 +4505,32 @@ class NeonWindow(QMainWindow):
             self.toast.show_toast(res['error'], 'error')
             return
         name = res['profile']
+        self._last_inspected_profile = None
         if self.profile_combo.findText(name) == -1:
             self.profile_combo.addItem(name)
+        self.profile_combo.blockSignals(True)
         self.profile_combo.setCurrentText(name)
+        self.profile_combo.blockSignals(False)
         self._on_profile_changed(name)
-        self.toast.show_toast('Profile selected: ' + name, 'info')
+        info = self.api.inspect_profile(name)
+        if info.get('needs_auth'):
+            self.vpn_user.setFocus()
+            self.toast.show_toast(
+                'Профиль требует логин и пароль — введите их ниже.'
+                if self.lang == 'ru'
+                else 'Profile requires username & password — enter them below.',
+                'info',
+            )
+        elif info.get('needs_askpass'):
+            self.vpn_key_pass.setFocus()
+            self.toast.show_toast(
+                'Профиль защищён паролем ключа / PKCS#12 — введите его ниже.'
+                if self.lang == 'ru'
+                else 'Profile requires key / PKCS#12 passphrase — enter it below.',
+                'info',
+            )
+        else:
+            self.toast.show_toast('Profile selected: ' + name, 'info')
 
     def refresh_profiles(self):
         def done(r):
@@ -4598,35 +4877,364 @@ class NeonWindow(QMainWindow):
         ip = self.his_ip.text().strip()
         self._run_async('his', lambda: self.api.hisense_send_key(ip, key))
 
-    def connect_vless(self):
-        link = self.vless_link.text().strip()
-        self._run_async('net', lambda: self.api.connect_vless(link),
-                        lambda r: self.vless_link.clear() if r.get('ok') else None)
-
     def connect_vpn(self):
         profile = self.profile_combo.currentText()
         if not profile:
             self.toast.show_toast('Choose a Conf profile (.ovpn) first.', 'warn')
             return
         info = self.api.inspect_profile(profile)
+        need_auth = bool(info.get('needs_auth'))
+        need_ask = bool(info.get('needs_askpass'))
+        self.vpn_auth_user_wrap.setVisible(need_auth)
+        self.vpn_auth_key_wrap.setVisible(need_ask)
+        self.vpn_auth_box.setVisible(need_auth or need_ask)
+
         username = self.vpn_user.text().strip()
         password = self.vpn_pass.text()
-        if info.get('needs_auth'):
-            self.vpn_auth_box.setVisible(True)
-            if not username or not password:
-                self.toast.show_toast('This Conf profile requires username and password.', 'warn')
+        key_passphrase = self.vpn_key_pass.text()
+
+        missing_auth = need_auth and (not username or not password)
+        missing_key = need_ask and not key_passphrase
+        if missing_auth or missing_key:
+            dlg = ConfAuthDialog(
+                self,
+                title=self.t('vpn_auth_dialog_title'),
+                hint=self.t('vpn_auth_dialog_hint'),
+                needs_auth=need_auth,
+                needs_askpass=need_ask,
+                user_label=self.t('lbl_vpn_user'),
+                pass_label=self.t('lbl_vpn_pass'),
+                key_label=self.t('lbl_vpn_key_pass'),
+                initial_user=username,
+                initial_pass=password,
+                initial_key=key_passphrase,
+                ok_text=self.t('confirm_ok'),
+                cancel_text=self.t('confirm_cancel'),
+            )
+            if dlg.exec_() != ConfAuthDialog.Accepted:
                 return
+            username, password, key_passphrase = dlg.values()
+            if need_auth:
+                self.vpn_user.setText(username)
+                self.vpn_pass.setText(password)
+            if need_ask:
+                self.vpn_key_pass.setText(key_passphrase)
+            if (need_auth and (not username or not password)) or (need_ask and not key_passphrase):
+                self.toast.show_toast(
+                    'Заполните обязательные поля пароля.' if self.lang == 'ru' else 'Fill in the required credential fields.',
+                    'warn',
+                )
+                return
+
         if not self._collect_and_validate_dns(persist=True):
             return
         self.log(f'$ start conf --config {profile}')
 
         def done(r):
-            if r.get('needs_auth'):
+            if r.get('needs_auth') or r.get('needs_askpass'):
+                self.vpn_auth_user_wrap.setVisible(bool(r.get('needs_auth')))
+                self.vpn_auth_key_wrap.setVisible(bool(r.get('needs_askpass')))
                 self.vpn_auth_box.setVisible(True)
             elif r.get('ok'):
                 self.toast.show_toast('Conf engine started in background.', 'info')
 
-        self._run_async('net', lambda: self.api.connect_vpn(profile, username, password), done)
+        self._run_async('net', lambda: self.api.connect_vpn(profile, username, password, key_passphrase), done)
+
+    # ------------------------------------------------------------------
+    # Built-in Happ / Xray-core + sing-box Actions
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _fmt_bytes(num):
+        try:
+            n = float(num)
+        except (TypeError, ValueError):
+            return ''
+        for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+            if n < 1024.0:
+                return f'{n:.1f} {unit}' if unit != 'B' else f'{int(n)} B'
+            n /= 1024.0
+        return f'{n:.1f} PB'
+
+    def _render_happ_state(self, state):
+        if not isinstance(state, dict) or not hasattr(self, 'happ_sub_combo'):
+            return
+        self._happ_state = state
+        subs = state.get('subscriptions') or []
+        active_sub_id = state.get('active_sub_id')
+        active_node_id = state.get('active_node_id')
+
+        self.happ_sub_combo.blockSignals(True)
+        self.happ_sub_combo.clear()
+        for s in subs:
+            cnt = len(s.get('nodes') or [])
+            self.happ_sub_combo.addItem(f"{s.get('title', 'Sub')} ({cnt})", s.get('id'))
+        if active_sub_id:
+            sidx = self.happ_sub_combo.findData(active_sub_id)
+            if sidx >= 0:
+                self.happ_sub_combo.setCurrentIndex(sidx)
+        self.happ_sub_combo.blockSignals(False)
+
+        active_sub = next((s for s in subs if s.get('id') == active_sub_id), subs[0] if subs else None)
+        if active_sub:
+            meta = active_sub.get('meta') or {}
+            parts = []
+            uinfo = meta.get('userinfo') or {}
+            if uinfo.get('summary'):
+                parts.append(uinfo['summary'])
+            ann = meta.get('announce')
+            if ann:
+                parts.append(str(ann)[:90])
+            self.happ_sub_info.setText(
+                ' · '.join(parts) if parts else (active_sub.get('title') or 'Local import')
+            )
+            self.happ_sub_info.setVisible(True)
+        else:
+            self.happ_sub_info.setText(
+                'Нет подписок — вставьте ссылку выше.' if self.lang == 'ru' else 'No subscriptions yet — paste a link above.'
+            )
+            self.happ_sub_info.setVisible(True)
+
+        self.happ_node_list.blockSignals(True)
+        self.happ_node_list.clear()
+        nodes = (active_sub.get('nodes') or []) if active_sub else []
+        for n in nodes:
+            sel = n.get('id') == active_node_id
+            proto = str(n.get('protocol', '')).upper()
+            summary = str(n.get('summary') or proto)
+            lat = n.get('latency_ms')
+            if isinstance(lat, (int, float)) and lat > 0:
+                lat_tag = f'  ·  {int(lat)} ms'
+                color = '#5ef2a0' if lat < 130 else ('#ffd166' if lat < 260 else '#ff9e66')
+            elif lat == -1:
+                lat_tag = '  ·  timeout'
+                color = '#ff8292'
+            else:
+                lat_tag = ''
+                color = '#d9ebf5'
+            mark = '✓ ' if sel else '   '
+            item = QListWidgetItem(f"{mark}{n.get('name', 'Node')}  [{summary}]{lat_tag}")
+            item.setData(Qt.UserRole, (active_sub['id'], n['id']))
+            item.setForeground(QColor('#72ffab' if sel else color))
+            self.happ_node_list.addItem(item)
+            if sel:
+                self.happ_node_list.setCurrentItem(item)
+        self.happ_node_list.blockSignals(False)
+
+        cfg = state.get('settings') or {}
+        for combo, key in ((self.happ_mode_combo, 'mode'), (self.happ_route_combo, 'routing_mode')):
+            combo.blockSignals(True)
+            idx = combo.findData(cfg.get(key))
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
+
+        for sw, key, default in (
+            (self.chk_happ_frag, 'fragment_enabled', False),
+            (self.chk_happ_hwid, 'send_hwid', True),
+            (self.chk_happ_sysproxy, 'system_proxy', True),
+            (self.chk_happ_lan, 'allow_lan', False),
+        ):
+            sw.blockSignals(True)
+            sw.setChecked(bool(cfg.get(key, default)))
+            sw.blockSignals(False)
+
+        lan_ips = state.get('lan_ips') or []
+        hp = int(cfg.get('http_port') or 10809)
+        sp = int(cfg.get('socks_port') or 10808)
+        if cfg.get('allow_lan') and lan_ips:
+            self.happ_lan_hint.setText(f"TV Proxy: http://{lan_ips[0]}:{hp}  ·  socks5://{lan_ips[0]}:{sp}")
+            self.happ_lan_hint.setVisible(True)
+        else:
+            self.happ_lan_hint.setVisible(False)
+
+        eng = state.get('engines') or {}
+        x_ok = 'OK' if eng.get('xray_ready') else 'missing'
+        s_ok = 'OK' if eng.get('singbox_ready') else 'missing'
+        hd = eng.get('happ_desktop_path') or ''
+        if hd:
+            self.happ_desktop_lbl.setText(
+                f"Xray: {x_ok} · sing-box: {s_ok} · Happ Desktop: {hd}"
+            )
+            self.btn_happ_desktop.setVisible(True)
+        else:
+            self.happ_desktop_lbl.setText(
+                (f"Ядра: Xray ({x_ok}) + sing-box ({s_ok}) · Happ Desktop не установлен"
+                 if self.lang == 'ru'
+                 else f"Engines: Xray ({x_ok}) + sing-box ({s_ok}) · Happ Desktop not installed")
+            )
+            self.btn_happ_desktop.setVisible(bool(self._last_happ_crypt_uri))
+
+    def happ_refresh_ui(self):
+        try:
+            st = self.api.happ_get_state()
+        except Exception:
+            return
+        if st.get('ok'):
+            self._render_happ_state(st)
+
+    def happ_paste_input(self):
+        cb = QApplication.clipboard()
+        if cb is not None:
+            txt = (cb.text() or '').strip()
+            if txt:
+                self.happ_input.setText(txt)
+                self.happ_input.setFocus()
+
+    def happ_import_clicked(self):
+        raw = self.happ_input.text().strip()
+        if not raw:
+            self.toast.show_toast(
+                'Вставьте ссылку подписки, happ:// или прокси-URI.'
+                if self.lang == 'ru'
+                else 'Paste a subscription URL, happ:// link, or proxy URI.',
+                'warn',
+            )
+            return
+
+        def done(r):
+            if r.get('crypt_link'):
+                self._last_happ_crypt_uri = raw
+                self.btn_happ_desktop.setVisible(True)
+                self.toast.show_toast(r.get('error', 'happ://crypt requires Happ Desktop.'), 'warn')
+                return
+            if r.get('ok'):
+                self._last_happ_crypt_uri = ''
+                self.happ_input.clear()
+                self._render_happ_state(r)
+                if r.get('routing_imported'):
+                    self.toast.show_toast(
+                        f"Правило маршрутизации сохранено: {r['routing_imported'].get('name', 'Custom')}"
+                        if self.lang == 'ru'
+                        else f"Routing rule saved: {r['routing_imported'].get('name', 'Custom')}",
+                        'info',
+                    )
+                else:
+                    sub = r.get('subscription') or {}
+                    cnt = len(sub.get('nodes') or [])
+                    self.toast.show_toast(
+                        f"Импортировано: {sub.get('title', 'Sub')} ({cnt})"
+                        if self.lang == 'ru'
+                        else f"Imported: {sub.get('title', 'Sub')} ({cnt} nodes)",
+                        'info',
+                    )
+
+        self._run_async('net', lambda: self.api.happ_import(raw), done, 'Импорт подписки')
+
+    def happ_update_clicked(self):
+        def done(r):
+            if r.get('ok'):
+                self._render_happ_state(r)
+                self.toast.show_toast(
+                    f"Обновлено подписок: {r.get('updated_count', 0)}"
+                    if self.lang == 'ru'
+                    else f"Updated subscriptions: {r.get('updated_count', 0)}",
+                    'info',
+                )
+
+        self._run_async('net', lambda: self.api.happ_update_subscription(), done, 'Обновление подписок')
+
+    def happ_delete_sub_clicked(self):
+        sub_id = self.happ_sub_combo.currentData()
+        if not sub_id:
+            return
+        title = self.happ_sub_combo.currentText()
+        dlg = ConfirmDialog(
+            self,
+            'Удалить подписку?' if self.lang == 'ru' else 'Delete subscription?',
+            title,
+            self.t('confirm_ok'),
+            self.t('confirm_cancel'),
+            danger=True,
+        )
+        if dlg.exec_() != ConfirmDialog.Accepted:
+            return
+
+        def done(r):
+            if r.get('ok'):
+                self._render_happ_state(r)
+                self.toast.show_toast('Подписка удалена.' if self.lang == 'ru' else 'Subscription removed.', 'info')
+
+        self._run_async('net', lambda: self.api.happ_delete_subscription(sub_id), done)
+
+    def _on_happ_sub_changed(self, _idx):
+        sub_id = self.happ_sub_combo.currentData()
+        if not sub_id:
+            return
+        subs = self._happ_state.get('subscriptions') or []
+        sub = next((s for s in subs if s.get('id') == sub_id), None)
+        if sub and sub.get('nodes'):
+            first_node_id = sub['nodes'][0].get('id')
+            res = self.api.happ_select_node(sub_id, first_node_id)
+            if res.get('ok'):
+                self._render_happ_state(res)
+
+    def _on_happ_node_clicked(self, item):
+        data = item.data(Qt.UserRole)
+        if not data:
+            return
+        sub_id, node_id = data
+        res = self.api.happ_select_node(sub_id, node_id)
+        if res.get('ok'):
+            self._render_happ_state(res)
+
+    def happ_ping_clicked(self):
+        sub_id = self.happ_sub_combo.currentData()
+
+        def done(r):
+            if r.get('ok'):
+                self._render_happ_state(r)
+                self.toast.show_toast('Пинг завершён.' if self.lang == 'ru' else 'Latency check finished.', 'info')
+
+        self._run_async('net', lambda: self.api.happ_ping_nodes(sub_id), done, 'Проверка пинга')
+
+    def happ_best_clicked(self):
+        sub_id = self.happ_sub_combo.currentData()
+
+        def done(r):
+            if r.get('ok'):
+                self._render_happ_state(r)
+                best = r.get('fastest_node') or {}
+                if best:
+                    self.toast.show_toast(
+                        f"Лучший: {best.get('name', '')} ({best.get('latency_ms')} ms)",
+                        'info',
+                    )
+                else:
+                    self.toast.show_toast('Нет доступных узлов.' if self.lang == 'ru' else 'No reachable nodes.', 'warn')
+
+        self._run_async('net', lambda: self.api.happ_select_fastest(sub_id), done, 'Поиск быстрого узла')
+
+    def happ_settings_changed(self):
+        patch = {
+            'mode': self.happ_mode_combo.currentData() or 'tun',
+            'routing_mode': self.happ_route_combo.currentData() or 'bypass_lan_ru',
+            'fragment_enabled': self.chk_happ_frag.isChecked(),
+            'send_hwid': self.chk_happ_hwid.isChecked(),
+            'system_proxy': self.chk_happ_sysproxy.isChecked(),
+            'allow_lan': self.chk_happ_lan.isChecked(),
+        }
+        res = self.api.happ_update_settings(patch)
+        if res.get('ok'):
+            self._render_happ_state(res)
+
+    def happ_connect_clicked(self):
+        sub_id = self.happ_sub_combo.currentData()
+        cur = self.happ_node_list.currentItem()
+        node_id = cur.data(Qt.UserRole)[1] if (cur and cur.data(Qt.UserRole)) else None
+
+        def done(r):
+            if r.get('ok'):
+                self.toast.show_toast(r.get('output', 'Started.'), 'info')
+
+        self._run_async('net', lambda: self.api.happ_connect(sub_id, node_id), done, 'Запуск прокси/туннеля')
+
+    def happ_open_desktop_clicked(self):
+        uri = self._last_happ_crypt_uri or self.happ_input.text().strip()
+        self._run_async(
+            'net',
+            lambda: self.api.happ_open_in_official(uri),
+            lambda r: self.toast.show_toast(r.get('output', ''), 'info') if r.get('ok') else None,
+        )
 
     def disconnect_vpn(self):
         self.log('$ disconnect conf engine + stop NEON sharing')
@@ -5088,10 +5696,20 @@ class NeonWindow(QMainWindow):
         )
 
         ovpn = diag.get('openvpn_path', '')
+        xr = bool(diag.get('xray_path'))
+        sb = bool(diag.get('singbox_path'))
+        core_notes = []
+        if xr:
+            core_notes.append('Xray')
+        if sb:
+            core_notes.append('sing-box')
+        detail_ovpn = ovpn or 'Install Conf runtime package once'
+        if core_notes:
+            detail_ovpn = f"{detail_ovpn} · Embedded: {' + '.join(core_notes)}"
         self.diag_ovpn_card.set_data(
-            'INSTALLED' if ovpn else 'NOT FOUND',
-            '#5ef2a0' if ovpn else '#ff8292',
-            ovpn or 'Install Conf runtime package once',
+            'INSTALLED' if (ovpn or core_notes) else 'NOT FOUND',
+            '#5ef2a0' if (ovpn or core_notes) else '#ff8292',
+            detail_ovpn,
         )
 
         hosted = diag.get('hosted_network_supported')
