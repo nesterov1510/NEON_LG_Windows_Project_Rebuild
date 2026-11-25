@@ -16,6 +16,8 @@ SINGBOX_SHA256 = 'd7d4dc70328eb60b5dd90125bab31b0913c0370ee730e55acd5034a7e1bd19
 XRAY_VERSION = 'v26.11.9'
 XRAY_URL = 'https://github.com/XTLS/Xray-core/releases/download/' + XRAY_VERSION + '/Xray-windows-64.zip'
 XRAY_SHA256 = '1262522266337b824f07beb8e1375786b437683b3890105469088f8e17e0a69d'
+XRAY_WIN7_URL = 'https://github.com/XTLS/Xray-core/releases/download/' + XRAY_VERSION + '/Xray-win7-64.zip'
+XRAY_WIN7_SHA256 = 'df87ef380c58d3e2286b4e49834f4b6a4819a8155ebf9124b4610b0d8148af7e'
 
 DEST_DIR = Path(__file__).resolve().parents[1] / 'assets/vless'
 DEST = DEST_DIR / 'sing-box.exe'
@@ -31,7 +33,7 @@ def _download_verified(url, expected_sha256, max_bytes=60 * 1024 * 1024):
     return archive
 
 
-def stage():
+def stage(win7=False):
     DEST_DIR.mkdir(parents=True, exist_ok=True)
     sb_archive = _download_verified(SINGBOX_URL, SINGBOX_SHA256)
     with zipfile.ZipFile(io.BytesIO(sb_archive)) as z:
@@ -39,15 +41,17 @@ def stage():
         DEST.write_bytes(z.read(member))
     print('Staged verified Windows sing-box engine:', DEST)
 
-    xr_archive = _download_verified(XRAY_URL, XRAY_SHA256)
+    xr_url = XRAY_WIN7_URL if win7 else XRAY_URL
+    xr_sha = XRAY_WIN7_SHA256 if win7 else XRAY_SHA256
+    xr_archive = _download_verified(xr_url, xr_sha)
     with zipfile.ZipFile(io.BytesIO(xr_archive)) as z:
         names = {n.rsplit('/', 1)[-1]: n for n in z.namelist() if not n.endswith('/')}
         if 'xray.exe' not in names:
-            raise ValueError('xray.exe not found inside Xray-windows-64.zip')
+            raise ValueError('xray.exe not found inside ' + xr_url.rsplit('/', 1)[-1])
         for fname in ('xray.exe', 'geoip.dat', 'geosite.dat'):
             if fname in names:
                 (DEST_DIR / fname).write_bytes(z.read(names[fname]))
-    print('Staged verified Windows Xray-core engine:', XRAY_DEST)
+    print(f'Staged verified Windows Xray-core engine ({"win7/8.1+" if win7 else "win10+"}):', XRAY_DEST)
 
 
 def _format_proc_error(result):
@@ -133,12 +137,28 @@ def check():
         mode='proxy',
         settings={'routing_mode': 'bypass_lan_ru'},
     ))
+
+    sample_vless_dom = happ_client.parse_proxy_uri(
+        'vless://00000000-0000-4000-8000-000000000001@vpn.example.org:443?security=tls&sni=vpn.example.org#VlessDom'
+    )
+    _run_singbox_check(happ_client.build_singbox_config(
+        sample_vless_dom,
+        mode='tun',
+        extra_excludes=['198.51.100.30/32', '8.8.8.8/32'],
+        settings={'routing_mode': 'bypass_lan_ru', 'tun_stack': 'gvisor', 'tun_ipv6': False},
+        predefined_hosts={'vpn.example.org': ['198.51.100.30']},
+    ))
+    _run_singbox_check(happ_client.build_singbox_config(
+        sample_vless_dom,
+        mode='tun',
+        settings={'routing_mode': 'global', 'tun_stack': 'mixed', 'tun_ipv6': True, 'dns_server': '77.88.8.8'},
+    ))
     print('Verified sing-box + Xray-core configs successfully.')
 
 
 if __name__ == '__main__':
     try:
-        stage()
+        stage(win7='--win7' in sys.argv)
         if '--check' in sys.argv:
             check()
     except Exception as exc:

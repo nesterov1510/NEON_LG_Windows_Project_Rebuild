@@ -1,10 +1,21 @@
 """Convert a VLESS share link into an in-memory sing-box Windows TUN config."""
 import ipaddress
+import platform
 import re
+import sys
 import uuid
 from urllib.parse import parse_qsl, urlsplit
 
 ADAPTER = 'NEON-VLESS'
+
+
+def _is_windows_below_10():
+    if platform.system() != 'Windows':
+        return False
+    try:
+        return sys.getwindowsversion().major < 10
+    except Exception:
+        return False
 
 
 _TUN_ROUTE_EXCLUDES = [
@@ -71,11 +82,18 @@ def configuration(link):
     elif transport == 'grpc':
         outbound['transport'] = {'type': 'grpc', 'service_name': q.get('serviceName', '')}
     return {'log': {'level': 'info'},
-            'inbounds': [{'type': 'tun', 'interface_name': ADAPTER, 'auto_route': True, 'strict_route': True,
-                          'address': ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
+            'certificate': {'store': 'mozilla'},
+            'inbounds': [{'type': 'tun', 'interface_name': ADAPTER, 'stack': 'gvisor', 'mtu': 1500,
+                          'auto_route': True, 'strict_route': not _is_windows_below_10(),
+                          'address': ['172.19.0.1/30'],
                           'route_exclude_address': list(_TUN_ROUTE_EXCLUDES)}],
             'outbounds': [outbound],
-            'dns': {'servers': [{'type': 'local', 'tag': 'bootstrap'},
-                                {'type': 'tcp', 'tag': 'tunnel-dns', 'server': '1.1.1.1', 'detour': 'vpn'}],
-                    'final': 'tunnel-dns'},
-            'route': {'auto_detect_interface': True, 'rules': [{'port': 53, 'action': 'hijack-dns'}], 'final': 'vpn'}}
+            'dns': {'servers': [{'type': 'local', 'tag': 'bootstrap', 'prefer_go': True},
+                                {'type': 'https', 'tag': 'tunnel-dns', 'server': '1.1.1.1',
+                                 'path': '/dns-query', 'detour': 'vpn'}],
+                    'final': 'tunnel-dns',
+                    'strategy': 'ipv4_only'},
+            'route': {'auto_detect_interface': True,
+                      'default_domain_resolver': 'bootstrap',
+                      'rules': [{'action': 'sniff'}, {'port': 53, 'action': 'hijack-dns'}],
+                      'final': 'vpn'}}

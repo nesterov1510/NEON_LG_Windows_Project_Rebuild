@@ -11,6 +11,7 @@ import platform
 import re
 import socket
 import ssl
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -30,6 +31,21 @@ HAPP_DESKTOP_RELEASES_URL = 'https://github.com/Happ-proxy/happ-desktop/releases
 DEFAULT_DNS_SERVER = '1.1.1.1'
 DEFAULT_SOCKS_PORT = 10808
 DEFAULT_HTTP_PORT = 10809
+_DOH_CAPABLE_DNS = frozenset({
+    '1.1.1.1', '1.0.0.1',
+    '8.8.8.8', '8.8.4.4',
+    '9.9.9.9', '149.112.112.112',
+    '94.140.14.14', '94.140.15.15',
+})
+
+
+def _is_windows_below_10():
+    if platform.system() != 'Windows':
+        return False
+    try:
+        return sys.getwindowsversion().major < 10
+    except Exception:
+        return False
 
 SUPPORTED_SCHEMES = (
     'vless',
@@ -1513,7 +1529,53 @@ def ping_nodes_parallel(nodes, timeout=2.5, max_workers=12):
     return results
 
 
-def _resolve_server_ips(host):
+def _resolve_domain_doh(host, timeout=2.5):
+    """Best-effort DoH A-record lookup when the OS resolver fails or is poisoned."""
+    h = str(host or '').strip()
+    if not h or ':' in h:
+        return []
+    try:
+        ipaddress.ip_address(h)
+        return []
+    except ValueError:
+        pass
+    ctx = None
+    try:
+        ctx = ssl.create_default_context(cafile=certifi.where()) if certifi else ssl.create_default_context()
+    except Exception:
+        ctx = None
+    q_name = urllib.parse.quote(h, safe='')
+    endpoints = (
+        f'https://1.1.1.1/dns-query?name={q_name}&type=A',
+        f'https://8.8.8.8/resolve?name={q_name}&type=A',
+    )
+    out = []
+    for url in endpoints:
+        req = urllib.request.Request(url, headers={'Accept': 'application/dns-json', 'User-Agent': HAPP_USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                data = json.loads(resp.read(65536).decode('utf-8', errors='replace'))
+        except Exception:
+            continue
+        for ans in data.get('Answer') or []:
+            if int(ans.get('type') or 0) != 1:
+                continue
+            addr = str(ans.get('data') or '').strip()
+            try:
+                ip_obj = ipaddress.ip_address(addr)
+            except ValueError:
+                continue
+            if ip_obj.version != 4 or ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast:
+                continue
+            cidr = f'{ip_obj}/32'
+            if cidr not in out:
+                out.append(cidr)
+        if out:
+            break
+    return out
+
+
+def _resolve_server_ips(host, doh_fallback=False):
     """Resolve server domain to IPv4/IPv6 CIDR strings BEFORE starting TUN to prevent routing loops."""
     ips = []
     h = str(host or '').strip()
@@ -1526,7 +1588,7 @@ def _resolve_server_ips(host):
     except ValueError:
         pass
     try:
-        for res in socket.getaddrinfo(h, None, proto=socket.IPPROTO_TCP):
+        for res in socket.getaddrinfo(h, None):
             addr = res[4][0].split('%', 1)[0]
             try:
                 ip_obj = ipaddress.ip_address(addr)
@@ -1539,6 +1601,10 @@ def _resolve_server_ips(host):
                 continue
     except Exception:
         pass
+    if not ips and doh_fallback:
+        for cidr in _resolve_domain_doh(h):
+            if cidr not in ips:
+                ips.append(cidr)
     return ips
 
 
@@ -2209,6 +2275,25 @@ def _singbox_ip_rule(items, target_key, val):
     return rule
 
 
+def _clean_tun_excludes(extra_excludes):
+    excludes = list(vless._TUN_ROUTE_EXCLUDES)
+    tun_net = ipaddress.ip_network('172.19.0.0/30')
+    for raw in extra_excludes or []:
+        s = str(raw or '').strip()
+        if not s:
+            continue
+        try:
+            net = ipaddress.ip_network(s, strict=False)
+        except ValueError:
+            continue
+        if net.version == 4 and net.overlaps(tun_net):
+            continue
+        cidr = str(net)
+        if cidr not in excludes:
+            excludes.append(cidr)
+    return excludes
+
+
 def build_singbox_config(
     node=None,
     mode='tun',
@@ -2218,22 +2303,38 @@ def build_singbox_config(
     http_port=DEFAULT_HTTP_PORT,
     settings=None,
     routing_profile=None,
+    predefined_hosts=None,
 ):
     """Build a sing-box 1.14.4 config either directly or as a TUN bridge over Xray SOCKS5."""
     st = settings or {}
     mode = str(mode or 'tun').lower()
+    enable_ipv6 = bool(st.get('tun_ipv6', False))
+    raw_stack = str(st.get('tun_stack') or 'gvisor').strip().lower()
+    if raw_stack == 'auto':
+        tun_stack = 'gvisor' if _is_windows_below_10() else 'mixed'
+    elif raw_stack in ('gvisor', 'mixed', 'system'):
+        tun_stack = raw_stack
+    else:
+        tun_stack = 'gvisor'
+    try:
+        tun_mtu = int(st.get('tun_mtu') or 1500)
+    except (TypeError, ValueError):
+        tun_mtu = 1500
+    tun_mtu = max(1280, min(9000, tun_mtu))
+    strict_route = bool(st['strict_route']) if 'strict_route' in st else (not _is_windows_below_10())
+
     inbounds = []
     if mode in ('tun', 'mixed'):
-        excludes = list(vless._TUN_ROUTE_EXCLUDES)
-        for cidr in extra_excludes or []:
-            if cidr and cidr not in excludes:
-                excludes.append(cidr)
+        excludes = _clean_tun_excludes(extra_excludes)
+        tun_addrs = ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'] if enable_ipv6 else ['172.19.0.1/30']
         inbounds.append({
             'type': 'tun',
             'interface_name': vless.ADAPTER,
+            'stack': tun_stack,
+            'mtu': tun_mtu,
             'auto_route': True,
-            'strict_route': True,
-            'address': ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
+            'strict_route': strict_route,
+            'address': tun_addrs,
             'route_exclude_address': excludes,
         })
     if mode in ('proxy', 'mixed'):
@@ -2252,6 +2353,25 @@ def build_singbox_config(
         }
     else:
         vpn_outbound = _singbox_outbound_for_node(node)
+
+    clean_hosts = {}
+    for host_key, addr_list in (predefined_hosts or {}).items():
+        hk = str(host_key or '').strip()
+        if not hk:
+            continue
+        valid_addrs = []
+        for a in addr_list or []:
+            s = str(a or '').split('/', 1)[0].strip()
+            try:
+                ip_obj = ipaddress.ip_address(s)
+                if ip_obj.version == 4 or enable_ipv6:
+                    valid_addrs.append(str(ip_obj))
+            except ValueError:
+                continue
+        if valid_addrs:
+            clean_hosts[hk] = valid_addrs
+    if clean_hosts and vpn_outbound.get('server') in clean_hosts:
+        vpn_outbound['domain_resolver'] = 'bootstrap-hosts'
 
     outbounds = [vpn_outbound, {'type': 'direct', 'tag': 'direct'}]
     rules = [{'action': 'sniff'}]
@@ -2282,17 +2402,30 @@ def build_singbox_config(
                 final_out = 'direct'
 
     dns_ip = str(st.get('dns_server') or DEFAULT_DNS_SERVER).strip() or DEFAULT_DNS_SERVER
+    dns_servers = [{'type': 'local', 'tag': 'bootstrap', 'prefer_go': True}]
+    if clean_hosts:
+        dns_servers.append({'type': 'hosts', 'tag': 'bootstrap-hosts', 'predefined': clean_hosts})
+    if dns_ip in _DOH_CAPABLE_DNS:
+        dns_servers.append({
+            'type': 'https',
+            'tag': 'tunnel-dns',
+            'server': dns_ip,
+            'path': '/dns-query',
+            'detour': 'vpn',
+        })
+    else:
+        dns_servers.append({'type': 'udp', 'tag': 'tunnel-dns', 'server': dns_ip, 'detour': 'vpn'})
+
+    dns_cfg = {'servers': dns_servers, 'final': 'tunnel-dns'}
+    if not enable_ipv6:
+        dns_cfg['strategy'] = 'ipv4_only'
+
     return {
         'log': {'level': 'info'},
+        'certificate': {'store': 'mozilla'},
         'inbounds': inbounds,
         'outbounds': outbounds,
-        'dns': {
-            'servers': [
-                {'type': 'local', 'tag': 'bootstrap'},
-                {'type': 'tcp', 'tag': 'tunnel-dns', 'server': dns_ip, 'detour': 'vpn'},
-            ],
-            'final': 'tunnel-dns',
-        },
+        'dns': dns_cfg,
         'route': {
             'auto_detect_interface': True,
             'default_domain_resolver': 'bootstrap',
@@ -2309,6 +2442,8 @@ def can_singbox_run(node):
         return False
     if (node.get('transport') or '') in ('xhttp', 'splithttp', 'kcp'):
         return False
+    if (node.get('params') or {}).get('encryption') not in (None, '', 'none'):
+        return False
     return True
 
 
@@ -2318,6 +2453,8 @@ def requires_xray_engine(node, settings=None):
     if node.get('protocol') == 'xray_json':
         return True
     if (node.get('transport') or '') in ('xhttp', 'splithttp', 'kcp'):
+        return True
+    if (node.get('params') or {}).get('encryption') not in (None, '', 'none'):
         return True
     st = settings or {}
     if st.get('fragment_enabled') and node.get('security') in ('tls', 'reality') and node.get('transport') in ('tcp', 'raw', 'ws', 'httpupgrade', 'xhttp'):
@@ -2386,6 +2523,9 @@ class HappStore:
                 'fragment_length': '10-30',
                 'fragment_interval': '5-10',
                 'dns_server': DEFAULT_DNS_SERVER,
+                'tun_stack': 'gvisor',   # gvisor | mixed | system | auto
+                'tun_ipv6': False,
+                'tun_mtu': 1500,
                 'send_hwid': True,
                 'auto_update': False,
                 'system_proxy': True,

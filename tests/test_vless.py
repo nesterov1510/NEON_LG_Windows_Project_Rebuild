@@ -15,7 +15,13 @@ def test_tls_websocket_tun():
     proxy, = cfg['outbounds']
     assert proxy['transport'] == {'type': 'ws', 'path': '/service', 'headers': {'Host': 'ws.example'}}
     assert proxy['tls'] == {'enabled': True, 'server_name': 'vpn.example'}
-    assert cfg['inbounds'][0]['auto_route'] and cfg['route']['final'] == proxy['tag']
+    tun = cfg['inbounds'][0]
+    assert tun['auto_route'] and cfg['route']['final'] == proxy['tag']
+    assert tun['stack'] == 'gvisor' and tun['mtu'] == 1500
+    assert tun['address'] == ['172.19.0.1/30']
+    assert cfg['certificate'] == {'store': 'mozilla'}
+    assert cfg['dns']['strategy'] == 'ipv4_only'
+    assert any(s.get('type') == 'https' and s.get('tag') == 'tunnel-dns' for s in cfg['dns']['servers'])
 
 
 def test_reality_grpc():

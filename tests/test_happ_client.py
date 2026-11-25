@@ -210,11 +210,29 @@ def test_build_xray_and_singbox_configs_and_routing(tmp_path):
         settings={'routing_mode': 'global'},
     )
     tun_in = next(i for i in scfg_bridge['inbounds'] if i['type'] == 'tun')
-    assert tun_in['address'] == ['172.19.0.1/30', 'fdfe:dcba:9876::1/126']
+    assert tun_in['address'] == ['172.19.0.1/30']
+    assert tun_in['stack'] == 'gvisor'
+    assert tun_in['mtu'] == 1500
     assert '203.0.113.10/32' in tun_in['route_exclude_address']
+    assert scfg_bridge['certificate'] == {'store': 'mozilla'}
+    assert scfg_bridge['dns']['strategy'] == 'ipv4_only'
+    assert any(s.get('type') == 'https' and s.get('tag') == 'tunnel-dns' and s.get('path') == '/dns-query' for s in scfg_bridge['dns']['servers'])
     assert scfg_bridge['route']['default_domain_resolver'] == 'bootstrap'
     assert any(o.get('type') == 'socks' and o.get('server_port') == 18080 and o.get('domain_resolver') == 'bootstrap' for o in scfg_bridge['outbounds'])
     assert any(r.get('process_name') == ['xray.exe'] and r.get('outbound') == 'direct' for r in scfg_bridge['route']['rules'])
+
+    # Optional IPv6 TUN + custom non-DoH DNS server + explicit mixed stack
+    scfg_ipv6 = happ_client.build_singbox_config(
+        mode='tun',
+        upstream_socks_port=18080,
+        settings={'tun_ipv6': True, 'tun_stack': 'mixed', 'tun_mtu': 1420, 'dns_server': '77.88.8.8'},
+    )
+    tun_v6 = next(i for i in scfg_ipv6['inbounds'] if i['type'] == 'tun')
+    assert tun_v6['address'] == ['172.19.0.1/30', 'fdfe:dcba:9876::1/126']
+    assert tun_v6['stack'] == 'mixed'
+    assert tun_v6['mtu'] == 1420
+    assert 'strategy' not in scfg_ipv6['dns']
+    assert any(s.get('type') == 'udp' and s.get('server') == '77.88.8.8' for s in scfg_ipv6['dns']['servers'])
 
     # sing-box standalone Hysteria2
     node_hy2 = happ_client.parse_proxy_uri(SAMPLE_HY2)
@@ -531,5 +549,119 @@ proxies:
         assert res2['plan'] == 'singbox_tun'
         written_cfg2 = json.loads(proc2.stdin.write.call_args[0][0])
         assert any(o.get('type') == 'hysteria2' and o.get('password') == 'usr:pw' for o in written_cfg2['outbounds'])
+    finally:
+        api.close()
+
+
+def test_win81_tun_excludes_doh_bootstrap_logging_and_xray_fallback(tmp_path, monkeypatch):
+    import io
+    import importlib.util
+
+    # 1. Windows < 10 disables strict_route and picks gvisor under tun_stack='auto'
+    with mock.patch('happ_client._is_windows_below_10', return_value=True):
+        node_dom = happ_client.parse_proxy_uri(
+            'vless://11111111-1111-4111-8111-111111111111@vpn.example.org:443?security=tls&sni=vpn.example.org#Dom'
+        )
+        cfg81 = happ_client.build_singbox_config(
+            node=node_dom,
+            mode='tun',
+            extra_excludes=['198.51.100.50/32', '8.8.8.8/32', '172.19.0.1/32'],
+            settings={'tun_stack': 'auto'},
+            predefined_hosts={'vpn.example.org': ['198.51.100.50']},
+        )
+    tun81 = cfg81['inbounds'][0]
+    assert tun81['strict_route'] is False
+    assert tun81['stack'] == 'gvisor'
+    assert tun81['mtu'] == 1500
+    assert tun81['address'] == ['172.19.0.1/30']
+    assert '198.51.100.50/32' in tun81['route_exclude_address']
+    assert '8.8.8.8/32' in tun81['route_exclude_address']
+    assert '172.19.0.1/32' not in tun81['route_exclude_address']
+    assert cfg81['outbounds'][0]['domain_resolver'] == 'bootstrap-hosts'
+    assert any(s.get('type') == 'hosts' and s.get('tag') == 'bootstrap-hosts' and s['predefined'] == {'vpn.example.org': ['198.51.100.50']} for s in cfg81['dns']['servers'])
+
+    # 2. singbox_tun passes server IPs (with DoH fallback) + uplink DNS CIDRs into route_exclude_address
+    monkeypatch.setenv('APPDATA', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path))
+    api = Api()
+    try:
+        api.happ_import('vless://11111111-1111-4111-8111-111111111111@blocked.example.org:443?security=tls#Blocked')
+        (tmp_path / 'xray.exe').write_bytes(b'MZ')
+        (tmp_path / 'sing-box.exe').write_bytes(b'MZ')
+        sb_proc = mock.MagicMock()
+        sb_proc.poll.return_value = None
+        sb_proc.stdin = mock.MagicMock()
+        sb_proc.stdout = io.StringIO('INFO[0000] sing-box started (0.05s)\n')
+        with mock.patch('platform.system', return_value='Windows'), \
+             mock.patch.object(api, '_xray_exe', return_value=str(tmp_path / 'xray.exe')), \
+             mock.patch.object(api, '_singbox_exe', return_value=str(tmp_path / 'sing-box.exe')), \
+             mock.patch('happ_client.socket.getaddrinfo', side_effect=OSError('blocked dns')), \
+             mock.patch('happ_client._resolve_domain_doh', return_value=['203.0.113.77/32']), \
+             mock.patch.object(api, '_collect_uplink_dns_cidrs', return_value=['77.88.8.8/32']), \
+             mock.patch.object(api, '_clear_stale_local_proxy', return_value=True), \
+             mock.patch('subprocess.Popen', return_value=sb_proc), \
+             mock.patch('core.threading.Thread'):
+            res = api.happ_connect()
+        assert res['ok'] is True
+        assert res['plan'] == 'singbox_tun'
+        sent = json.loads(sb_proc.stdin.write.call_args[0][0])
+        tun_excl = sent['inbounds'][0]['route_exclude_address']
+        assert '203.0.113.77/32' in tun_excl
+        assert '77.88.8.8/32' in tun_excl
+        assert sent['outbounds'][0]['domain_resolver'] == 'bootstrap-hosts'
+        assert any('Cleared stale local system proxy' in ln for ln in api.vpn_logs)
+
+        # 3. xray_proxy falls back cleanly to singbox_proxy if xray.exe cannot run on Win 8.1
+        api.openvpn_process = None
+        api.happ_update_settings({'mode': 'proxy', 'system_proxy': False})
+        sb_proxy_proc = mock.MagicMock()
+        sb_proxy_proc.poll.return_value = None
+        sb_proxy_proc.stdin = mock.MagicMock()
+
+        def fake_popen(cmd, **kwargs):
+            if 'xray' in os.path.basename(cmd[0]).lower():
+                raise OSError('Win32 error 127: ProcessPrng missing')
+            return sb_proxy_proc
+
+        with mock.patch('platform.system', return_value='Windows'), \
+             mock.patch.object(api, '_xray_exe', return_value=str(tmp_path / 'xray.exe')), \
+             mock.patch.object(api, '_singbox_exe', return_value=str(tmp_path / 'sing-box.exe')), \
+             mock.patch('happ_client.socket.getaddrinfo', return_value=[]), \
+             mock.patch('happ_client._resolve_domain_doh', return_value=[]), \
+             mock.patch('subprocess.Popen', side_effect=fake_popen), \
+             mock.patch('core.threading.Thread'):
+            fb = api.happ_connect()
+        assert fb['ok'] is True
+        assert fb['plan'] == 'singbox_proxy'
+
+        # 4. sing-box log reader forwards sanitized errors/warnings without leaking secrets
+        secret_uri = 'vless://11111111-1111-4111-8111-111111111111@203.0.113.5:443?security=tls'
+        log_proc = mock.MagicMock()
+        log_proc.stdout = io.StringIO(
+            'INFO[0000] sing-box started (0.04s)\n'
+            'INFO[0001] inbound/tun[0]: inbound connection to example.com:443\n'
+            'WARN[0001] strict routing is not supported on Windows versions below 10\n'
+            f'ERROR[0002] outbound/vless[vpn]: tls handshake failed for 11111111-1111-4111-8111-111111111111 password=topsecret\n'
+            f'INFO[0003] debug leak {secret_uri}\n'
+        )
+        log_proc.wait.return_value = 0
+        api.openvpn_process = log_proc
+        api._vpn_stop_requested = False
+        api.vpn_logs = []
+        api._read_openvpn_log(log_proc, True, 'Happ: Dom', True)
+        joined = '\n'.join(api.vpn_logs)
+        assert 'example.com:443' not in joined
+        assert '11111111-1111-4111-8111-111111111111' not in joined
+        assert 'topsecret' not in joined
+        assert 'strict_route skipped' in joined
+        assert 'tls handshake failed' in joined
+
+        # 5. prepare_vless exposes verified Xray-win7-64.zip asset for Win 8.1 builds
+        pv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'prepare_vless.py')
+        spec = importlib.util.spec_from_file_location('prepare_vless', pv_path)
+        pv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pv)
+        assert pv.XRAY_WIN7_URL.endswith('/Xray-win7-64.zip')
+        assert len(pv.XRAY_WIN7_SHA256) == 64
     finally:
         api.close()

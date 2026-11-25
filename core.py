@@ -1849,6 +1849,7 @@ class Api:
             'bad decrypt',
             'Error reading PKCS12',
         )
+        sb_log_warns = 0
         try:
             for raw in iter(process.stdout.readline, ''):
                 line = raw.rstrip()
@@ -1857,12 +1858,27 @@ class Api:
                 drop_auth = False
                 with self.vpn_lock:
                     if is_vless:
-                        # Do not forward engine logs: they can contain profile data or browsing activity.
+                        # Do not forward raw proxy URIs, credentials, or user browsing activity.
+                        low = line.lower()
                         if self.openvpn_process is process and 'sing-box started (' in line:
                             self.vpn_state = 'CONNECTED'
                             self.vpn_adapter_name = vless.ADAPTER if has_tun else None
                             kind_lbl = 'tunnel interface' if has_tun else 'proxy'
                             self.vpn_logs.append(f'[NEON] {display_name} {kind_lbl} ready.')
+                        elif 'strict routing is not supported' in low:
+                            if sb_log_warns < 35:
+                                sb_log_warns += 1
+                                self.vpn_logs.append('[NEON] Windows < 10: strict_route skipped (gVisor + explicit excludes active).')
+                        elif (
+                            'inbound connection to' not in low
+                            and not any(sch in low for sch in ('vless://', 'vmess://', 'trojan://', 'ss://', 'hy2://', 'hysteria://', 'hysteriya://'))
+                            and any(m in low for m in ('fatal', 'error', 'warn', 'panic:', 'failed', 'x509', 'wintun', 'weak host', 'forwarding', 'firewall', 'handshake', 'timeout', 'refused', 'permission'))
+                        ):
+                            if 'fatal' in low or 'panic:' in low:
+                                self.vpn_state = 'ERROR'
+                            if sb_log_warns < 35:
+                                sb_log_warns += 1
+                                self.vpn_logs.append('[sing-box] ' + self._sanitize_engine_log_line(line))
                         continue
                     self.vpn_logs.append(line)
                     if len(self.vpn_logs) > 1500:
@@ -2130,6 +2146,87 @@ class Api:
         return ips
 
     @staticmethod
+    def _sanitize_engine_log_line(line):
+        txt = str(line or '').strip()
+        txt = re.sub(r'\b(?:vless|vmess|trojan|ss|hy2|hysteria2?|hysteriya2?|socks5?)://\S+', '[URI]', txt, flags=re.I)
+        txt = re.sub(r'\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', '[UUID]', txt, flags=re.I)
+        txt = re.sub(r'((?:password|auth|token|secret)\s*[=:]\s*)\S+', r'\1***', txt, flags=re.I)
+        return txt[:220]
+
+    @staticmethod
+    def _collect_uplink_dns_cidrs():
+        """Collect public IPv4 DNS servers of active physical Windows gateways so local bootstrap DNS avoids TUN loops."""
+        if platform.system() != 'Windows':
+            return []
+        try:
+            import winreg
+        except ImportError:
+            return []
+        cidrs = []
+        base = r'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces'
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base, 0, winreg.KEY_READ) as root:
+                count = winreg.QueryInfoKey(root)[0]
+                for idx in range(count):
+                    try:
+                        subname = winreg.EnumKey(root, idx)
+                        with winreg.OpenKey(root, subname, 0, winreg.KEY_READ) as iface:
+                            def _read_val(name):
+                                try:
+                                    v, _t = winreg.QueryValueEx(iface, name)
+                                    return v
+                                except FileNotFoundError:
+                                    return None
+                            gws = []
+                            for k in ('DefaultGateway', 'DhcpDefaultGateway'):
+                                val = _read_val(k)
+                                if isinstance(val, list):
+                                    gws.extend(str(x).strip() for x in val if str(x).strip())
+                                elif isinstance(val, str) and val.strip():
+                                    gws.extend(x.strip() for x in re.split(r'[,\s]+', val) if x.strip())
+                            gws = [g for g in gws if g and g != '0.0.0.0']
+                            if not gws:
+                                continue
+                            ips = []
+                            for k in ('IPAddress', 'DhcpIPAddress'):
+                                val = _read_val(k)
+                                if isinstance(val, list):
+                                    ips.extend(str(x).strip() for x in val if str(x).strip())
+                                elif isinstance(val, str) and val.strip():
+                                    ips.extend(x.strip() for x in re.split(r'[,\s]+', val) if x.strip())
+                            if any(ip.startswith('172.19.0.') for ip in ips):
+                                continue
+                            for k in ('NameServer', 'DhcpNameServer'):
+                                raw_ns = _read_val(k)
+                                if not raw_ns:
+                                    continue
+                                items = raw_ns if isinstance(raw_ns, list) else re.split(r'[,\s]+', str(raw_ns))
+                                for tok in items:
+                                    s = str(tok or '').strip()
+                                    if not s:
+                                        continue
+                                    try:
+                                        ip_obj = ipaddress.ip_address(s)
+                                    except ValueError:
+                                        continue
+                                    if (
+                                        ip_obj.version != 4
+                                        or ip_obj.is_private
+                                        or ip_obj.is_loopback
+                                        or ip_obj.is_link_local
+                                        or ip_obj.is_multicast
+                                    ):
+                                        continue
+                                    c = f'{ip_obj}/32'
+                                    if c not in cidrs:
+                                        cidrs.append(c)
+                    except OSError:
+                        continue
+        except OSError:
+            return []
+        return cidrs
+
+    @staticmethod
     def _resolve_server_ips(node, xcfg=None):
         hosts = []
         if node and node.get('host'):
@@ -2143,6 +2240,68 @@ class Api:
                 if c not in cidrs:
                     cidrs.append(c)
         return cidrs
+
+    def _prepare_tun_network_context(self, node, xcfg=None, include_uplink_dns=True):
+        """Resolve VPN server IPs (with DoH fallback) and active uplink DNS IPs before starting TUN."""
+        hosts = []
+        if node and node.get('host'):
+            hosts.append(str(node['host']).strip())
+        for h in happ_client._collect_xray_server_hosts(xcfg):
+            hs = str(h or '').strip()
+            if hs and hs not in hosts:
+                hosts.append(hs)
+        excludes = []
+        predefined_hosts = {}
+        for h in hosts:
+            sys_cidrs = happ_client._resolve_server_ips(h, doh_fallback=False)
+            if sys_cidrs:
+                for c in sys_cidrs:
+                    if c not in excludes:
+                        excludes.append(c)
+                continue
+            try:
+                ipaddress.ip_address(h)
+                continue
+            except ValueError:
+                pass
+            doh_cidrs = happ_client._resolve_domain_doh(h)
+            if doh_cidrs:
+                predefined_hosts[h] = [c.split('/', 1)[0] for c in doh_cidrs]
+                for c in doh_cidrs:
+                    if c not in excludes:
+                        excludes.append(c)
+        if include_uplink_dns:
+            for c in self._collect_uplink_dns_cidrs():
+                if c not in excludes:
+                    excludes.append(c)
+        return excludes, predefined_hosts
+
+    def _clear_stale_local_proxy(self, ports):
+        """Clear a dangling 127.0.0.1:<port> WinINET proxy left over after a prior crash when switching to TUN."""
+        if platform.system() != 'Windows' or self._sys_proxy_backup is not None:
+            return False
+        try:
+            import winreg
+        except ImportError:
+            return False
+        targets = {f'127.0.0.1:{int(p)}' for p in (ports or []) if int(p or 0) > 0}
+        if not targets:
+            return False
+        key_path = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+                try:
+                    enabled, _ = winreg.QueryValueEx(key, 'ProxyEnable')
+                    srv, _ = winreg.QueryValueEx(key, 'ProxyServer')
+                except FileNotFoundError:
+                    return False
+                if int(enabled or 0) == 1 and str(srv or '').strip() in targets:
+                    winreg.SetValueEx(key, 'ProxyEnable', 0, winreg.REG_DWORD, 0)
+                    self._refresh_windows_wininet()
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _refresh_windows_wininet(self):
         try:
@@ -2399,6 +2558,11 @@ class Api:
             socks_port = int(settings.get('socks_port') or 10808)
             http_port = int(settings.get('http_port') or 10809)
             sys_proxy_want = bool(settings.get('system_proxy', True))
+            fallback_notes = []
+
+            if mode == 'tun':
+                if self._clear_stale_local_proxy((http_port, socks_port, 10808, 10809)):
+                    fallback_notes.append(f'[NEON] Cleared stale local system proxy (127.0.0.1:{http_port}).')
 
             if plan == 'xray_proxy':
                 try:
@@ -2429,22 +2593,45 @@ class Api:
                 except OSError as exc:
                     if proc is not None:
                         self._terminate_proc(proc)
-                    return {'error': f'Cannot start Xray-core: {exc}'}
+                    proc = None
+                    if sb_exe and happ_client.can_singbox_run(node):
+                        fallback_notes.append(f'[NEON] Xray-core failed to start ({exc}); using sing-box proxy.')
+                        plan = 'singbox_proxy'
+                    else:
+                        return {'error': f'Cannot start Xray-core: {exc}'}
 
-                listen_ip = '0.0.0.0' if settings.get('allow_lan') else '127.0.0.1'
-                with self.vpn_lock:
-                    self.openvpn_process = proc
-                    self._vpn_aux_process = None
-                    self._vpn_stop_requested = False
-                    self._mgmt_port = None
-                    self.vpn_profile = display
-                    self.vpn_adapter_name = self.vpn_adapter_guid = self.vpn_ifindex = None
-                    self.vpn_state = 'CONNECTING'
-                    self.vpn_logs = [f'[NEON] Starting Xray-core proxy ({node.get("name", "")}) on {listen_ip}:{http_port}/{socks_port}.']
-                if sys_proxy_want:
-                    self._enable_windows_proxy(http_port)
-                threading.Thread(target=self._read_proxy_log, args=(proc, False, 'Xray'), daemon=True).start()
-                return {'ok': True, 'plan': plan, 'http_port': http_port, 'socks_port': socks_port, 'output': f'Starting {display} (Proxy).'}
+                if proc is not None:
+                    time.sleep(0.2)
+                    if proc.poll() is not None:
+                        out_err = ''
+                        try:
+                            out_err = (proc.stdout.read() or '').strip()
+                        except Exception:
+                            pass
+                        if sb_exe and happ_client.can_singbox_run(node):
+                            fallback_notes.append('[NEON] Xray-core exited immediately; using sing-box proxy fallback.')
+                            plan = 'singbox_proxy'
+                            proc = None
+                        else:
+                            return {'error': f'Xray-core exited immediately: {out_err[-300:] or proc.returncode}'}
+
+                if plan == 'xray_proxy':
+                    listen_ip = '0.0.0.0' if settings.get('allow_lan') else '127.0.0.1'
+                    with self.vpn_lock:
+                        self.openvpn_process = proc
+                        self._vpn_aux_process = None
+                        self._vpn_stop_requested = False
+                        self._mgmt_port = None
+                        self.vpn_profile = display
+                        self.vpn_adapter_name = self.vpn_adapter_guid = self.vpn_ifindex = None
+                        self.vpn_state = 'CONNECTING'
+                        self.vpn_logs = fallback_notes + [
+                            f'[NEON] Starting Xray-core proxy ({node.get("name", "")}) on {listen_ip}:{http_port}/{socks_port}.'
+                        ]
+                    if sys_proxy_want:
+                        self._enable_windows_proxy(http_port)
+                    threading.Thread(target=self._read_proxy_log, args=(proc, False, 'Xray'), daemon=True).start()
+                    return {'ok': True, 'plan': plan, 'http_port': http_port, 'socks_port': socks_port, 'output': f'Starting {display} (Proxy).'}
 
             if plan == 'xray_with_singbox_tun':
                 xray_socks = self._find_free_port()
@@ -2459,7 +2646,7 @@ class Api:
                     )
                 except ValueError as exc:
                     return {'error': str(exc)}
-                excludes = self._resolve_server_ips(node, xcfg=xcfg)
+                excludes, predefined_hosts = self._prepare_tun_network_context(node, xcfg=xcfg, include_uplink_dns=True)
                 xproc = None
                 try:
                     xproc = subprocess.Popen(
@@ -2479,6 +2666,7 @@ class Api:
                         self._terminate_proc(xproc)
                     xproc = None
                     if happ_client.can_singbox_run(node):
+                        fallback_notes.append(f'[NEON] Xray-core failed to start ({exc}); switching to sing-box TUN.')
                         plan = 'singbox_tun'
                     else:
                         return {'error': f'Cannot start Xray-core: {exc}'}
@@ -2492,6 +2680,7 @@ class Api:
                         except Exception:
                             pass
                         if happ_client.can_singbox_run(node):
+                            fallback_notes.append('[NEON] Xray-core exited immediately; switching to sing-box TUN.')
                             plan = 'singbox_tun'
                             xproc = None
                         else:
@@ -2508,6 +2697,7 @@ class Api:
                             http_port=http_port,
                             settings=settings,
                             routing_profile=routing_profile,
+                            predefined_hosts=predefined_hosts,
                         )
                     except ValueError as exc:
                         self._terminate_proc(xproc)
@@ -2532,6 +2722,7 @@ class Api:
                             self._terminate_proc(sb_proc)
                         return {'error': f'Cannot start sing-box TUN engine: {exc}'}
 
+                    tun_in = next((i for i in scfg.get('inbounds', []) if i.get('type') == 'tun'), {})
                     with self.vpn_lock:
                         self._vpn_aux_process = xproc
                         self.openvpn_process = sb_proc
@@ -2540,7 +2731,9 @@ class Api:
                         self.vpn_profile = display
                         self.vpn_adapter_name = self.vpn_adapter_guid = self.vpn_ifindex = None
                         self.vpn_state = 'CONNECTING'
-                        self.vpn_logs = [f'[NEON] Starting Xray-core + sing-box TUN ({node.get("name", "")}).']
+                        self.vpn_logs = fallback_notes + [
+                            f'[NEON] Starting Xray-core + sing-box TUN ({node.get("name", "")}, stack={tun_in.get("stack", "gvisor")}, mtu={tun_in.get("mtu", 1500)}, excludes={len(excludes)}).'
+                        ]
                     if mode == 'mixed' and sys_proxy_want:
                         self._enable_windows_proxy(http_port)
                     threading.Thread(target=self._read_proxy_log, args=(xproc, True, 'Xray'), daemon=True).start()
@@ -2550,13 +2743,19 @@ class Api:
             # singbox_tun or singbox_proxy (including fallback)
             try:
                 sb_mode = 'proxy' if plan == 'singbox_proxy' else mode
+                excludes, predefined_hosts = self._prepare_tun_network_context(
+                    node,
+                    include_uplink_dns=(sb_mode != 'proxy'),
+                )
                 scfg = happ_client.build_singbox_config(
                     node=node,
                     mode=sb_mode,
+                    extra_excludes=excludes if sb_mode != 'proxy' else None,
                     socks_port=socks_port,
                     http_port=http_port,
                     settings=settings,
                     routing_profile=routing_profile,
+                    predefined_hosts=predefined_hosts,
                 )
             except ValueError as exc:
                 return {'error': str(exc)}
@@ -2579,6 +2778,7 @@ class Api:
                     self._terminate_proc(sb_proc)
                 return {'error': f'Cannot start sing-box engine: {exc}'}
 
+            tun_in = next((i for i in scfg.get('inbounds', []) if i.get('type') == 'tun'), {})
             with self.vpn_lock:
                 self.openvpn_process = sb_proc
                 self._vpn_aux_process = None
@@ -2587,7 +2787,14 @@ class Api:
                 self.vpn_profile = display
                 self.vpn_adapter_name = self.vpn_adapter_guid = self.vpn_ifindex = None
                 self.vpn_state = 'CONNECTING'
-                self.vpn_logs = [f'[NEON] Starting sing-box ({sb_mode}) for {node.get("name", "")}.']
+                if sb_mode == 'proxy':
+                    start_msg = f'[NEON] Starting sing-box proxy ({node.get("name", "")}) on {http_port}/{socks_port}.'
+                else:
+                    start_msg = (
+                        f'[NEON] Starting sing-box ({sb_mode}) for {node.get("name", "")} '
+                        f'(stack={tun_in.get("stack", "gvisor")}, mtu={tun_in.get("mtu", 1500)}, excludes={len(excludes)}).'
+                    )
+                self.vpn_logs = fallback_notes + [start_msg]
             if sb_mode in ('proxy', 'mixed') and sys_proxy_want:
                 self._enable_windows_proxy(http_port)
             threading.Thread(
