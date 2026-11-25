@@ -40,7 +40,7 @@ jobs:
           exit $code
 
       - name: Bundle and check embedded VLESS engine
-        run: python scripts/prepare_vless.py --check
+        run: python scripts/prepare_vless.py --win7 --check
 
       - name: Build NeonLGControl81.exe (PyInstaller)
         run: |
