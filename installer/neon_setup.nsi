@@ -12,7 +12,7 @@ Unicode True
 !define UNINST_REG_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\NEON_LG_Control"
 
 !ifndef APP_VERSION
-  !define APP_VERSION "2.0.0.0"
+  !define APP_VERSION "2.1.0.0"
 !endif
 !ifndef APP_EXE
   !define APP_EXE "NeonLGControl81.exe"

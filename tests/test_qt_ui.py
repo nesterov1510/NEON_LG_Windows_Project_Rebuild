@@ -69,18 +69,46 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     ovpn_auth.write_text('client\nauth-user-pass\n', encoding='utf-8')
     ovpn_cert = tmp_path / 'cert.ovpn'
     ovpn_cert.write_text('client\n', encoding='utf-8')
+    # Same profile, but the inline key is passphrase protected: the key row and
+    # only the key row must appear next to it (no auth-user-pass here).
+    ovpn_key = tmp_path / 'keypass.ovpn'
+    ovpn_key.write_text('client\n'
+                        '<key>\n-----BEGIN ENCRYPTED PRIVATE KEY-----\n'
+                        'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWQ==\n'
+                        '-----END ENCRYPTED PRIVATE KEY-----\n</key>\n', encoding='utf-8')
     api.remember_profile(str(ovpn_auth))
     api.remember_profile(str(ovpn_cert))
+    api.remember_profile(str(ovpn_key))
 
     win.switch_tab(3)
-    win.profile_combo.addItems(['auth', 'cert'])
+    win.profile_combo.addItems(['auth', 'cert', 'keypass'])
     win.profile_combo.setCurrentText('auth')
     qt_app.processEvents()
     assert win.vpn_auth_box.isVisible() is True
+    assert win.vpn_user.isVisible() is True
+    assert win.vpn_pass_row.isVisible() is True
+    assert win.vpn_key_row.isVisible() is False
+
+    win.profile_combo.setCurrentText('keypass')
+    qt_app.processEvents()
+    assert win.vpn_auth_box.isVisible() is True
+    assert win.vpn_user.isVisible() is False
+    assert win.vpn_key_row.isVisible() is True
 
     win.profile_combo.setCurrentText('cert')
     qt_app.processEvents()
     assert win.vpn_auth_box.isVisible() is False
+    assert win.vpn_key_row.isVisible() is False
+
+    # The VLESS leak-blocker switch is persisted rather than hard-coded.
+    assert win.vless_strict.isChecked() is True
+    win.vless_strict.setChecked(False)
+    win._on_vless_strict_toggled(win.vless_strict.isChecked())
+    qt_app.processEvents()
+    assert api.load_settings().get('vless_strict_route') is False
+    win.vless_strict.setChecked(True)
+    win._on_vless_strict_toggled(True)
+    assert api.load_settings().get('vless_strict_route') is True
 
     # Custom & preset Area Option manual input sync
     from ui_qt import REGIONS

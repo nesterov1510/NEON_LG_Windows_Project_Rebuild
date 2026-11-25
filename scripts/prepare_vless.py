@@ -30,11 +30,24 @@ def check():
     # server credential, changing routes, or exposing a real profile to CI.
     sys.path.insert(0, str(DEST.parents[2]))
     from vless import configuration
-    config = configuration('vless://00000000-0000-4000-8000-000000000001@example.org:443?security=tls')
-    result = subprocess.run([str(DEST), 'check', '-c', 'stdin'], input=json.dumps(config),
-                            capture_output=True, text=True, timeout=30)
-    if result.returncode:
-        raise RuntimeError('VLESS config check: ' + (result.stderr or result.stdout).strip())
+    configs = [
+        # The minimal profile shape.
+        configuration('vless://00000000-0000-4000-8000-000000000001@example.org:443?security=tls'),
+        # Everything else NEON can put into a config: WebSocket transport, a pinned
+        # server address with its bypass route, self-signed TLS and the TUN DNS mode.
+        configuration('vless://00000000-0000-4000-8000-000000000002@example.org:8443'
+                      '?security=tls&type=ws&path=%2Fservice&host=ws.example&fp=chrome'
+                      '&allowInsecure=1&sni=cdn.example.org&flow=',
+                      server_addresses=['203.0.113.9', '2001:db8::9']),
+        configuration('vless://00000000-0000-4000-8000-000000000003@example.org:443'
+                      '?security=reality&pbk=' + 'A' * 43 + '&sid=ab&type=grpc&serviceName=hello'),
+    ]
+    for config in configs:
+        result = subprocess.run([str(DEST), 'check', '-c', 'stdin'], input=json.dumps(config),
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise RuntimeError('VLESS config check: ' + (result.stderr or result.stdout).strip())
+    print('Verified %d VLESS config shapes against the bundled engine.' % len(configs))
 
 
 if __name__ == '__main__':

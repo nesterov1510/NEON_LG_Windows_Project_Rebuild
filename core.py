@@ -123,6 +123,9 @@ class Api:
         self._vpn_stop_requested = False
         self._auth_temp_file = None
         self._mgmt_port = None
+        self._vless_secret = ''
+        self._mgmt_stop = None
+        self._mgmt_sock = None
         self.lg_remote = None
         self._lg_remote_lock = threading.RLock()
         self.samsung_client = None
@@ -1487,33 +1490,117 @@ class Api:
             p = os.path.abspath(str(profile))
         return p if p and os.path.isfile(p) else None
 
+    _ENCRYPTED_KEY_MARKERS = (
+        'begin encrypted private key',
+        'proc-type: 4,encrypted',
+        'dek-info:',
+    )
+
+    @classmethod
+    def _key_is_encrypted(cls, text):
+        """True when a PEM block needs a passphrase before OpenVPN can use the key."""
+        low = str(text or '').lower()
+        return any(marker in low for marker in cls._ENCRYPTED_KEY_MARKERS)
+
+    @staticmethod
+    def _inline_blocks(text, name):
+        """Contents of every <name> ... </name> block in an .ovpn profile."""
+        out = []
+        body = str(text or '')
+        start = 0
+        while True:
+            open_at = body.find('<' + name + '>', start)
+            if open_at < 0:
+                return out
+            close_at = body.find('</' + name + '>', open_at)
+            if close_at < 0:
+                return out
+            out.append(body[open_at + len(name) + 2:close_at])
+            start = close_at + len(name) + 3
+        return out
+
+    def _profile_referenced_files(self, path, text, directives):
+        """Resolve `directive <file>` arguments relative to the profile directory."""
+        folder = os.path.dirname(os.path.abspath(path))
+        found = []
+        for raw in str(text or '').splitlines():
+            line = raw.strip()
+            for marker in (' #', ' ;', '\t#', '\t;'):
+                if marker in line:
+                    line = line.split(marker, 1)[0].strip()
+            words = line.split()
+            if len(words) < 2 or words[0].lower() not in directives:
+                continue
+            target = words[1].strip('"').strip("'")
+            if not target or os.path.isabs(target):
+                candidate = target
+            else:
+                candidate = os.path.join(folder, target)
+            found.append((words[0].lower(), candidate))
+        return found
+
     def inspect_profile(self, profile):
+        """Report what a profile needs from the user before it can connect.
+
+        `needs_auth` = the profile asks for an `auth-user-pass` username/password,
+        `needs_keypass` = its private key is passphrase protected, `needs_askpass` =
+        the profile itself requests an interactive prompt (NEON answers it over the
+        management pipe instead of failing).
+        """
+        empty = {'exists': False, 'needs_auth': False, 'needs_askpass': False, 'needs_keypass': False}
         p = self._resolve_profile_path(profile)
         if not p:
-            return {'exists': False, 'needs_auth': False, 'needs_askpass': False}
-        needs_auth = False
-        needs_askpass = False
+            return empty
         try:
             with open(p, 'r', encoding='utf-8', errors='replace') as config:
-                for raw in config:
-                    line = raw.strip()
-                    if not line or line.startswith('#') or line.startswith(';'):
-                        continue
-                    # Strip inline comments
-                    for marker in (' #', ' ;', '\t#', '\t;'):
-                        if marker in line:
-                            line = line.split(marker, 1)[0].strip()
-                    words = line.split()
-                    if not words:
-                        continue
-                    directive = words[0].lower()
-                    if directive == 'auth-user-pass' and len(words) == 1:
-                        needs_auth = True
-                    elif directive == 'askpass' and len(words) == 1:
-                        needs_askpass = True
+                body = config.read()
         except Exception as exc:
-            return {'exists': True, 'path': p, 'needs_auth': False, 'needs_askpass': False, 'error': str(exc)}
-        return {'exists': True, 'path': p, 'needs_auth': needs_auth, 'needs_askpass': needs_askpass}
+            return {'exists': True, 'path': p, 'needs_auth': False, 'needs_askpass': False,
+                    'needs_keypass': False, 'error': str(exc)}
+        needs_auth = False
+        needs_askpass = False
+        needs_keypass = self._key_is_encrypted('\n'.join(self._inline_blocks(body, 'key')))
+        for raw in body.splitlines():
+            line = raw.strip()
+            if not line or line.startswith('#') or line.startswith(';'):
+                continue
+            # Strip inline comments
+            for marker in (' #', ' ;', '\t#', '\t;'):
+                if marker in line:
+                    line = line.split(marker, 1)[0].strip()
+            words = line.split()
+            if not words:
+                continue
+            directive = words[0].lower()
+            if directive == 'auth-user-pass':
+                # `auth-user-pass` alone always asks; with a file it only asks when that
+                # file cannot supply both a username and a password.
+                if len(words) == 1:
+                    needs_auth = True
+                else:
+                    target = words[1].strip('"').strip("'")
+                    if not os.path.isabs(target):
+                        target = os.path.join(os.path.dirname(os.path.abspath(p)), target)
+                    try:
+                        with open(target, 'r', encoding='utf-8', errors='replace') as creds:
+                            lines = [c for c in creds.read().splitlines() if c.strip()]
+                        needs_auth = len(lines) < 2
+                    except Exception:
+                        needs_auth = True
+            elif directive == 'askpass' and len(words) == 1:
+                needs_askpass = True
+                needs_keypass = True
+        if not needs_keypass:
+            for directive, target in self._profile_referenced_files(p, body, ('key',)):
+                try:
+                    with open(target, 'r', encoding='utf-8', errors='replace') as key_file:
+                        if self._key_is_encrypted(key_file.read(16384)):
+                            needs_keypass = True
+                            break
+                except Exception:
+                    continue
+        return {'exists': True, 'path': p, 'needs_auth': needs_auth, 'needs_askpass': needs_askpass,
+                'needs_keypass': needs_keypass}
 
     def _cleanup_auth_file(self):
         path = self._auth_temp_file
@@ -1538,19 +1625,182 @@ class Api:
             sock.bind(('127.0.0.1', 0))
             return sock.getsockname()[1]
 
+    # ------------------------------------------------------------------
+    # Local credential pipe (OpenVPN management interface)
+    # ------------------------------------------------------------------
+    _MGMT_NEED = re.compile(r"Need '(?P<kind>[^']+)' (?P<what>username/password|username|password)")
+
+    @staticmethod
+    def _mgmt_quote(value):
+        """Quote one management argument (same escaping rules as an .ovpn file)."""
+        text = '' if value is None else str(value)
+        return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+    @staticmethod
+    def _mgmt_credential_commands(username='', password='', key_password=''):
+        """Commands that pre-load credentials before OpenVPN has to ask for them."""
+        quote = Api._mgmt_quote
+        commands = []
+        if key_password:
+            commands.append('password "Private Key" ' + quote(key_password))
+        if username and password:
+            commands.append('username "Auth" ' + quote(username))
+            commands.append('password "Auth" ' + quote(password))
+        return commands
+
+    @classmethod
+    def _mgmt_password_reply(cls, line, username='', password='', key_password=''):
+        """Translate a real-time ">PASSWORD:Need ..." query into management commands.
+
+        Returns an empty list when NEON has nothing to offer for that query, so OpenVPN
+        keeps waiting for the user instead of receiving a wrong blank value.
+        """
+        match = cls._MGMT_NEED.search(str(line or ''))
+        if not match:
+            return []
+        kind, what = match.group('kind'), match.group('what')
+        quote = cls._mgmt_quote
+        if kind == 'Auth':
+            out = []
+            if what in ('username', 'username/password') and username:
+                out.append('username "Auth" ' + quote(username))
+            if what in ('password', 'username/password') and password:
+                out.append('password "Auth" ' + quote(password))
+            return out
+        if kind == 'Private Key' and key_password:
+            return ['password "Private Key" ' + quote(key_password)]
+        return []
+
+    def _start_credential_pipe(self, port, process, username, password, key_password):
+        self._stop_credential_pipe()
+        stop = threading.Event()
+        self._mgmt_stop = stop
+        threading.Thread(target=self._vpn_credential_pipe,
+                         args=(port, process, username, password, key_password, stop),
+                         daemon=True).start()
+
+    def _stop_credential_pipe(self):
+        stop, sock = self._mgmt_stop, self._mgmt_sock
+        self._mgmt_stop = self._mgmt_sock = None
+        if stop is not None:
+            stop.set()
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _vpn_credential_pipe(self, port, process, username, password, key_password, stop,
+                             connect_timeout=12.0):
+        """Answer OpenVPN's passphrase/user queries on a live management connection.
+
+        The values only ever travel over 127.0.0.1 into the Conf process NEON just
+        started; they are not written to disk and not echoed into the NEON log. The
+        connection stays open for the whole session because --auth-nocache makes
+        OpenVPN ask again on reconnect.
+        """
+        queries = (username, password, key_password)
+        sock = None
+        deadline = time.time() + connect_timeout
+        while time.time() < deadline and not stop.is_set() and process.poll() is None:
+            try:
+                sock = socket.create_connection(('127.0.0.1', int(port)), timeout=2.0)
+                break
+            except OSError:
+                sock = None
+                time.sleep(0.15)
+        if sock is None:
+            if process.poll() is None:
+                try:
+                    # Started with --management-hold: without this pipe the engine would
+                    # wait forever, so abort it instead of leaving an orphan process.
+                    process.kill()
+                    process.wait(timeout=5)
+                except Exception:
+                    pass
+            with self.vpn_lock:
+                if self.openvpn_process is process:
+                    self.vpn_logs.append('[!] Conf engine did not accept the local credential pipe; '
+                                         'the key password could not be delivered.')
+                    self.vpn_state = 'ERROR'
+            return
+        try:
+            sock.settimeout(1.0)
+            if not stop.is_set():
+                self._mgmt_sock = sock
+            # The HELLO banner is read in the loop below: a separate blocking read could
+            # swallow a password query that OpenVPN already sent.
+            for command in self._mgmt_credential_commands(*queries):
+                sock.sendall((command + '\r\n').encode('utf-8'))
+            sock.sendall(b'proceed\r\n')
+            pending = b''
+            while not stop.is_set() and process.poll() is None:
+                try:
+                    chunk = sock.recv(4096)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                pending += chunk
+                while b'\n' in pending:
+                    raw, pending = pending.split(b'\n', 1)
+                    text = raw.decode('utf-8', 'replace').strip()
+                    if not text:
+                        continue
+                    if 'PASSWORD' in text.upper() and 'Need' in text:
+                        for command in self._mgmt_password_reply(text, *queries):
+                            sock.sendall((command + '\r\n').encode('utf-8'))
+                    elif 'Verification Failed' in text:
+                        which = 'key password' if 'Private Key' in text else 'username/password'
+                        with self.vpn_lock:
+                            if self.openvpn_process is process:
+                                self.vpn_logs.append('[!] Conf engine rejected the %s. Check it and connect again.' % which)
+                                self.vpn_state = 'ERROR'
+        except OSError:
+            pass
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            with self.vpn_lock:
+                if self._mgmt_sock is sock:
+                    self._mgmt_sock = None
+
     def connect_vless(self, link):
         if platform.system() != 'Windows':
             return {'error': 'Embedded VLESS is available on Windows x64.'}
         with self._vpn_control:
             if self.openvpn_process and self.openvpn_process.poll() is None:
                 return {'error': 'Disconnect the active VPN first.'}
+            # Resolve the server *before* the TUN exists: the tunnel must never depend on
+            # DNS it takes over itself, and its own address has to stay out of the tunnel.
+            host = vless.link_host(link)
+            addresses = self._lookup_addresses(host) if host else []
+            strict = self.load_settings().get('vless_strict_route', True)
             try:
-                config = vless.configuration(link)
+                config = vless.configuration(link, server_addresses=addresses, strict_route=strict)
             except ValueError as exc:
                 return {'error': str(exc)}
             exe = resource(os.path.join('assets', 'vless', 'sing-box.exe'))
             if not os.path.isfile(exe):
                 return {'error': 'Embedded VLESS engine missing. Reinstall the NEON Windows build.'}
+            notes = ['[NEON] Starting embedded VLESS tunnel.']
+            if addresses:
+                notes.append(f'[NEON] VLESS server {host} -> {", ".join(addresses)}; '
+                             'that route stays outside the tunnel (no loopback with ICS/hotspot).')
+            else:
+                notes.append('[!] VLESS server address was not resolved before start; the engine will '
+                             'resolve it inside the tunnel. Check the uplink DNS if it does not connect.')
+            if not strict:
+                notes.append('[NEON] VLESS: strict host routing is off — leak protection relies on NEON '
+                             'stopping the hotspot/ICS when the tunnel drops.')
             proc = None
             try:
                 # stdin avoids putting UUIDs in the process list or temp files.
@@ -1566,8 +1816,10 @@ class Api:
                     self.vpn_profile = 'VLESS'
                     self.vpn_adapter_name = self.vpn_adapter_guid = self.vpn_ifindex = None
                     self.vpn_state = 'CONNECTING'
-                    self.vpn_logs = ['[NEON] Starting embedded VLESS tunnel.']
+                    self._vless_secret = str((config.get('outbounds') or [{}])[0].get('uuid') or '')
+                    self.vpn_logs = notes
                 threading.Thread(target=self._read_openvpn_log, args=(proc, True), daemon=True).start()
+                threading.Thread(target=self._probe_vless_tunnel, daemon=True).start()
                 return {'ok': True, 'output': 'Starting NEON-VLESS.'}
             except OSError:
                 if proc is not None:
@@ -1575,11 +1827,121 @@ class Api:
                     proc.wait()
                 return {'error': 'Cannot start the embedded VLESS engine. Check the Windows build and permissions.'}
 
-    def connect_vpn(self, profile, username='', password=''):
-        with self._vpn_control:
-            return self._connect_openvpn(profile, username, password)
+    # Engine log markers -> what the user should actually do about them.
+    _VLESS_HINTS = (
+        ('authentication failed', '[!] VLESS: the server rejected this profile. Check the UUID (and the REALITY short ID).'),
+        ('certificate', '[!] VLESS: the server certificate was rejected. Self-signed servers need allowInsecure=1 in the link, or use a REALITY profile.'),
+        ('x509', '[!] VLESS: the server certificate was rejected. Self-signed servers need allowInsecure=1 in the link, or use a REALITY profile.'),
+        ('handshake', '[!] VLESS: the TLS handshake failed. A wrong port/transport (tls vs reality) is the usual reason.'),
+        ('no such host', '[!] VLESS: the server name could not be resolved. Check the address in the link.'),
+        ('connection refused', '[!] VLESS: the server port refused the connection. Check port/transport and the uplink firewall.'),
+        ('deadline exceeded', '[!] VLESS: the server did not answer. If a hotspot/ICS is running, share NEON-VLESS — not the Wi-Fi/Ethernet uplink — otherwise the tunnel routes back into itself.'),
+        ('i/o timeout', '[!] VLESS: the server did not answer. If a hotspot/ICS is running, share NEON-VLESS — not the Wi-Fi/Ethernet uplink — otherwise the tunnel routes back into itself.'),
+        ('denied', '[!] VLESS: sing-box could not create the NEON-VLESS adapter. Run NEON as Administrator and make sure the Wintun driver is not blocked.'),
+    )
 
-    def _connect_openvpn(self, profile, username, password):
+    def _vless_log_lines(self, line):
+        """Sanitize one engine log line into zero or more lines for the NEON terminal.
+
+        Warnings and errors are surfaced — a tunnel that only reports "started" hides
+        why nothing flows — but never the profile link or the UUID it carries.
+        """
+        text = str(line or '').strip()
+        if not text:
+            return []
+        lowered = text.lower()
+        if not any(word in lowered for word in ('error', 'warn', 'fatal', 'panic')):
+            return []
+        text = re.sub(r'vless://[^\s"\']+', 'vless://***', text)
+        secret = getattr(self, '_vless_secret', '')
+        if secret:
+            text = text.replace(secret, '***')
+        lines = ['[sing-box] ' + text[:300]]
+        hint = next((note for marker, note in self._VLESS_HINTS if marker in lowered), '')
+        if hint:
+            lines.append(hint)
+        return lines
+
+    @staticmethod
+    def _lookup_addresses(host, timeout=4.0):
+        """Resolve `host` without blocking the UI forever (getaddrinfo has no timeout)."""
+        found = []
+        finished = threading.Event()
+
+        def worker():
+            try:
+                for info in socket.getaddrinfo(host, None):
+                    addr = str(info[4][0]).split('%')[0]
+                    if addr not in found:
+                        found.append(addr)
+            except OSError:
+                pass
+            finally:
+                finished.set()
+
+        threading.Thread(target=worker, daemon=True).start()
+        finished.wait(timeout)
+        return found if finished.is_set() else []
+
+    def _probe_vless_tunnel(self):
+        """'sing-box started' only means the interface exists — prove that traffic flows."""
+        deadline = time.time() + 75.0
+        while time.time() < deadline:
+            with self.vpn_lock:
+                state, profile = self.vpn_state, self.vpn_profile
+            if profile != 'VLESS':
+                return
+            if state == 'CONNECTED':
+                break
+            if state in ('ERROR', 'DISCONNECTED'):
+                return
+            time.sleep(0.5)
+        else:
+            return
+        dns_ok, egress_ok = self._probe_tunnel_dns(), self._probe_tunnel_egress()
+        lines = []
+        if egress_ok and dns_ok:
+            lines.append('[NEON] VLESS: internet reachable through the tunnel (DNS + 1.1.1.1:443 OK).')
+        elif egress_ok:
+            lines.append('[!] VLESS: traffic leaves through the tunnel, but DNS answers on the tunnel '
+                         'interface failed. Windows may still be querying the router — recheck the '
+                         'client public IP/DNS before trusting this session.')
+        else:
+            lines.append('[!] VLESS: tunnel interface is up but no traffic gets through. Usual causes: '
+                         'the server rejected the TLS certificate (add allowInsecure=1 to the link for '
+                         'self-signed servers), a wrong UUID/short-id, the server port blocked by the '
+                         'uplink, or ICS sharing the physical adapter instead of NEON-VLESS.')
+        with self.vpn_lock:
+            if self.vpn_profile == 'VLESS' and self.vpn_state == 'CONNECTED':
+                self.vpn_logs.extend(lines)
+        self._logger.info('VLESS probe: dns=%s egress=%s', dns_ok, egress_ok)
+
+    @staticmethod
+    def _probe_tunnel_dns(name='neon-check.example', timeout=4.0):
+        """Ask the DNS address sing-box registered on the TUN adapter (172.19.0.2)."""
+        try:
+            labels = b''.join(bytes([len(part)]) + part.encode('idna') for part in name.rstrip('.').split('.'))
+            query = b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00' + labels + b'\x00\x00\x01\x00\x01'
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(timeout)
+                sock.sendto(query, ('172.19.0.2', 53))
+                return bool(sock.recvfrom(1024)[0])
+        except Exception:
+            return False
+
+    @staticmethod
+    def _probe_tunnel_egress(address='1.1.1.1', port=443, timeout=5.0):
+        try:
+            with socket.create_connection((address, port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
+    def connect_vpn(self, profile, username='', password='', key_password=''):
+        with self._vpn_control:
+            return self._connect_openvpn(profile, username, password, key_password)
+
+    def _connect_openvpn(self, profile, username, password, key_password=''):
         if platform.system() != 'Windows':
             return {'error': 'Headless Conf engine control is available in the Windows build.'}
         info = self.inspect_profile(profile)
@@ -1596,14 +1958,23 @@ class Api:
             }
         if self.openvpn_process and self.openvpn_process.poll() is None:
             return {'error': 'A Conf session is already active in NEON. Disconnect it first.'}
-        if info.get('needs_askpass'):
-            return {'error': 'This Conf profile uses an interactive private-key passphrase (askpass), which is not supported.'}
+
+        keypass = str(key_password or '')
+        needs_keypass = bool(info.get('needs_keypass'))
+        if needs_keypass and not keypass:
+            # Used to be a hard "askpass is not supported" failure: NEON now asks for the
+            # key password in the Conf card and delivers it over the management pipe.
+            return {
+                'needs_keypass': True,
+                'error': 'This Conf profile protects its private key with a password. '
+                         'Enter the key password and connect again.',
+            }
 
         cmd = [engine, '--config', os.path.abspath(p), '--verb', '4']
         self._cleanup_auth_file()
+        user = str(username or '').strip()
+        pw = str(password or '')
         if info.get('needs_auth'):
-            user = str(username or '').strip()
-            pw = str(password or '')
             if not user or not pw:
                 return {
                     'needs_auth': True,
@@ -1623,6 +1994,18 @@ class Api:
             cmd.extend(['--management', '127.0.0.1', str(mgmt_port)])
         except Exception:
             mgmt_port = None
+        if needs_keypass:
+            if not mgmt_port:
+                self._cleanup_auth_file()
+                return {
+                    'error': 'Cannot open the local credential pipe required for the key password. '
+                             'Close other Conf sessions and try again.',
+                }
+            # --management-hold stops OpenVPN from asking for the passphrase before the pipe
+            # is connected; --management-query-passwords sends the key password (and any
+            # auth-user-pass query) to that pipe instead of a console prompt that cannot be
+            # answered in a background process.
+            cmd.extend(['--management-query-passwords', '--management-hold'])
 
         try:
             with self.vpn_lock:
@@ -1634,6 +2017,9 @@ class Api:
                 self.vpn_adapter_guid = None
                 self.vpn_ifindex = None
                 self.vpn_logs = ['[NEON] Starting Conf engine in background: ' + profile]
+                if needs_keypass:
+                    self.vpn_logs.append('[NEON] Key password is passed over the local credential pipe '
+                                         '(never written to disk, never logged).')
             proc = subprocess.Popen(
                 cmd,
                 cwd=os.path.dirname(os.path.abspath(p)),
@@ -1648,6 +2034,8 @@ class Api:
             )
             with self.vpn_lock:
                 self.openvpn_process = proc
+            if needs_keypass:
+                self._start_credential_pipe(mgmt_port, proc, user, pw, keypass)
             self.save_settings({'last_profile': profile})
             self._logger.info('Started Conf profile %s', profile)
             threading.Thread(target=self._read_openvpn_log, args=(proc,), daemon=True).start()
@@ -1694,11 +2082,14 @@ class Api:
                 drop_auth = False
                 with self.vpn_lock:
                     if is_vless:
-                        # Do not forward engine logs: they can contain profile data or browsing activity.
+                        # Engine logs may repeat the profile link: forward them only after
+                        # removing the credential they can contain.
                         if self.openvpn_process is process and 'sing-box started (' in line:
                             self.vpn_state = 'CONNECTED'
                             self.vpn_adapter_name = vless.ADAPTER
                             self.vpn_logs.append('[NEON] VLESS tunnel interface ready.')
+                        elif self.openvpn_process is process:
+                            self.vpn_logs.extend(self._vless_log_lines(line))
                         continue
                     self.vpn_logs.append(line)
                     if len(self.vpn_logs) > 1500:
@@ -1839,6 +2230,7 @@ class Api:
                     except Exception:
                         pass
 
+        self._stop_credential_pipe()
         self._cleanup_auth_file()
         if self._uplink_dns_backups and platform.system() == 'Windows':
             try:
@@ -1848,6 +2240,7 @@ class Api:
         with self.vpn_lock:
             self.openvpn_process = None
             self._mgmt_port = None
+            self._vless_secret = ''
             self.vpn_state = 'DISCONNECTED'
             self.vpn_adapter_name = None
             self.vpn_adapter_guid = None
@@ -2223,7 +2616,12 @@ class Api:
         if platform.system() != 'Windows':
             return notes
 
-        if public_name:
+        if public_name and self.vpn_profile == 'VLESS' and public_name == vless.ADAPTER:
+            # sing-box already registered its own resolver on the NEON-VLESS adapter and
+            # answers there; rewriting it to an outside server breaks the tunnel's DNS
+            # hijack for the host and for every client shared through ICS.
+            notes.append('[NEON] VLESS: DNS on "NEON-VLESS" is answered by the tunnel engine — preset left alone.')
+        elif public_name:
             try:
                 res = self._set_adapter_ipv4_dns(public_name, servers)
                 actual = ', '.join(res.get('current') or servers)
@@ -3343,6 +3741,7 @@ class Api:
             except Exception:
                 pass
 
+        self._stop_credential_pipe()
         self._cleanup_auth_file()
         self.cancel_samsung_auth()
         try:

@@ -1790,7 +1790,9 @@ class NeonWindow(QMainWindow):
         self.vpn_user = QLineEdit()
         self.lbl_vpn_pass = QLabel()
         self.lbl_vpn_pass.setObjectName('FieldLabel')
-        vp_row = QHBoxLayout()
+        pass_row_widget = QWidget()
+        vp_row = QHBoxLayout(pass_row_widget)
+        vp_row.setContentsMargins(0, 0, 0, 0)
         vp_row.setSpacing(6)
         self.vpn_pass = QLineEdit()
         self.vpn_pass.setEchoMode(QLineEdit.Password)
@@ -1800,10 +1802,35 @@ class NeonWindow(QMainWindow):
         self.vpn_pass_eye.clicked.connect(lambda: self._toggle_echo(self.vpn_pass, self.vpn_pass_eye))
         vp_row.addWidget(self.vpn_pass, 1)
         vp_row.addWidget(self.vpn_pass_eye)
+        # Some .ovpn profiles ship a passphrase protected private key: the key password is
+        # asked for here and handed to the Conf engine over the local credential pipe.
+        self.lbl_vpn_key = QLabel()
+        self.lbl_vpn_key.setObjectName('FieldLabel')
+        key_row_widget = QWidget()
+        vk_row = QHBoxLayout(key_row_widget)
+        vk_row.setContentsMargins(0, 0, 0, 0)
+        vk_row.setSpacing(6)
+        self.vpn_key_pass = QLineEdit()
+        self.vpn_key_pass.setEchoMode(QLineEdit.Password)
+        self.vpn_key_eye = QPushButton('SHOW')
+        self.vpn_key_eye.setObjectName('EyeBtn')
+        self.vpn_key_eye.setCursor(Qt.PointingHandCursor)
+        self.vpn_key_eye.clicked.connect(lambda: self._toggle_echo(self.vpn_key_pass, self.vpn_key_eye))
+        vk_row.addWidget(self.vpn_key_pass, 1)
+        vk_row.addWidget(self.vpn_key_eye)
+        self.vpn_auth_hint = QLabel()
+        self.vpn_auth_hint.setObjectName('HintLabel')
+        self.vpn_auth_hint.setWordWrap(True)
         al.addWidget(self.lbl_vpn_user)
         al.addWidget(self.vpn_user)
         al.addWidget(self.lbl_vpn_pass)
-        al.addLayout(vp_row)
+        al.addWidget(pass_row_widget)
+        al.addWidget(self.lbl_vpn_key)
+        al.addWidget(key_row_widget)
+        al.addWidget(self.vpn_auth_hint)
+        self.vpn_pass_row = pass_row_widget
+        self.vpn_key_row = key_row_widget
+        self._vpn_auth_info = {}
         l1.addWidget(self.vpn_auth_box)
 
         vc_row = QHBoxLayout()
@@ -1840,6 +1867,14 @@ class NeonWindow(QMainWindow):
         self.btn_vless.setObjectName('PrimaryBtn')
         self.btn_vless.clicked.connect(self.connect_vless)
         l1.addWidget(self.btn_vless)
+        self.vless_hint = QLabel()
+        self.vless_hint.setObjectName('HintLabel')
+        self.vless_hint.setWordWrap(True)
+        l1.addWidget(self.vless_hint)
+        self.vless_strict = ToggleSwitch(
+            '', checked=self.settings.get('vless_strict_route', True) is not False,
+            on_change=self._on_vless_strict_toggled)
+        l1.addWidget(self.vless_strict)
         left.addWidget(c1)
 
         # Card 2: Custom DNS for Wi-Fi Hotspot & Ethernet Sharing
@@ -2527,6 +2562,13 @@ class NeonWindow(QMainWindow):
         self.reboot_hint.setText(self.t('reboot_hint'))
 
         self.btn_vless.setText('Подключить VLESS' if self.lang == 'ru' else 'Connect VLESS')
+        self.vless_strict.setText(self.t('vless_strict'))
+        self.vless_hint.setText(
+            'После запуска NEON проверяет, проходят ли интернет-трафик и DNS действительно через туннель: результат и '
+            'ошибки движка видны в терминале. Для точки доступа/ICS делится именно NEON-VLESS, а не аплинк.'
+            if self.lang == 'ru' else
+            'After start, NEON checks that internet traffic and DNS really flow through the tunnel: the result and any '
+            'engine errors appear in the terminal. For hotspot/ICS sharing, share NEON-VLESS itself — not the uplink.')
         self.lbl_vpn1.setText(self.t('vpn_card1'))
         self.vpn_card1_desc.setText(self.t('vpn_card1_desc'))
         self.lbl_profile.setText(self.t('lbl_profile'))
@@ -2536,6 +2578,9 @@ class NeonWindow(QMainWindow):
         self.vpn_user.setPlaceholderText(self.t('ph_vpn_user'))
         self.lbl_vpn_pass.setText(self.t('lbl_vpn_pass'))
         self.vpn_pass.setPlaceholderText(self.t('ph_vpn_pass'))
+        self.lbl_vpn_key.setText(self.t('lbl_vpn_key'))
+        self.vpn_key_pass.setPlaceholderText(self.t('ph_vpn_key'))
+        self._apply_vpn_auth_state(getattr(self, '_vpn_auth_info', {}))
         self.btn_vpn_conn.setText(self.t('btn_vpn_conn'))
         self.btn_vpn_disc.setText(self.t('btn_vpn_disc'))
         self.vpn_stat_lbl.setText(self.t('vpn_stat_lbl'))
@@ -4233,10 +4278,28 @@ class NeonWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _on_profile_changed(self, profile_name):
         if not profile_name:
+            self._vpn_auth_info = {}
             self.vpn_auth_box.setVisible(False)
             return
         info = self.api.inspect_profile(profile_name)
-        self.vpn_auth_box.setVisible(bool(info.get('needs_auth')))
+        self._apply_vpn_auth_state(info)
+
+    def _apply_vpn_auth_state(self, info):
+        """Show only the fields the selected profile actually asks for."""
+        self._vpn_auth_info = dict(info or {})
+        needs_auth = bool(self._vpn_auth_info.get('needs_auth'))
+        needs_key = bool(self._vpn_auth_info.get('needs_keypass'))
+        for widget in (self.vpn_user, self.lbl_vpn_user, self.vpn_pass_row, self.lbl_vpn_pass):
+            widget.setVisible(needs_auth)
+        for widget in (self.vpn_key_pass, self.lbl_vpn_key, self.vpn_key_eye, self.vpn_key_row):
+            widget.setVisible(needs_key)
+        hints = []
+        if needs_auth:
+            hints.append(self.t('vpn_auth_hint_userpass'))
+        if needs_key:
+            hints.append(self.t('vpn_auth_hint_keypass'))
+        self.vpn_auth_hint.setText(' '.join(hints))
+        self.vpn_auth_box.setVisible(bool(needs_auth or needs_key))
 
     def browse_profile(self):
         path, _ = QFileDialog.getOpenFileName(self, 'Conf Profile', '', 'Conf profile (*.ovpn)')
@@ -4598,10 +4661,33 @@ class NeonWindow(QMainWindow):
         ip = self.his_ip.text().strip()
         self._run_async('his', lambda: self.api.hisense_send_key(ip, key))
 
+    def _on_vless_strict_toggled(self, on):
+        """Strict host routing is a leak blocker, and on some drivers a sharing problem:
+        it can be switched off per machine without touching config files."""
+        self.api.save_settings({'vless_strict_route': bool(on)})
+        self.log('[+] VLESS strict host routing: ' + ('ON' if on else 'OFF'))
+
     def connect_vless(self):
         link = self.vless_link.text().strip()
-        self._run_async('net', lambda: self.api.connect_vless(link),
-                        lambda r: self.vless_link.clear() if r.get('ok') else None)
+        if not link:
+            self.toast.show_toast(
+                'Вставьте ссылку vless://…' if self.lang == 'ru' else 'Paste a vless:// link first.',
+                'warn',
+            )
+            return
+
+        def done(r):
+            if r.get('ok'):
+                self.vless_link.clear()
+                self.toast.show_toast(
+                    'VLESS поднимается; проверка интернета через туннель — в терминале.'
+                    if self.lang == 'ru' else 'VLESS starting; the internet check through the tunnel is logged below.',
+                    'info',
+                )
+            elif r.get('error'):
+                self.toast.show_toast(r['error'], 'error')
+
+        self._run_async('net', lambda: self.api.connect_vless(link), done)
 
     def connect_vpn(self):
         profile = self.profile_combo.currentText()
@@ -4609,13 +4695,22 @@ class NeonWindow(QMainWindow):
             self.toast.show_toast('Choose a Conf profile (.ovpn) first.', 'warn')
             return
         info = self.api.inspect_profile(profile)
+        self._apply_vpn_auth_state(info)
         username = self.vpn_user.text().strip()
         password = self.vpn_pass.text()
-        if info.get('needs_auth'):
-            self.vpn_auth_box.setVisible(True)
-            if not username or not password:
-                self.toast.show_toast('This Conf profile requires username and password.', 'warn')
-                return
+        key_password = self.vpn_key_pass.text()
+        if info.get('needs_auth') and (not username or not password):
+            self.toast.show_toast('This Conf profile requires username and password.', 'warn')
+            (self.vpn_user if not username else self.vpn_pass).setFocus()
+            return
+        if info.get('needs_keypass') and not key_password:
+            self.toast.show_toast(
+                'Ключ в этом профиле защищён паролем — введите пароль ключа.'
+                if self.lang == 'ru' else 'This profile\'s private key is password protected — enter the key password.',
+                'warn',
+            )
+            self.vpn_key_pass.setFocus()
+            return
         if not self._collect_and_validate_dns(persist=True):
             return
         self.log(f'$ start conf --config {profile}')
@@ -4623,10 +4718,21 @@ class NeonWindow(QMainWindow):
         def done(r):
             if r.get('needs_auth'):
                 self.vpn_auth_box.setVisible(True)
+                for widget in (self.vpn_user, self.lbl_vpn_user, self.vpn_pass_row, self.lbl_vpn_pass):
+                    widget.setVisible(True)
+                self.vpn_user.setFocus()
+            elif r.get('needs_keypass'):
+                self.vpn_auth_box.setVisible(True)
+                for widget in (self.vpn_key_pass, self.lbl_vpn_key, self.vpn_key_eye, self.vpn_key_row):
+                    widget.setVisible(True)
+                self.vpn_key_pass.setFocus()
             elif r.get('ok'):
+                # Do not keep the typed secrets in the widgets once the engine has them.
+                self.vpn_pass.clear()
+                self.vpn_key_pass.clear()
                 self.toast.show_toast('Conf engine started in background.', 'info')
 
-        self._run_async('net', lambda: self.api.connect_vpn(profile, username, password), done)
+        self._run_async('net', lambda: self.api.connect_vpn(profile, username, password, key_password), done)
 
     def disconnect_vpn(self):
         self.log('$ disconnect conf engine + stop NEON sharing')
