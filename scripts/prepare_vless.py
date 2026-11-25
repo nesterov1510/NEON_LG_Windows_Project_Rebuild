@@ -50,6 +50,16 @@ def stage():
     print('Staged verified Windows Xray-core engine:', XRAY_DEST)
 
 
+def _format_proc_error(result):
+    parts = []
+    for stream in (result.stderr, result.stdout):
+        for ln in (stream or '').splitlines():
+            s = ln.strip()
+            if s and s not in parts:
+                parts.append(s)
+    return ' | '.join(parts) or f'exit {result.returncode}'
+
+
 def _run_singbox_check(config):
     result = subprocess.run(
         [str(DEST), 'check', '-c', 'stdin'],
@@ -59,7 +69,7 @@ def _run_singbox_check(config):
         timeout=30,
     )
     if result.returncode:
-        raise RuntimeError('sing-box config check: ' + (result.stderr or result.stdout).strip())
+        raise RuntimeError('sing-box config check: ' + _format_proc_error(result))
 
 
 def _run_xray_check(config):
@@ -72,7 +82,7 @@ def _run_xray_check(config):
         timeout=30,
     )
     if result.returncode:
-        raise RuntimeError('Xray config check: ' + (result.stderr or result.stdout).strip())
+        raise RuntimeError('Xray config check: ' + _format_proc_error(result))
 
 
 def check():

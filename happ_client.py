@@ -1007,6 +1007,70 @@ def _xray_stream_settings(node, allow_fragment=False):
     return stream
 
 
+_PRIVATE_CIDRS = (
+    '10.0.0.0/8',
+    '169.254.0.0/16',
+    '172.16.0.0/12',
+    '192.168.0.0/16',
+    '127.0.0.0/8',
+    '224.0.0.0/4',
+    '::1/128',
+    'fc00::/7',
+    'fe80::/10',
+)
+
+_GEODAT_CODES_CACHE = {}
+
+
+def list_geodat_codes(dat_path):
+    """Return uppercase category codes inside an Xray geoip.dat / geosite.dat file."""
+    if not dat_path or not os.path.isfile(dat_path):
+        return set()
+    try:
+        st = os.stat(dat_path)
+        key = (os.path.abspath(dat_path), st.st_size, getattr(st, 'st_mtime_ns', int(st.st_mtime * 1e9)))
+        cached = _GEODAT_CODES_CACHE.get(key)
+        if cached is not None:
+            return cached
+        codes = set()
+        size = st.st_size
+        with open(dat_path, 'rb') as f:
+            while f.tell() < size:
+                tag_b = f.read(1)
+                if not tag_b:
+                    break
+                tag = tag_b[0]
+                body_len = 0
+                shift = 0
+                while shift < 64:
+                    b = f.read(1)
+                    if not b:
+                        body_len = 0
+                        break
+                    val = b[0]
+                    body_len |= (val & 0x7F) << shift
+                    if not (val & 0x80):
+                        break
+                    shift += 7
+                if body_len <= 0 or body_len > size:
+                    break
+                peek = f.read(min(body_len, 128))
+                if tag == 0x0A and len(peek) >= 3 and peek[0] == 0x0A and not (peek[1] & 0x80):
+                    code_len = peek[1]
+                    if 0 < code_len <= len(peek) - 2:
+                        try:
+                            codes.add(peek[2:2 + code_len].decode('utf-8').upper())
+                        except UnicodeDecodeError:
+                            pass
+                rem = body_len - len(peek)
+                if rem > 0:
+                    f.seek(rem, os.SEEK_CUR)
+        _GEODAT_CODES_CACHE[key] = codes
+        return codes
+    except Exception:
+        return set()
+
+
 def _xray_assets_present(asset_dir):
     if not asset_dir:
         return False
@@ -1016,30 +1080,77 @@ def _xray_assets_present(asset_dir):
     )
 
 
-def _filter_xray_domain_rules(items, has_geo):
+def _filter_xray_domain_rules(items, has_geo, geosite_codes=None):
     out = []
+    seen = set()
+
+    def _add(val):
+        if val not in seen:
+            seen.add(val)
+            out.append(val)
+
     for item in items or []:
         s = str(item or '').strip()
         if not s:
             continue
-        if s.lower().startswith(('geosite:', 'ext:')) and not has_geo:
+        low = s.lower()
+        if low.startswith('ext:'):
+            if has_geo:
+                _add(s)
             continue
-        if s.lower().startswith(('domain:', 'full:', 'regexp:', 'keyword:', 'geosite:', 'ext:')):
-            out.append(s)
+        if low.startswith('geosite:'):
+            code = s.split(':', 1)[1].split('@', 1)[0].strip().upper()
+            if has_geo and geosite_codes and code in geosite_codes:
+                _add(s)
+                continue
+            if code in ('RU', 'TLD-RU', 'CATEGORY-RU', 'LOCATED-IN-RU'):
+                if has_geo and geosite_codes:
+                    for alt in ('LOCATED-IN-RU', 'CATEGORY-RU'):
+                        if alt in geosite_codes:
+                            _add('geosite:' + alt.lower())
+                for d in ('domain:ru', 'domain:su', 'domain:xn--p1ai'):
+                    _add(d)
+            elif code == 'PRIVATE':
+                for d in ('domain:local', 'domain:localhost', 'domain:lan'):
+                    _add(d)
+            continue
+        if low.startswith(('domain:', 'full:', 'regexp:', 'keyword:')):
+            _add(s)
         else:
-            out.append('domain:' + s)
+            _add('domain:' + s)
     return out
 
 
-def _filter_xray_ip_rules(items, has_geo):
+def _filter_xray_ip_rules(items, has_geo, geoip_codes=None):
     out = []
+    seen = set()
+
+    def _add(val):
+        if val not in seen:
+            seen.add(val)
+            out.append(val)
+
     for item in items or []:
         s = str(item or '').strip()
         if not s:
             continue
-        if s.lower().startswith(('geoip:', 'ext:')) and not has_geo:
+        low = s.lower()
+        if low.startswith('ext:'):
+            if has_geo:
+                _add(s)
             continue
-        out.append(s)
+        if low.startswith('geoip:'):
+            code = s.split(':', 1)[1].strip().upper()
+            if has_geo and geoip_codes and code in geoip_codes:
+                _add(s)
+                continue
+            if code == 'PRIVATE':
+                for cidr in _PRIVATE_CIDRS:
+                    _add(cidr)
+            elif code == 'RU' and has_geo and geoip_codes and 'IN-RU' in geoip_codes:
+                _add('geoip:in-ru')
+            continue
+        _add(s)
     return out
 
 
@@ -1054,6 +1165,8 @@ def build_xray_config(
     """Build a validated Xray-core JSON config for any supported protocol or xray_json."""
     st = settings or {}
     has_geo = _xray_assets_present(asset_dir)
+    geoip_codes = list_geodat_codes(os.path.join(asset_dir, 'geoip.dat')) if has_geo else set()
+    geosite_codes = list_geodat_codes(os.path.join(asset_dir, 'geosite.dat')) if has_geo else set()
     listen_ip = '0.0.0.0' if st.get('allow_lan') else '127.0.0.1'
     inbounds = [
         {
@@ -1185,7 +1298,7 @@ def build_xray_config(
 
     rules = [{
         'type': 'field',
-        'ip': ['10.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '224.0.0.0/4', '::1/128', 'fc00::/7', 'fe80::/10'],
+        'ip': list(_PRIVATE_CIDRS),
         'outboundTag': 'direct',
     }]
 
@@ -1193,28 +1306,38 @@ def build_xray_config(
     final_tag = 'proxy'
     if rmode == 'bypass_lan_ru':
         ru_doms = ['domain:ru', 'domain:su', 'domain:xn--p1ai']
-        if has_geo:
-            ru_doms.append('geosite:ru')
+        if has_geo and geosite_codes:
+            for cand in ('RU', 'LOCATED-IN-RU', 'CATEGORY-RU'):
+                if cand in geosite_codes:
+                    ru_doms.append('geosite:' + cand.lower())
         rules.append({'type': 'field', 'domain': ru_doms, 'outboundTag': 'direct'})
-        if has_geo:
-            rules.append({'type': 'field', 'ip': ['geoip:ru', 'geoip:private'], 'outboundTag': 'direct'})
+        if has_geo and geoip_codes:
+            ru_ips = []
+            if 'PRIVATE' in geoip_codes:
+                ru_ips.append('geoip:private')
+            if 'RU' in geoip_codes:
+                ru_ips.append('geoip:ru')
+            elif 'IN-RU' in geoip_codes:
+                ru_ips.append('geoip:in-ru')
+            if ru_ips:
+                rules.append({'type': 'field', 'ip': ru_ips, 'outboundTag': 'direct'})
     elif rmode == 'custom' and routing_profile:
-        b_dom = _filter_xray_domain_rules(routing_profile.get('block_domains'), has_geo)
-        b_ip = _filter_xray_ip_rules(routing_profile.get('block_ips'), has_geo)
+        b_dom = _filter_xray_domain_rules(routing_profile.get('block_domains'), has_geo, geosite_codes)
+        b_ip = _filter_xray_ip_rules(routing_profile.get('block_ips'), has_geo, geoip_codes)
         if b_dom:
             rules.append({'type': 'field', 'domain': b_dom, 'outboundTag': 'block'})
         if b_ip:
             rules.append({'type': 'field', 'ip': b_ip, 'outboundTag': 'block'})
 
-        p_dom = _filter_xray_domain_rules(routing_profile.get('proxy_domains'), has_geo)
-        p_ip = _filter_xray_ip_rules(routing_profile.get('proxy_ips'), has_geo)
+        p_dom = _filter_xray_domain_rules(routing_profile.get('proxy_domains'), has_geo, geosite_codes)
+        p_ip = _filter_xray_ip_rules(routing_profile.get('proxy_ips'), has_geo, geoip_codes)
         if p_dom:
             rules.append({'type': 'field', 'domain': p_dom, 'outboundTag': 'proxy'})
         if p_ip:
             rules.append({'type': 'field', 'ip': p_ip, 'outboundTag': 'proxy'})
 
-        d_dom = _filter_xray_domain_rules(routing_profile.get('direct_domains'), has_geo)
-        d_ip = _filter_xray_ip_rules(routing_profile.get('direct_ips'), has_geo)
+        d_dom = _filter_xray_domain_rules(routing_profile.get('direct_domains'), has_geo, geosite_codes)
+        d_ip = _filter_xray_ip_rules(routing_profile.get('direct_ips'), has_geo, geoip_codes)
         if d_dom:
             rules.append({'type': 'field', 'domain': d_dom, 'outboundTag': 'direct'})
         if d_ip:

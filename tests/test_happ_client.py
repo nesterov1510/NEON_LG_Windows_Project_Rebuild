@@ -144,9 +144,31 @@ def test_parse_happ_routing_profile_and_encrypted_subscription():
     assert dec.strip() == SAMPLE_VLESS_REALITY_XHTTP
 
 
+def _pb_varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            break
+    return bytes(out)
+
+
+def _make_geodat(codes):
+    chunks = []
+    for code in codes:
+        raw = code.encode('utf-8')
+        entry = b'\x0a' + _pb_varint(len(raw)) + raw + b'\x12\x02\x08\x00'
+        chunks.append(b'\x0a' + _pb_varint(len(entry)) + entry)
+    return b''.join(chunks)
+
+
 def test_build_xray_and_singbox_configs_and_routing(tmp_path):
-    (tmp_path / 'geoip.dat').write_bytes(b'stub')
-    (tmp_path / 'geosite.dat').write_bytes(b'stub')
+    (tmp_path / 'geoip.dat').write_bytes(_make_geodat(['private', 'ru']))
+    (tmp_path / 'geosite.dat').write_bytes(_make_geodat(['category-ru', 'located-in-ru', 'ru']))
     node_xhttp = happ_client.parse_proxy_uri(SAMPLE_VLESS_REALITY_XHTTP)
     xcfg = happ_client.build_xray_config(
         node_xhttp,
@@ -319,3 +341,53 @@ def test_ui_html_contains_happ_and_askpass_controls():
         html = f.read()
     for token in ('happImport()', 'happConnect()', 'happPing()', 'happBest()', 'vpnKeyPass'):
         assert token in html
+
+
+def test_xray_geodat_code_filtering_avoids_missing_geosite_ru(tmp_path):
+    geosite = tmp_path / 'geosite.dat'
+    geoip = tmp_path / 'geoip.dat'
+    geosite.write_bytes(_make_geodat(['category-ru', 'located-in-ru', 'cn']))
+    geoip.write_bytes(_make_geodat(['private', 'in-ru']))
+
+    assert happ_client.list_geodat_codes(str(geosite)) == {'CATEGORY-RU', 'LOCATED-IN-RU', 'CN'}
+    assert happ_client.list_geodat_codes(str(geoip)) == {'PRIVATE', 'IN-RU'}
+
+    node = happ_client.parse_proxy_uri(
+        'vless://00000000-0000-4000-8000-000000000001@198.51.100.10:443?security=tls#Test'
+    )
+    cfg = happ_client.build_xray_config(
+        node,
+        settings={'routing_mode': 'bypass_lan_ru'},
+        asset_dir=str(tmp_path),
+    )
+    dom_rules = [r for r in cfg['routing']['rules'] if 'domain' in r]
+    all_doms = [d for r in dom_rules for d in r['domain']]
+    assert 'geosite:ru' not in all_doms
+    assert 'geosite:located-in-ru' in all_doms
+    assert 'geosite:category-ru' in all_doms
+    assert 'domain:ru' in all_doms
+
+    ip_rules = [r for r in cfg['routing']['rules'] if 'ip' in r]
+    all_ips = [x for r in ip_rules for x in r['ip']]
+    assert 'geoip:private' in all_ips
+    assert 'geoip:in-ru' in all_ips
+    assert 'geoip:ru' not in all_ips
+
+    # Custom profile with geosite:ru + missing code + geoip:ru
+    custom = {
+        'direct_domains': ['geosite:ru', 'geosite:nonexistent-category'],
+        'direct_ips': ['geoip:ru'],
+        'global_proxy': True,
+    }
+    cfg2 = happ_client.build_xray_config(
+        node,
+        settings={'routing_mode': 'custom'},
+        routing_profile=custom,
+        asset_dir=str(tmp_path),
+    )
+    doms2 = [d for r in cfg2['routing']['rules'] if 'domain' in r for d in r['domain']]
+    ips2 = [x for r in cfg2['routing']['rules'] if 'ip' in r for x in r['ip']]
+    assert 'geosite:nonexistent-category' not in doms2
+    assert 'geosite:ru' not in doms2
+    assert 'geosite:located-in-ru' in doms2
+    assert 'geoip:in-ru' in ips2
