@@ -24,7 +24,7 @@ jobs:
       - name: Run unit tests
         run: |
           for attempt in 1 2; do
-            python -m pytest -v --tb=short tests/test_core.py tests/test_alemtv.py | tee pytest_report.txt
+            python -m pytest -v --tb=short tests/test_core.py tests/test_alemtv.py tests/test_vless.py tests/test_happ_client.py | tee pytest_report.txt
             code=${PIPESTATUS[0]}
             if [ "$code" -eq 0 ]; then break; fi
             echo "pytest failed (attempt $attempt, exit $code); retrying once for CI timing flakes"

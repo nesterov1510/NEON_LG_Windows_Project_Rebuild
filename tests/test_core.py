@@ -206,6 +206,120 @@ def test_openvpn_auth_file_cleanup_and_emergency_leak_stop(tmp_api, tmp_path):
     assert leftovers == []
 
 
+def test_inspect_profile_askpass_encrypted_key_pkcs12_and_bom(tmp_api, tmp_path):
+    # 1. UTF-8 BOM + auth-user-pass referencing missing file
+    bom_auth = tmp_path / 'bom_auth.ovpn'
+    bom_auth.write_bytes(b'\xef\xbb\xbfclient\nauth-user-pass missing_secret.txt\n')
+    tmp_api.remember_profile(str(bom_auth))
+    r1 = tmp_api.inspect_profile('bom_auth')
+    assert r1['needs_auth'] is True
+    assert r1['needs_askpass'] is False
+    assert r1['needs_password'] is True
+
+    # 2. Inline <key> with BEGIN ENCRYPTED PRIVATE KEY -> needs_askpass
+    enc_key = tmp_path / 'enc_key.ovpn'
+    enc_key.write_text(
+        'client\n<key>\n-----BEGIN ENCRYPTED PRIVATE KEY-----\nMII...\n-----END ENCRYPTED PRIVATE KEY-----\n</key>\n',
+        encoding='utf-8',
+    )
+    tmp_api.remember_profile(str(enc_key))
+    r2 = tmp_api.inspect_profile('enc_key')
+    assert r2['needs_auth'] is False
+    assert r2['needs_askpass'] is True
+    assert r2['needs_password'] is True
+
+    # 3. External key file with Proc-Type: 4,ENCRYPTED
+    ext_key = tmp_path / 'client.key'
+    ext_key.write_text('-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n', encoding='utf-8')
+    ext_ovpn = tmp_path / 'ext_key.ovpn'
+    ext_ovpn.write_text('client\nkey client.key\n', encoding='utf-8')
+    tmp_api.remember_profile(str(ext_ovpn))
+    r3 = tmp_api.inspect_profile('ext_key')
+    assert r3['needs_askpass'] is True
+
+    # 4. Real PKCS#12 encrypted vs unencrypted
+    import datetime
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import pkcs12
+    from cryptography.x509.oid import NameOID
+
+    pkey = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'neon-test')])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(pkey.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=30))
+        .sign(pkey, hashes.SHA256())
+    )
+    p12_enc = pkcs12.serialize_key_and_certificates(
+        b'neon', pkey, cert, None, serialization.BestAvailableEncryption(b'p12secret')
+    )
+    p12_plain = pkcs12.serialize_key_and_certificates(
+        b'neon', pkey, cert, None, serialization.NoEncryption()
+    )
+
+    import base64
+    p12_enc_ovpn = tmp_path / 'p12_enc.ovpn'
+    p12_enc_ovpn.write_text(f'client\n<pkcs12>\n{base64.b64encode(p12_enc).decode()}\n</pkcs12>\n', encoding='utf-8')
+    p12_plain_ovpn = tmp_path / 'p12_plain.ovpn'
+    p12_plain_ovpn.write_text(f'client\n<pkcs12>\n{base64.b64encode(p12_plain).decode()}\n</pkcs12>\n', encoding='utf-8')
+    tmp_api.remember_profile(str(p12_enc_ovpn))
+    tmp_api.remember_profile(str(p12_plain_ovpn))
+
+    assert tmp_api.inspect_profile('p12_enc')['needs_askpass'] is True
+    assert tmp_api.inspect_profile('p12_plain')['needs_askpass'] is False
+
+
+def test_connect_openvpn_uses_askpass_temp_file_and_wipes_on_exit(tmp_api, tmp_path):
+    ovpn = tmp_path / 'locked_both.ovpn'
+    ovpn.write_text(
+        'client\nauth-user-pass\naskpass\n',
+        encoding='utf-8',
+    )
+    tmp_api.remember_profile(str(ovpn))
+
+    captured = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured['cmd'] = list(cmd)
+        idx_auth = cmd.index('--auth-user-pass')
+        idx_ask = cmd.index('--askpass')
+        captured['auth_text'] = open(cmd[idx_auth + 1], encoding='utf-8').read()
+        captured['ask_text'] = open(cmd[idx_ask + 1], encoding='utf-8').read()
+        fake_stdout = mock.MagicMock()
+        fake_stdout.readline.side_effect = ['Initialization Sequence Completed\n', '']
+        proc = mock.MagicMock()
+        proc.stdout = fake_stdout
+        proc.poll.return_value = None
+        return proc
+
+    with mock.patch('platform.system', return_value='Windows'), \
+         mock.patch.object(tmp_api, '_openvpn_exe', return_value='C:\\OpenVPN\\bin\\openvpn.exe'), \
+         mock.patch('subprocess.Popen', side_effect=fake_popen):
+        miss = tmp_api.connect_vpn('locked_both', 'alice', 'pw123', '')
+        assert miss['needs_askpass'] is True
+        assert 'error' in miss
+
+        ok = tmp_api.connect_vpn('locked_both', 'alice', 'pw123', 'keypass!99')
+        assert ok['ok'] is True
+        time.sleep(0.2)
+        tmp_api.disconnect_vpn()
+
+    assert captured['auth_text'] == 'alice\npw123\n'
+    assert captured['ask_text'] == 'keypass!99\n'
+    assert tmp_api._auth_temp_file is None
+    assert tmp_api._askpass_temp_file is None
+    assert list(tmp_path.rglob('neon_askpass_*.txt')) == []
+    assert list(tmp_path.rglob('neon_auth_*.txt')) == []
+
+
 def test_start_vpn_hotspot_win81_and_win10_fallback(tmp_api):
     tmp_api.vpn_state = 'CONNECTED'
     adapters = [

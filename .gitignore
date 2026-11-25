@@ -8,3 +8,6 @@ dist/
 *.egg-info/
 
 /assets/vless/sing-box.exe
+/assets/vless/xray.exe
+/assets/vless/geoip.dat
+/assets/vless/geosite.dat
