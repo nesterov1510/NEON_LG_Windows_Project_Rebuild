@@ -1838,6 +1838,12 @@ class Api:
         ('deadline exceeded', '[!] VLESS: the server did not answer. If a hotspot/ICS is running, share NEON-VLESS — not the Wi-Fi/Ethernet uplink — otherwise the tunnel routes back into itself.'),
         ('i/o timeout', '[!] VLESS: the server did not answer. If a hotspot/ICS is running, share NEON-VLESS — not the Wi-Fi/Ethernet uplink — otherwise the tunnel routes back into itself.'),
         ('denied', '[!] VLESS: sing-box could not create the NEON-VLESS adapter. Run NEON as Administrator and make sure the Wintun driver is not blocked.'),
+        # A rejected option is fatal at start-up, and the engine says so in one line.
+        ('is deprecated in sing-box', '[!] VLESS: the engine refused to start — this build of sing-box rejects the '
+                                      'option above instead of warning. Send this log line to NEON support; the bundled '
+                                      'engine version has to match the config generator.'),
+        ('unknown option', '[!] VLESS: the engine refused to start because of an unsupported option. Send this log line '
+                           'to NEON support.'),
     )
 
     def _vless_log_lines(self, line):
