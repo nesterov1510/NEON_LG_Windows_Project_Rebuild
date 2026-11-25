@@ -212,7 +212,8 @@ def test_build_xray_and_singbox_configs_and_routing(tmp_path):
     tun_in = next(i for i in scfg_bridge['inbounds'] if i['type'] == 'tun')
     assert tun_in['address'] == ['172.19.0.1/30', 'fdfe:dcba:9876::1/126']
     assert '203.0.113.10/32' in tun_in['route_exclude_address']
-    assert any(o.get('type') == 'socks' and o.get('server_port') == 18080 for o in scfg_bridge['outbounds'])
+    assert scfg_bridge['route']['default_domain_resolver'] == 'bootstrap'
+    assert any(o.get('type') == 'socks' and o.get('server_port') == 18080 and o.get('domain_resolver') == 'bootstrap' for o in scfg_bridge['outbounds'])
     assert any(r.get('process_name') == ['xray.exe'] and r.get('outbound') == 'direct' for r in scfg_bridge['route']['rules'])
 
     # sing-box standalone Hysteria2

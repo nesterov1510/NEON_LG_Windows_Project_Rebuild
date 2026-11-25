@@ -1601,6 +1601,7 @@ def build_singbox_config(
             'tag': 'vpn',
             'server': '127.0.0.1',
             'server_port': int(upstream_socks_port),
+            'domain_resolver': 'bootstrap',
         }
     else:
         vpn_outbound = _singbox_outbound_for_node(node)
@@ -1647,6 +1648,7 @@ def build_singbox_config(
         },
         'route': {
             'auto_detect_interface': True,
+            'default_domain_resolver': 'bootstrap',
             'rules': rules,
             'final': final_out,
         },
