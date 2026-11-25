@@ -115,6 +115,24 @@ def check():
         mode='tun',
         settings={'routing_mode': 'bypass_lan_ru'},
     ))
+
+    sample_hy1 = happ_client.parse_proxy_uri(
+        'hysteriya://198.51.100.21:443?auth=secret&peer=example.org&upmbps=100&downmbps=100&obfs=xplus&obfsParam=obf&mport=20000-30000#Hy1'
+    )
+    _run_singbox_check(happ_client.build_singbox_config(
+        sample_hy1,
+        mode='tun',
+        settings={'routing_mode': 'bypass_lan_ru'},
+    ))
+
+    sample_hy_alias = happ_client.parse_proxy_uri(
+        'hysteriya://secret@198.51.100.22:443?sni=example.org&mport=20000-30000&hop-interval=30s#Hy2Alias'
+    )
+    _run_singbox_check(happ_client.build_singbox_config(
+        sample_hy_alias,
+        mode='proxy',
+        settings={'routing_mode': 'bypass_lan_ru'},
+    ))
     print('Verified sing-box + Xray-core configs successfully.')
 
 

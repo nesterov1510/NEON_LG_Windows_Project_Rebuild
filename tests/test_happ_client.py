@@ -392,3 +392,144 @@ def test_xray_geodat_code_filtering_avoids_missing_geosite_ru(tmp_path):
     assert 'geosite:ru' not in doms2
     assert 'geosite:located-in-ru' in doms2
     assert 'geoip:in-ru' in ips2
+
+
+def test_hysteria_and_hysteriya_uris_clash_singbox_and_quick_connect(tmp_path, monkeypatch):
+    # 1. hysteriya:// as Hysteria v1 (auth + obfsParam + mport)
+    hy1_uri = (
+        'hysteriya://198.51.100.31:443?protocol=udp&auth=hy1secret&peer=cdn.example.org'
+        '&upmbps=120&downmbps=200&obfs=xplus&obfsParam=xpkey&mport=20000-30000&hop-interval=30&insecure=1#HY1%20Node'
+    )
+    n1 = happ_client.parse_proxy_uri(hy1_uri)
+    assert n1['protocol'] == 'hysteria'
+    assert n1['params']['auth'] == 'hy1secret'
+    assert n1['params']['obfs'] == 'xpkey'
+    assert n1['params']['sni'] == 'cdn.example.org'
+    assert n1['params']['up_mbps'] == 120
+    assert n1['params']['down_mbps'] == 200
+    assert n1['params']['server_ports'] == ['20000:30000']
+    assert n1['params']['hop_interval'] == '30s'
+    assert n1['params']['allow_insecure'] is True
+
+    scfg1 = happ_client.build_singbox_config(node=n1, mode='tun')
+    out1 = next(o for o in scfg1['outbounds'] if o['tag'] == 'vpn')
+    assert out1['type'] == 'hysteria'
+    assert out1['auth_str'] == 'hy1secret'
+    assert out1['obfs'] == 'xpkey'
+    assert out1['up_mbps'] == 120 and out1['down_mbps'] == 200
+    assert out1['server_ports'] == ['20000:30000']
+    assert out1['hop_interval'] == '30s'
+    assert out1['domain_resolver'] == 'bootstrap'
+    assert happ_client.choose_engine_plan(n1, {'mode': 'tun', 'engine': 'xray'}, has_xray=True, has_singbox=True) == 'singbox_tun'
+    assert happ_client.choose_engine_plan(n1, {'mode': 'proxy'}, has_xray=True, has_singbox=True) == 'singbox_proxy'
+
+    # 2. hysteriya:// as Hysteria2 alias (userinfo with colon + mport without explicit port)
+    hy2_alias = 'hysteriya://usr:pw@198.51.100.32?sni=hy2.example.org&obfs=salamander&obfs-password=salpw&mport=31000-32000#HY2%20Alias'
+    n2 = happ_client.parse_proxy_uri(hy2_alias)
+    assert n2['protocol'] == 'hysteria2'
+    assert n2['port'] == 31000
+    assert n2['params']['password'] == 'usr:pw'
+    assert n2['params']['obfs'] == 'salamander'
+    assert n2['params']['server_ports'] == ['31000:32000']
+
+    # 3. Hysteria v1 default speeds when omitted in hysteria:// URI
+    n1_def = happ_client.parse_proxy_uri('hysteria://198.51.100.33:443?auth=tok#HY1Def')
+    assert n1_def['protocol'] == 'hysteria'
+    assert n1_def['params']['up_mbps'] == 100 and n1_def['params']['down_mbps'] == 100
+
+    # 4. Base64 subscription with hysteriya:// + hysteria:// + happ://add/hysteriya://
+    b64_sub = base64.b64encode('\n'.join([hy1_uri, hy2_alias]).encode('utf-8')).decode('ascii')
+    sub_b64 = happ_client.parse_subscription_payload(b64_sub)
+    assert [n['protocol'] for n in sub_b64['nodes']] == ['hysteria', 'hysteria2']
+
+    unw = happ_client.unwrap_happ_link('happ://add/' + hy2_alias)
+    assert unw['kind'] == 'unwrapped'
+    assert unw['value'].startswith('hysteriya://')
+
+    # 5. Clash YAML subscription (multiline + inline)
+    clash_yaml = """
+proxies:
+  - name: Clash HY1
+    type: hysteria
+    server: 198.51.100.41
+    port: 443
+    auth-str: cauth
+    up: 80
+    down: 160
+    sni: clash1.example
+    skip-cert-verify: true
+    alpn:
+      - hysteria
+  - { name: "Clash HY2", type: hysteria2, server: 198.51.100.42, port: 8443, password: "cpw", sni: "clash2.example", obfs: salamander, obfs-password: "opw", skip-cert-verify: true }
+"""
+    sub_clash = happ_client.parse_subscription_payload(clash_yaml)
+    assert [(n['name'], n['protocol']) for n in sub_clash['nodes']] == [
+        ('Clash HY1', 'hysteria'),
+        ('Clash HY2', 'hysteria2'),
+    ]
+    assert sub_clash['nodes'][0]['params']['alpn'] == ['hysteria']
+    assert sub_clash['nodes'][1]['params']['obfs_password'] == 'opw'
+
+    # 6. sing-box JSON subscription containing hysteria & hysteria2 outbounds
+    sb_sub_json = json.dumps({
+        'outbounds': [
+            {'type': 'direct', 'tag': 'direct'},
+            {'type': 'hysteria', 'tag': 'SB-HY1', 'server': '198.51.100.43', 'server_port': 443, 'auth_str': 'sb1', 'up_mbps': 50, 'down_mbps': 100, 'tls': {'enabled': True, 'server_name': 'sb.example'}},
+        ],
+    })
+    sub_sb = happ_client.parse_subscription_payload(sb_sub_json)
+    assert len(sub_sb['nodes']) == 1
+    assert sub_sb['nodes'][0]['protocol'] == 'hysteria'
+    assert sub_sb['nodes'][0]['params']['auth'] == 'sb1'
+
+    # 7. Quick-connect via core.Api.connect_vless supports hysteriya:// directly
+    monkeypatch.setenv('APPDATA', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path))
+    exe_sb = tmp_path / 'assets/vless/sing-box.exe'
+    exe_sb.parent.mkdir(parents=True)
+    exe_sb.touch()
+    proc = mock.Mock()
+    proc.poll.return_value = None
+    proc.stdin = mock.MagicMock()
+
+    api = Api()
+    try:
+        with mock.patch('core.platform.system', return_value='Windows'), \
+                mock.patch('core.resource', lambda p: str(tmp_path / p)), \
+                mock.patch('core.subprocess.Popen', return_value=proc) as m_popen, \
+                mock.patch('core.threading.Thread'):
+            res = api.connect_vless(hy1_uri)
+        assert res['ok'] is True
+        assert res['plan'] == 'singbox_tun'
+        assert str(exe_sb) in m_popen.call_args[0][0]
+        written_cfg = json.loads(proc.stdin.write.call_args[0][0])
+        assert any(o.get('type') == 'hysteria' and o.get('auth_str') == 'hy1secret' for o in written_cfg['outbounds'])
+
+        # 8. Also check subscription URL with hysteriya:// passed directly to connect_vless
+        class _FakeSubResp:
+            headers = {'profile-title': 'HysteriyaSub'}
+            def geturl(self):
+                return 'https://sub.example.org/hy'
+            def read(self, _n=-1):
+                return hy2_alias.encode('utf-8')
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        proc2 = mock.Mock()
+        proc2.poll.return_value = None
+        proc2.stdin = mock.MagicMock()
+        api.openvpn_process = None
+        with mock.patch('happ_client.urllib.request.urlopen', return_value=_FakeSubResp()), \
+                mock.patch('core.platform.system', return_value='Windows'), \
+                mock.patch('core.resource', lambda p: str(tmp_path / p)), \
+                mock.patch('core.subprocess.Popen', return_value=proc2), \
+                mock.patch('core.threading.Thread'):
+            res2 = api.connect_vless('https://sub.example.org/hy')
+        assert res2['ok'] is True
+        assert res2['plan'] == 'singbox_tun'
+        written_cfg2 = json.loads(proc2.stdin.write.call_args[0][0])
+        assert any(o.get('type') == 'hysteria2' and o.get('password') == 'usr:pw' for o in written_cfg2['outbounds'])
+    finally:
+        api.close()

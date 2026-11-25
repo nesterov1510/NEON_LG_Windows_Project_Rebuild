@@ -1662,6 +1662,17 @@ class Api:
     def connect_vless(self, link):
         if platform.system() != 'Windows':
             return {'error': 'Embedded VLESS is available on Windows x64.'}
+        raw = str(link or '').strip()
+        quick_prefixes = ('http://', 'https://', 'happ://') + tuple(
+            sch + '://' for sch in happ_client.SUPPORTED_SCHEMES if sch != 'vless'
+        )
+        if raw.lower().startswith(quick_prefixes):
+            imp = self.happ_import(raw)
+            if imp.get('error'):
+                return imp
+            if imp.get('routing_imported'):
+                return imp
+            return self.happ_connect()
         with self._vpn_control:
             if self.openvpn_process and self.openvpn_process.poll() is None:
                 return {'error': 'Disconnect the active VPN first.'}
@@ -2242,7 +2253,8 @@ class Api:
             return {'error': 'Launching local Happ Desktop is available on Windows.'}
         exe = happ_client.find_happ_desktop_exe()
         target = str(uri or '').strip()
-        if target and target.lower().startswith(('happ://', 'vless://', 'vmess://', 'trojan://', 'ss://', 'hy2://', 'hysteria2://')):
+        allowed_schemes = ('happ://',) + tuple(sch + '://' for sch in happ_client.SUPPORTED_SCHEMES)
+        if target and target.lower().startswith(allowed_schemes):
             try:
                 if exe:
                     subprocess.Popen([exe, target], creationflags=self._creation_flags())

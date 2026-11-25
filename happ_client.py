@@ -31,7 +31,19 @@ DEFAULT_DNS_SERVER = '1.1.1.1'
 DEFAULT_SOCKS_PORT = 10808
 DEFAULT_HTTP_PORT = 10809
 
-SUPPORTED_SCHEMES = ('vless', 'vmess', 'trojan', 'ss', 'hy2', 'hysteria2', 'socks', 'socks5')
+SUPPORTED_SCHEMES = (
+    'vless',
+    'vmess',
+    'trojan',
+    'ss',
+    'hy2',
+    'hysteria2',
+    'hysteria',
+    'hysteriya',
+    'hysteriya2',
+    'socks',
+    'socks5',
+)
 ENCRYPTED_HAPP_RE = re.compile(r'^happ://crypt\d*/', re.IGNORECASE)
 _RU_BYPASS_SUFFIXES = ('.ru', '.su', '.xn--p1ai', '.by', '.kz', '.tm')
 
@@ -245,7 +257,8 @@ def unwrap_happ_link(raw):
     if low.startswith('happ://add/'):
         inner = s[len('happ://add/'):].strip()
         unq = _safe_unquote(inner).strip()
-        if unq.startswith(('http://', 'https://', 'vless://', 'vmess://', 'trojan://', 'ss://', 'hy2://', 'hysteria2://', 'socks://', 'socks5://', '{', '[')):
+        direct_prefixes = ('http://', 'https://', '{', '[') + tuple(sch + '://' for sch in SUPPORTED_SCHEMES)
+        if unq.lower().startswith(direct_prefixes):
             return {'kind': 'unwrapped', 'value': unq}
         try:
             dec = _b64decode_str(inner).strip()
@@ -515,30 +528,95 @@ def _parse_ss_uri(raw_uri):
     }
 
 
+def _parse_port_hopping(raw_ports):
+    txt = str(raw_ports or '').strip()
+    if not txt:
+        return [], None
+    out = []
+    first_port = None
+    for part in re.split(r'[,;]+', txt):
+        tok = part.strip()
+        if not tok:
+            continue
+        m = re.fullmatch(r'(\d{1,5})(?:[-:](\d{1,5}))?', tok)
+        if not m:
+            continue
+        p1 = int(m.group(1))
+        p2 = int(m.group(2)) if m.group(2) else p1
+        if p1 > p2:
+            p1, p2 = p2, p1
+        if not (1 <= p1 <= p2 <= 65535):
+            continue
+        if first_port is None:
+            first_port = p1
+        out.append(f'{p1}:{p2}')
+    return out, first_port
+
+
+def _extract_mbps(raw_val, default=0):
+    txt = str(raw_val or '').strip().lower()
+    if not txt:
+        return int(default or 0)
+    m = re.search(r'(\d+(?:\.\d+)?)', txt)
+    if not m:
+        return int(default or 0)
+    num = float(m.group(1))
+    if 'gbps' in txt or txt.endswith('g'):
+        num *= 1000.0
+    elif 'kbps' in txt or txt.endswith('k'):
+        num = max(1.0, num / 1000.0)
+    return max(0, int(round(num)))
+
+
+def _normalize_hop_interval(raw_val):
+    txt = str(raw_val or '').strip().lower()
+    if not txt:
+        return ''
+    if re.fullmatch(r'\d+', txt):
+        return f'{txt}s'
+    return txt
+
+
+def _split_hysteria_uri(raw_uri):
+    body = raw_uri.strip().split('://', 1)[1]
+    frag = ''
+    if '#' in body:
+        body, frag = body.split('#', 1)
+    query = ''
+    if '?' in body:
+        body, query = body.split('?', 1)
+    userinfo = ''
+    if '@' in body:
+        userinfo, hostpart = body.rsplit('@', 1)
+    else:
+        hostpart = body
+    hostpart = hostpart.split('/', 1)[0]
+    norm = 'https://' + hostpart + (('?' + query) if query else '') + (('#' + frag) if frag else '')
+    return urllib.parse.urlsplit(norm), userinfo
+
+
 def _parse_hy2_uri(raw_uri):
     s = raw_uri.strip()
-    norm = 'https://' + s.split('://', 1)[1]
-    uri = urllib.parse.urlsplit(norm)
-    host, port = _validate_host_port(uri.hostname, uri.port or 443)
-    password = _safe_unquote(uri.username or '')
-    if not password and uri.password:
-        password = _safe_unquote(uri.password)
+    uri, userinfo = _split_hysteria_uri(s)
+    q_low = {k.lower(): v for k, v in urllib.parse.parse_qsl(uri.query, keep_blank_values=True)}
+    server_ports, first_hop = _parse_port_hopping(q_low.get('mport') or q_low.get('ports'))
+    host, port = _validate_host_port(uri.hostname, uri.port or first_hop or 443)
+    password = _safe_unquote(userinfo) if userinfo else _safe_unquote(q_low.get('auth') or q_low.get('password') or '')
     if not password:
         raise ValueError('Hysteria2 password/auth token is required.')
-    q = dict(urllib.parse.parse_qsl(uri.query, keep_blank_values=True))
     name = _clean_label(uri.fragment, f'{host}:{port}')
-    upmbps = q.get('upmbps') or q.get('up') or ''
-    downmbps = q.get('downmbps') or q.get('down') or ''
     params = {
         'password': password,
-        'sni': (q.get('sni') or host).strip(),
-        'allow_insecure': _parse_bool(q.get('insecure') or q.get('allowInsecure')),
-        'obfs': (q.get('obfs') or '').strip().lower(),
-        'obfs_password': _safe_unquote(q.get('obfs-password') or ''),
-        'alpn': [a.strip() for a in (q.get('alpn') or 'h3').split(',') if a.strip()],
-        'up_mbps': int(re.sub(r'\D+', '', upmbps) or 0),
-        'down_mbps': int(re.sub(r'\D+', '', downmbps) or 0),
-        'mport': (q.get('mport') or '').strip(),
+        'sni': (q_low.get('sni') or q_low.get('peer') or host).strip(),
+        'allow_insecure': _parse_bool(q_low.get('insecure') or q_low.get('allowinsecure') or q_low.get('skip-cert-verify')),
+        'obfs': (q_low.get('obfs') or '').strip().lower(),
+        'obfs_password': _safe_unquote(q_low.get('obfs-password') or q_low.get('obfsparam') or q_low.get('obfs_password') or ''),
+        'alpn': [a.strip() for a in (q_low.get('alpn') or 'h3').split(',') if a.strip()],
+        'up_mbps': _extract_mbps(q_low.get('upmbps') or q_low.get('up_mbps') or q_low.get('up'), default=0),
+        'down_mbps': _extract_mbps(q_low.get('downmbps') or q_low.get('down_mbps') or q_low.get('down'), default=0),
+        'mport': (q_low.get('mport') or q_low.get('ports') or '').strip(),
+        'server_ports': server_ports,
+        'hop_interval': _normalize_hop_interval(q_low.get('hop-interval') or q_low.get('hop_interval') or q_low.get('hopinterval')),
     }
     return {
         'id': _stable_id(s),
@@ -554,6 +632,65 @@ def _parse_hy2_uri(raw_uri):
         'raw': s,
         'latency_ms': None,
     }
+
+
+def _parse_hysteria_v1_uri(raw_uri):
+    s = raw_uri.strip()
+    uri, userinfo = _split_hysteria_uri(s)
+    q_low = {k.lower(): v for k, v in urllib.parse.parse_qsl(uri.query, keep_blank_values=True)}
+    server_ports, first_hop = _parse_port_hopping(q_low.get('mport') or q_low.get('ports'))
+    host, port = _validate_host_port(uri.hostname, uri.port or first_hop or 443)
+    auth = _safe_unquote(q_low.get('auth') or q_low.get('password') or '')
+    if not auth and userinfo:
+        auth = _safe_unquote(userinfo)
+    obfs_mode = (q_low.get('obfs') or '').strip()
+    obfs_param = _safe_unquote(q_low.get('obfsparam') or q_low.get('obfs_param') or q_low.get('obfs-password') or '').strip()
+    if obfs_mode.lower() in ('', 'none'):
+        obfs = ''
+    elif obfs_mode.lower() == 'xplus':
+        obfs = obfs_param
+    else:
+        obfs = obfs_param or obfs_mode
+    name = _clean_label(uri.fragment, f'{host}:{port}')
+    params = {
+        'auth': auth,
+        'sni': (q_low.get('sni') or q_low.get('peer') or host).strip(),
+        'allow_insecure': _parse_bool(q_low.get('insecure') or q_low.get('allowinsecure') or q_low.get('skip-cert-verify')),
+        'obfs': obfs,
+        'alpn': [a.strip() for a in (q_low.get('alpn') or '').split(',') if a.strip()],
+        'up_mbps': _extract_mbps(q_low.get('upmbps') or q_low.get('up_mbps') or q_low.get('up'), default=100) or 100,
+        'down_mbps': _extract_mbps(q_low.get('downmbps') or q_low.get('down_mbps') or q_low.get('down'), default=100) or 100,
+        'mport': (q_low.get('mport') or q_low.get('ports') or '').strip(),
+        'server_ports': server_ports,
+        'hop_interval': _normalize_hop_interval(q_low.get('hop-interval') or q_low.get('hop_interval') or q_low.get('hopinterval')),
+        'v1_protocol': (q_low.get('protocol') or 'udp').strip().lower(),
+    }
+    return {
+        'id': _stable_id(s),
+        'protocol': 'hysteria',
+        'name': name,
+        'flag': _extract_flag(name),
+        'host': host,
+        'port': port,
+        'security': 'tls',
+        'transport': 'quic',
+        'summary': 'Hysteria · QUIC',
+        'params': params,
+        'raw': s,
+        'latency_ms': None,
+    }
+
+
+def _parse_hysteria_any_uri(raw_uri, scheme):
+    s = raw_uri.strip()
+    uri, userinfo = _split_hysteria_uri(s)
+    q_low = {k.lower(): v for k, v in urllib.parse.parse_qsl(uri.query, keep_blank_values=True)}
+    obfs_val = (q_low.get('obfs') or '').strip().lower()
+    has_v2_keys = ('obfs-password' in q_low) or ('pinsha256' in q_low) or (obfs_val == 'salamander')
+    has_v1_only_keys = any(k in q_low for k in ('auth', 'obfsparam', 'obfs_param', 'peer', 'protocol')) or (obfs_val == 'xplus')
+    if has_v2_keys or (scheme == 'hysteriya' and bool(userinfo) and not has_v1_only_keys):
+        return _parse_hy2_uri(s)
+    return _parse_hysteria_v1_uri(s)
 
 
 def _parse_socks_uri(raw_uri):
@@ -599,11 +736,470 @@ def parse_proxy_uri(raw_uri):
         return _parse_trojan_uri(s)
     if scheme == 'ss':
         return _parse_ss_uri(s)
-    if scheme in ('hy2', 'hysteria2'):
+    if scheme in ('hy2', 'hysteria2', 'hysteriya2'):
         return _parse_hy2_uri(s)
+    if scheme in ('hysteria', 'hysteriya'):
+        return _parse_hysteria_any_uri(s, scheme)
     if scheme in ('socks', 'socks5'):
         return _parse_socks_uri(s)
     raise ValueError(f'Unsupported scheme: {scheme}')
+
+
+def _node_from_singbox_outbound(out, idx=0):
+    if not isinstance(out, dict):
+        return None
+    otype = str(out.get('type') or '').strip().lower()
+    if not otype or otype in ('direct', 'block', 'dns', 'selector', 'urltest'):
+        return None
+    server = str(out.get('server') or '').strip()
+    if not server:
+        return None
+    server_ports, first_hop = _parse_port_hopping(','.join(out.get('server_ports') or []) if isinstance(out.get('server_ports'), list) else out.get('server_ports'))
+    try:
+        host, port = _validate_host_port(server, out.get('server_port') or first_hop or 443)
+    except ValueError:
+        return None
+    name = _clean_label(out.get('tag') or out.get('name'), f'{host}:{port}')
+    tls_obj = out.get('tls') if isinstance(out.get('tls'), dict) else {}
+    sni = str(tls_obj.get('server_name') or out.get('sni') or host).strip()
+    insecure = bool(tls_obj.get('insecure', False))
+    alpn = tls_obj.get('alpn') if isinstance(tls_obj.get('alpn'), list) else []
+
+    if otype == 'hysteria':
+        auth = str(out.get('auth_str') or '').strip()
+        if not auth and isinstance(out.get('auth'), str):
+            auth = out['auth']
+        up_mbps = _extract_mbps(out.get('up_mbps') or out.get('up'), default=100) or 100
+        down_mbps = _extract_mbps(out.get('down_mbps') or out.get('down'), default=100) or 100
+        return {
+            'id': _stable_id(json.dumps(out, sort_keys=True, ensure_ascii=False)),
+            'protocol': 'hysteria',
+            'name': name,
+            'flag': _extract_flag(name),
+            'host': host,
+            'port': port,
+            'security': 'tls',
+            'transport': 'quic',
+            'summary': 'Hysteria · QUIC',
+            'params': {
+                'auth': auth,
+                'sni': sni,
+                'allow_insecure': insecure,
+                'obfs': str(out.get('obfs') or ''),
+                'alpn': [str(a) for a in alpn if str(a).strip()],
+                'up_mbps': up_mbps,
+                'down_mbps': down_mbps,
+                'server_ports': server_ports,
+                'hop_interval': _normalize_hop_interval(out.get('hop_interval')),
+                'v1_protocol': 'udp',
+            },
+            'latency_ms': None,
+        }
+
+    if otype == 'hysteria2':
+        pw = str(out.get('password') or '').strip()
+        if not pw:
+            return None
+        obfs_obj = out.get('obfs') if isinstance(out.get('obfs'), dict) else {}
+        return {
+            'id': _stable_id(json.dumps(out, sort_keys=True, ensure_ascii=False)),
+            'protocol': 'hysteria2',
+            'name': name,
+            'flag': _extract_flag(name),
+            'host': host,
+            'port': port,
+            'security': 'tls',
+            'transport': 'quic',
+            'summary': 'Hysteria2 · QUIC',
+            'params': {
+                'password': pw,
+                'sni': sni,
+                'allow_insecure': insecure,
+                'obfs': str(obfs_obj.get('type') or '').strip().lower(),
+                'obfs_password': str(obfs_obj.get('password') or ''),
+                'alpn': [str(a) for a in (alpn or ['h3']) if str(a).strip()],
+                'up_mbps': _extract_mbps(out.get('up_mbps'), default=0),
+                'down_mbps': _extract_mbps(out.get('down_mbps'), default=0),
+                'server_ports': server_ports,
+                'hop_interval': _normalize_hop_interval(out.get('hop_interval')),
+            },
+            'latency_ms': None,
+        }
+
+    tr_obj = out.get('transport') if isinstance(out.get('transport'), dict) else {}
+    transport = str(tr_obj.get('type') or 'tcp').strip().lower()
+    real_obj = tls_obj.get('reality') if isinstance(tls_obj.get('reality'), dict) else {}
+    utls_obj = tls_obj.get('utls') if isinstance(tls_obj.get('utls'), dict) else {}
+    security = 'reality' if real_obj.get('enabled') else ('tls' if tls_obj.get('enabled') else 'none')
+    tr_headers = tr_obj.get('headers') if isinstance(tr_obj.get('headers'), dict) else {}
+    ws_host = tr_headers.get('Host') or (tr_obj.get('host')[0] if isinstance(tr_obj.get('host'), list) and tr_obj.get('host') else tr_obj.get('host') or '')
+    common_tls = {
+        'security': security,
+        'transport': transport,
+        'sni': sni,
+        'fp': str(utls_obj.get('fingerprint') or ''),
+        'alpn': [str(a) for a in alpn if str(a).strip()],
+        'pbk': str(real_obj.get('public_key') or ''),
+        'sid': str(real_obj.get('short_id') or ''),
+        'spx': '/',
+        'host': str(ws_host or ''),
+        'path': str(tr_obj.get('path') or '/'),
+        'service_name': str(tr_obj.get('service_name') or ''),
+        'allow_insecure': insecure,
+    }
+    if otype == 'vless' and out.get('uuid'):
+        return {
+            'id': _stable_id(json.dumps(out, sort_keys=True, ensure_ascii=False)),
+            'protocol': 'vless',
+            'name': name,
+            'flag': _extract_flag(name),
+            'host': host,
+            'port': port,
+            'security': security,
+            'transport': transport,
+            'summary': 'VLESS' + (f' · {security.upper()}' if security != 'none' else ''),
+            'params': {'uuid': str(out['uuid']), 'flow': str(out.get('flow') or ''), 'encryption': 'none', **common_tls},
+            'latency_ms': None,
+        }
+    if otype == 'vmess' and out.get('uuid'):
+        return {
+            'id': _stable_id(json.dumps(out, sort_keys=True, ensure_ascii=False)),
+            'protocol': 'vmess',
+            'name': name,
+            'flag': _extract_flag(name),
+            'host': host,
+            'port': port,
+            'security': security,
+            'transport': transport,
+            'summary': f'VMess · {transport.upper()}',
+            'params': {'uuid': str(out['uuid']), 'alter_id': int(out.get('alter_id') or 0), 'cipher': str(out.get('security') or 'auto'), **common_tls},
+            'latency_ms': None,
+        }
+    if otype == 'trojan' and out.get('password'):
+        return {
+            'id': _stable_id(json.dumps(out, sort_keys=True, ensure_ascii=False)),
+            'protocol': 'trojan',
+            'name': name,
+            'flag': _extract_flag(name),
+            'host': host,
+            'port': port,
+            'security': security,
+            'transport': transport,
+            'summary': f'Trojan · {security.upper()}',
+            'params': {'password': str(out['password']), **common_tls},
+            'latency_ms': None,
+        }
+    if otype == 'shadowsocks' and out.get('method') and out.get('password'):
+        return {
+            'id': _stable_id(json.dumps(out, sort_keys=True, ensure_ascii=False)),
+            'protocol': 'shadowsocks',
+            'name': name,
+            'flag': _extract_flag(name),
+            'host': host,
+            'port': port,
+            'security': 'none',
+            'transport': 'tcp',
+            'summary': f"SS · {out['method']}",
+            'params': {'method': str(out['method']), 'password': str(out['password']), 'plugin': ''},
+            'latency_ms': None,
+        }
+    if otype == 'socks':
+        return {
+            'id': _stable_id(json.dumps(out, sort_keys=True, ensure_ascii=False)),
+            'protocol': 'socks',
+            'name': name,
+            'flag': _extract_flag(name),
+            'host': host,
+            'port': port,
+            'security': 'none',
+            'transport': 'tcp',
+            'summary': 'SOCKS5',
+            'params': {'username': str(out.get('username') or ''), 'password': str(out.get('password') or '')},
+            'latency_ms': None,
+        }
+    return None
+
+
+def _nodes_from_singbox_json(obj):
+    if not isinstance(obj, dict) or not isinstance(obj.get('outbounds'), list):
+        return []
+    out_nodes = []
+    for idx, item in enumerate(obj['outbounds']):
+        node = _node_from_singbox_outbound(item, idx)
+        if node:
+            out_nodes.append(node)
+    return out_nodes
+
+
+def _parse_yaml_scalar(raw_val):
+    s = str(raw_val or '').strip()
+    if not s:
+        return ''
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        if len(s) >= 2:
+            return s[1:-1]
+    if s.startswith('[') and s.endswith(']'):
+        inner = s[1:-1].strip()
+        if not inner:
+            return []
+        return [_parse_yaml_scalar(part) for part in _split_top_level(inner, ',')]
+    low = s.lower()
+    if low == 'true':
+        return True
+    if low == 'false':
+        return False
+    if low in ('null', '~'):
+        return ''
+    if re.fullmatch(r'-?\d+', s):
+        try:
+            return int(s)
+        except ValueError:
+            pass
+    return s
+
+
+def _split_top_level(text, sep=','):
+    parts = []
+    buf = []
+    quote = None
+    depth = 0
+    for ch in text:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            buf.append(ch)
+        elif ch in ('[', '{'):
+            depth += 1
+            buf.append(ch)
+        elif ch in (']', '}'):
+            depth = max(0, depth - 1)
+            buf.append(ch)
+        elif ch == sep and depth == 0:
+            parts.append(''.join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        parts.append(''.join(buf).strip())
+    return [p for p in parts if p]
+
+
+def _parse_inline_yaml_map(text):
+    inner = text.strip()
+    if inner.startswith('{') and inner.endswith('}'):
+        inner = inner[1:-1]
+    obj = {}
+    for pair in _split_top_level(inner, ','):
+        if ':' not in pair:
+            continue
+        k, v = pair.split(':', 1)
+        k = str(_parse_yaml_scalar(k)).strip()
+        obj[k] = _parse_yaml_map_val(v)
+    return obj
+
+
+def _parse_yaml_map_val(raw_val):
+    s = str(raw_val or '').strip()
+    if s.startswith('{') and s.endswith('}'):
+        return _parse_inline_yaml_map(s)
+    return _parse_yaml_scalar(s)
+
+
+def _node_from_clash_proxy(entry):
+    if not isinstance(entry, dict):
+        return None
+    ptype = str(entry.get('type') or '').strip().lower()
+    if ptype in ('hysteria', 'hysteriya'):
+        server = str(entry.get('server') or '').strip()
+        server_ports, first_hop = _parse_port_hopping(entry.get('ports') or entry.get('mport'))
+        try:
+            host, port = _validate_host_port(server, entry.get('port') or first_hop or 443)
+        except ValueError:
+            return None
+        name = _clean_label(entry.get('name'), f'{host}:{port}')
+        auth = str(entry.get('auth-str') or entry.get('auth_str') or entry.get('auth') or entry.get('password') or '')
+        alpn_raw = entry.get('alpn')
+        alpn = [str(x).strip() for x in alpn_raw] if isinstance(alpn_raw, list) else [a.strip() for a in str(alpn_raw or '').split(',') if a.strip()]
+        obfs_raw = str(entry.get('obfs') or '').strip()
+        obfs_param = str(entry.get('obfs-password') or entry.get('obfs_password') or entry.get('obfs-param') or '').strip()
+        obfs = '' if obfs_raw.lower() in ('', 'none') else (obfs_param if obfs_raw.lower() == 'xplus' else (obfs_param or obfs_raw))
+        return {
+            'id': _stable_id(json.dumps(entry, sort_keys=True, ensure_ascii=False)),
+            'protocol': 'hysteria',
+            'name': name,
+            'flag': _extract_flag(name),
+            'host': host,
+            'port': port,
+            'security': 'tls',
+            'transport': 'quic',
+            'summary': 'Hysteria · QUIC',
+            'params': {
+                'auth': auth,
+                'sni': str(entry.get('sni') or entry.get('servername') or host).strip(),
+                'allow_insecure': _parse_bool(entry.get('skip-cert-verify')),
+                'obfs': obfs,
+                'alpn': alpn,
+                'up_mbps': _extract_mbps(entry.get('up-mbps') or entry.get('up_mbps') or entry.get('up'), default=100) or 100,
+                'down_mbps': _extract_mbps(entry.get('down-mbps') or entry.get('down_mbps') or entry.get('down'), default=100) or 100,
+                'server_ports': server_ports,
+                'hop_interval': _normalize_hop_interval(entry.get('hop-interval')),
+                'v1_protocol': str(entry.get('protocol') or 'udp').lower(),
+            },
+            'latency_ms': None,
+        }
+    if ptype in ('hysteria2', 'hy2', 'hysteriya2'):
+        server = str(entry.get('server') or '').strip()
+        server_ports, first_hop = _parse_port_hopping(entry.get('ports') or entry.get('mport'))
+        pw = str(entry.get('password') or entry.get('auth') or '')
+        if not pw:
+            return None
+        try:
+            host, port = _validate_host_port(server, entry.get('port') or first_hop or 443)
+        except ValueError:
+            return None
+        name = _clean_label(entry.get('name'), f'{host}:{port}')
+        alpn_raw = entry.get('alpn')
+        alpn = [str(x).strip() for x in alpn_raw] if isinstance(alpn_raw, list) else [a.strip() for a in str(alpn_raw or 'h3').split(',') if a.strip()]
+        return {
+            'id': _stable_id(json.dumps(entry, sort_keys=True, ensure_ascii=False)),
+            'protocol': 'hysteria2',
+            'name': name,
+            'flag': _extract_flag(name),
+            'host': host,
+            'port': port,
+            'security': 'tls',
+            'transport': 'quic',
+            'summary': 'Hysteria2 · QUIC',
+            'params': {
+                'password': pw,
+                'sni': str(entry.get('sni') or entry.get('servername') or host).strip(),
+                'allow_insecure': _parse_bool(entry.get('skip-cert-verify')),
+                'obfs': str(entry.get('obfs') or '').strip().lower(),
+                'obfs_password': str(entry.get('obfs-password') or ''),
+                'alpn': alpn or ['h3'],
+                'up_mbps': _extract_mbps(entry.get('up'), default=0),
+                'down_mbps': _extract_mbps(entry.get('down'), default=0),
+                'server_ports': server_ports,
+                'hop_interval': _normalize_hop_interval(entry.get('hop-interval')),
+            },
+            'latency_ms': None,
+        }
+    if ptype in ('vless', 'vmess', 'trojan', 'ss', 'shadowsocks', 'socks5', 'socks'):
+        mapped = dict(entry)
+        if ptype == 'ss':
+            mapped['type'] = 'shadowsocks'
+            mapped.setdefault('method', entry.get('cipher'))
+        elif ptype == 'socks5':
+            mapped['type'] = 'socks'
+        mapped.setdefault('tag', entry.get('name'))
+        mapped.setdefault('server_port', entry.get('port'))
+        if mapped['type'] in ('vless', 'vmess', 'trojan'):
+            tls_enabled = bool(entry.get('tls', ptype == 'trojan'))
+            real = entry.get('reality-opts') if isinstance(entry.get('reality-opts'), dict) else {}
+            tls_dict = {
+                'enabled': tls_enabled or bool(real),
+                'server_name': entry.get('servername') or entry.get('sni') or entry.get('server'),
+                'insecure': _parse_bool(entry.get('skip-cert-verify')),
+            }
+            if entry.get('client-fingerprint'):
+                tls_dict['utls'] = {'enabled': True, 'fingerprint': entry['client-fingerprint']}
+            if real:
+                tls_dict['reality'] = {'enabled': True, 'public_key': real.get('public-key', ''), 'short_id': real.get('short-id', '')}
+            mapped['tls'] = tls_dict
+            net = str(entry.get('network') or 'tcp').lower()
+            if net == 'ws':
+                ws_o = entry.get('ws-opts') if isinstance(entry.get('ws-opts'), dict) else {}
+                mapped['transport'] = {'type': 'ws', 'path': ws_o.get('path', '/'), 'headers': ws_o.get('headers') or {}}
+            elif net == 'grpc':
+                g_o = entry.get('grpc-opts') if isinstance(entry.get('grpc-opts'), dict) else {}
+                mapped['transport'] = {'type': 'grpc', 'service_name': g_o.get('grpc-service-name', '')}
+        return _node_from_singbox_outbound(mapped)
+    return None
+
+
+def _parse_clash_yaml_proxies(txt):
+    """Lightweight dependency-free Clash/Mihomo YAML `proxies:` block parser."""
+    lines = str(txt or '').splitlines()
+    entries = []
+    in_proxies = False
+    proxies_indent = -1
+    cur = None
+    sub_key = None
+    sub_indent = -1
+
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        indent = len(raw) - len(raw.lstrip(' '))
+        if not in_proxies:
+            if re.match(r'^proxies\s*:\s*$', stripped, re.IGNORECASE):
+                in_proxies = True
+                proxies_indent = indent
+            continue
+        if indent <= proxies_indent and not stripped.startswith('-'):
+            break
+        if stripped.startswith('- '):
+            rest = stripped[2:].strip()
+            if rest.startswith('{'):
+                if cur:
+                    entries.append(cur)
+                    cur = None
+                entries.append(_parse_inline_yaml_map(rest))
+                sub_key = None
+                continue
+            if ':' in rest:
+                if cur:
+                    entries.append(cur)
+                cur = {}
+                sub_key = None
+                k, v = rest.split(':', 1)
+                k = str(_parse_yaml_scalar(k)).strip()
+                v_str = v.strip()
+                if not v_str:
+                    sub_key = k
+                    sub_indent = indent
+                    cur[k] = []
+                else:
+                    cur[k] = _parse_yaml_map_val(v_str)
+                continue
+            if cur is not None and sub_key:
+                if not isinstance(cur.get(sub_key), list):
+                    cur[sub_key] = []
+                cur[sub_key].append(_parse_yaml_scalar(rest))
+                continue
+        if cur is not None:
+            if sub_key and indent > sub_indent and ':' in stripped:
+                if isinstance(cur.get(sub_key), list) and not cur[sub_key]:
+                    cur[sub_key] = {}
+                if isinstance(cur.get(sub_key), dict):
+                    sk, sv = stripped.split(':', 1)
+                    cur[sub_key][str(_parse_yaml_scalar(sk)).strip()] = _parse_yaml_map_val(sv)
+                    continue
+            if ':' in stripped:
+                k, v = stripped.split(':', 1)
+                k = str(_parse_yaml_scalar(k)).strip()
+                v_str = v.strip()
+                if not v_str:
+                    sub_key = k
+                    sub_indent = indent
+                    cur[k] = []
+                else:
+                    sub_key = None
+                    cur[k] = _parse_yaml_map_val(v_str)
+    if cur:
+        entries.append(cur)
+
+    nodes = []
+    for ent in entries:
+        node = _node_from_clash_proxy(ent)
+        if node:
+            nodes.append(node)
+    return nodes
 
 
 def _node_from_xray_json(obj, idx=0):
@@ -683,23 +1279,36 @@ def parse_subscription_metadata(headers=None, lines=None):
 
 
 def parse_subscription_payload(body_text, headers=None):
-    """Parse raw text, base64, URI lists, or Xray JSON subscriptions into nodes + metadata."""
+    """Parse raw text, base64, URI lists, Clash YAML, sing-box JSON, or Xray JSON subscriptions."""
     txt = str(body_text or '').strip().lstrip('\ufeff')
     raw_lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
     meta = parse_subscription_metadata(headers=headers, lines=raw_lines)
     nodes = []
     routing_profiles = []
 
+    def _parse_json_obj(obj, idx=0):
+        if not isinstance(obj, dict):
+            return []
+        outs = obj.get('outbounds')
+        if isinstance(outs, list) and outs:
+            if any(isinstance(o, dict) and o.get('protocol') for o in outs):
+                return [_node_from_xray_json(obj, idx)]
+            sb_nodes = _nodes_from_singbox_json(obj)
+            if sb_nodes:
+                return sb_nodes
+        n = _node_from_singbox_outbound(obj, idx) or _node_from_clash_proxy(obj)
+        return [n] if n else []
+
     # 1. Try JSON directly
     if txt.startswith('{') or txt.startswith('['):
         try:
             parsed = json.loads(txt)
-            if isinstance(parsed, dict) and isinstance(parsed.get('outbounds'), list):
-                nodes.append(_node_from_xray_json(parsed, 0))
+            if isinstance(parsed, dict):
+                nodes.extend(_parse_json_obj(parsed, 0))
             elif isinstance(parsed, list):
                 for idx, item in enumerate(parsed):
-                    if isinstance(item, dict) and isinstance(item.get('outbounds'), list):
-                        nodes.append(_node_from_xray_json(item, idx))
+                    if isinstance(item, dict):
+                        nodes.extend(_parse_json_obj(item, idx))
                     elif isinstance(item, str):
                         try:
                             nodes.append(parse_proxy_uri(item))
@@ -738,8 +1347,9 @@ def parse_subscription_payload(body_text, headers=None):
             if s.startswith('{'):
                 try:
                     obj = json.loads(s)
-                    if isinstance(obj, dict) and isinstance(obj.get('outbounds'), list):
-                        nodes.append(_node_from_xray_json(obj, len(nodes)))
+                    parsed_items = _parse_json_obj(obj, len(nodes))
+                    if parsed_items:
+                        nodes.extend(parsed_items)
                         continue
                 except Exception:
                     pass
@@ -751,7 +1361,11 @@ def parse_subscription_payload(body_text, headers=None):
 
     _collect_lines(raw_lines)
 
-    # 2. If no nodes parsed yet, try Base64 decode of the whole payload
+    # 2. Try Clash/Mihomo YAML `proxies:` block in plain text
+    if not nodes and 'proxies:' in txt.lower():
+        nodes.extend(_parse_clash_yaml_proxies(txt))
+
+    # 3. If no nodes parsed yet, try Base64 decode of the whole payload
     if not nodes:
         candidate = ''.join(ln for ln in raw_lines if not ln.startswith('#'))
         if candidate:
@@ -767,6 +1381,8 @@ def parse_subscription_payload(body_text, headers=None):
                     routing_profiles.extend(sub['routing_profiles'])
                 else:
                     _collect_lines(dec_lines)
+                    if not nodes and 'proxies:' in decoded.lower():
+                        nodes.extend(_parse_clash_yaml_proxies(decoded))
             except Exception:
                 pass
 
@@ -1466,6 +2082,33 @@ def _singbox_outbound_for_node(node):
             'password': p['password'],
             'domain_resolver': 'bootstrap',
         }
+    if proto == 'hysteria':
+        tls_obj = {
+            'enabled': True,
+            'server_name': p.get('sni') or node['host'],
+            'insecure': bool(p.get('allow_insecure')),
+        }
+        if p.get('alpn'):
+            tls_obj['alpn'] = list(p['alpn'])
+        out = {
+            'type': 'hysteria',
+            'tag': 'vpn',
+            'server': node['host'],
+            'server_port': int(node['port']),
+            'up_mbps': max(1, int(p.get('up_mbps') or 100)),
+            'down_mbps': max(1, int(p.get('down_mbps') or 100)),
+            'domain_resolver': 'bootstrap',
+            'tls': tls_obj,
+        }
+        if p.get('auth'):
+            out['auth_str'] = p['auth']
+        if p.get('obfs'):
+            out['obfs'] = p['obfs']
+        if p.get('server_ports'):
+            out['server_ports'] = list(p['server_ports'])
+        if p.get('hop_interval'):
+            out['hop_interval'] = p['hop_interval']
+        return out
     if proto == 'hysteria2':
         out = {
             'type': 'hysteria2',
@@ -1487,6 +2130,10 @@ def _singbox_outbound_for_node(node):
             out['up_mbps'] = int(p['up_mbps'])
         if p.get('down_mbps'):
             out['down_mbps'] = int(p['down_mbps'])
+        if p.get('server_ports'):
+            out['server_ports'] = list(p['server_ports'])
+        if p.get('hop_interval'):
+            out['hop_interval'] = p['hop_interval']
         return out
     if proto == 'socks':
         out = {
@@ -1683,9 +2330,16 @@ def choose_engine_plan(node, settings=None, has_xray=True, has_singbox=True):
     st = settings or {}
     mode = str(st.get('mode') or 'tun').lower()
     pref = str(st.get('engine') or 'auto').lower()
+    proto = (node or {}).get('protocol') or ''
     need_xray = requires_xray_engine(node, st)
+    need_singbox = (proto == 'hysteria')
     p = (node or {}).get('params') or {}
-    prefer_sb = (node or {}).get('protocol') == 'hysteria2' and (p.get('obfs') == 'salamander' or p.get('up_mbps') or p.get('down_mbps'))
+    prefer_sb = proto == 'hysteria2' and bool(p.get('obfs') == 'salamander' or p.get('up_mbps') or p.get('down_mbps') or p.get('server_ports'))
+
+    if need_singbox:
+        if not has_singbox:
+            raise ValueError('This Hysteria profile requires sing-box.exe.')
+        return 'singbox_proxy' if mode == 'proxy' else 'singbox_tun'
 
     if mode == 'proxy':
         if (pref == 'sing-box' or prefer_sb) and not need_xray and has_singbox:
@@ -1926,7 +2580,10 @@ class HappStore:
             if parsed.get('routing_profiles'):
                 self.save()
                 return {'ok': True, 'kind': 'routing', 'profile': parsed['routing_profiles'][0]}
-            raise ValueError('Could not recognize a valid subscription URL, JSON config, or proxy link (VLESS/VMess/Trojan/SS/Hysteria2/SOCKS5).')
+            raise ValueError(
+                'Could not recognize a valid subscription URL, JSON/YAML config, or proxy link '
+                '(VLESS/VMess/Trojan/SS/Hysteria/Hysteria2/SOCKS5).'
+            )
 
         manual = self.get_sub('manual')
         existing_ids = {n['id']: i for i, n in enumerate(manual['nodes'])}
