@@ -5,6 +5,7 @@ import platform
 import queue
 import sys
 import threading
+import webbrowser
 
 from PyQt5.QtCore import Qt, QTimer, QRectF, QRegExp, QSize, QEvent
 from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap, QRegExpValidator
@@ -39,6 +40,7 @@ from PyQt5.QtWidgets import (
 
 from alemtv_app import ALEMTV_PORTALS, ALEMTV_DEFAULT_PORTAL
 from core import Api, DNS_PRESETS, resource
+from samsung_catalog import build_catalog_groups, validate_user_values
 from samsung_time_override import DEFAULT_SOURCE_DOMAINS as SAMSUNG_TIME_DEFAULT_SOURCES, TIME_TARGET_PRESETS
 from samsung_tv import SAMSUNG_LOCAL_SETS
 from ui_qt import (
@@ -86,11 +88,20 @@ class NeonWindow(QMainWindow):
         self.his_connected = False
         self.tv_busy = False
         self.sam_busy = False
+        self.sam_apps_busy = False
         self.his_busy = False
         self.net_busy = False
         self.vpn_state = 'DISCONNECTED'
         self.adapter_map = {}
         self._sam_found_devices = []
+        self._sam_catalog_data = None
+        self._sam_catalog_groups = []
+        self._sam_installed_pkgs = set()
+        self._sam_installed_apps = set()
+        self._sam_apps_loaded = False
+        self._sam_selected_entry = None
+        self._sam_selected_is_removed = False
+        self._sam_setting_inputs = {}
         self._his_found_devices = []
         self._his_pairing_id = ''
         self._last_inspected_profile = None
@@ -260,16 +271,17 @@ class NeonWindow(QMainWindow):
         brand_row.addLayout(bcol)
         lay.addLayout(brand_row)
 
-        # Navigation Buttons
+        # Navigation Buttons (tab_buttons[i] matches stack index i; display places 6 right below Samsung TV)
         self.tab_buttons = []
-        icons = ['▣', '◈', '◆', '◉', '✦', '☎']
+        icons = ['▣', '◈', '◆', '◉', '✦', '☎', '⊞']
         for idx, glyph in enumerate(icons):
             btn = QPushButton(glyph)
             btn.setObjectName('SideNavBtn')
             btn.setCursor(Qt.PointingHandCursor)
             btn.clicked.connect(lambda _chk=False, i=idx: self.switch_tab(i))
-            lay.addWidget(btn)
             self.tab_buttons.append(btn)
+        for vis_idx in (0, 1, 6, 2, 3, 4, 5):
+            lay.addWidget(self.tab_buttons[vis_idx])
 
         # Live Telemetry Mini Widget inside Sidebar
         tele = QFrame()
@@ -500,6 +512,7 @@ class NeonWindow(QMainWindow):
         self._build_vpn_page()
         self._build_diag_page()
         self._build_callback_page()
+        self._build_samsung_apps_page()
 
         for cb in self.stack.findChildren(QComboBox):
             cb.setFocusPolicy(Qt.StrongFocus)
@@ -846,6 +859,7 @@ class NeonWindow(QMainWindow):
         self.sam_ip = QLineEdit()
         self.sam_ip.setPlaceholderText('192.168.1.101')
         self.sam_ip.editingFinished.connect(self._update_sam_host_ip_label)
+        self.sam_ip.textChanged.connect(lambda t: self._sync_sam_ip_fields(t, source='tv'))
         self.btn_sam_scan = QPushButton()
         self.btn_sam_scan.setObjectName('NormalBtn')
         self.btn_sam_scan.setCursor(Qt.PointingHandCursor)
@@ -2695,6 +2709,213 @@ class NeonWindow(QMainWindow):
         layout.addStretch(1)
         self.stack.addWidget(page)
 
+    def _build_samsung_apps_page(self):
+        page = QWidget()
+        grid = QHBoxLayout(page)
+        grid.setContentsMargins(20, 14, 20, 12)
+        grid.setSpacing(0)
+
+        left_inner = QWidget()
+        left_inner.setObjectName('ScrollContent')
+        left = QVBoxLayout(left_inner)
+        left.setContentsMargins(2, 2, 10, 6)
+        left.setSpacing(12)
+
+        # Card 1: Catalog source & TV connection
+        c_src, l_src = self._make_card('lbl_sam_apps_src_card', 1, collapsible=True, collapsed=False)
+        attr_row = QHBoxLayout()
+        attr_row.setSpacing(6)
+        self.sam_apps_attr_lbl = QLabel()
+        self.sam_apps_attr_lbl.setObjectName('HintLabel')
+        self.sam_apps_attr_lbl.setWordWrap(True)
+        self.btn_sam_apps_repo = QPushButton()
+        self.btn_sam_apps_repo.setObjectName('NormalBtn')
+        self.btn_sam_apps_repo.setCursor(Qt.PointingHandCursor)
+        self.btn_sam_apps_repo.clicked.connect(
+            lambda: self._open_url_external('https://github.com/Apps2Samsung/tizen-community-packages')
+        )
+        attr_row.addWidget(self.sam_apps_attr_lbl, 1)
+        attr_row.addWidget(self.btn_sam_apps_repo)
+        l_src.addLayout(attr_row)
+
+        self.sam_apps_release_lbl = QLabel('')
+        self.sam_apps_release_lbl.setStyleSheet('color:#72ffab;font-family:"Consolas",monospace;font-size:11px;')
+        self.sam_apps_release_lbl.setWordWrap(True)
+        l_src.addWidget(self.sam_apps_release_lbl)
+
+        self.lbl_sam_apps_ip = QLabel()
+        self.lbl_sam_apps_ip.setObjectName('FieldLabel')
+        l_src.addWidget(self.lbl_sam_apps_ip)
+
+        ip_row = QHBoxLayout()
+        ip_row.setSpacing(8)
+        self.sam_apps_ip = QLineEdit()
+        self.sam_apps_ip.setPlaceholderText('192.168.1.101')
+        self.sam_apps_ip.textChanged.connect(lambda t: self._sync_sam_ip_fields(t, source='apps'))
+        self.btn_sam_apps_check_tv = QPushButton()
+        self.btn_sam_apps_check_tv.setObjectName('NormalBtn')
+        self.btn_sam_apps_check_tv.setCursor(Qt.PointingHandCursor)
+        self.btn_sam_apps_check_tv.clicked.connect(self.check_samsung_apps_tv)
+        self.btn_sam_apps_refresh = QPushButton()
+        self.btn_sam_apps_refresh.setObjectName('AccentBtn')
+        self.btn_sam_apps_refresh.setCursor(Qt.PointingHandCursor)
+        self.btn_sam_apps_refresh.clicked.connect(lambda: self.refresh_samsung_catalog(force=True))
+        ip_row.addWidget(self.sam_apps_ip, 1)
+        ip_row.addWidget(self.btn_sam_apps_check_tv)
+        ip_row.addWidget(self.btn_sam_apps_refresh)
+        l_src.addLayout(ip_row)
+
+        self.sam_apps_adult_chk = ToggleSwitch('', checked=False, on_change=self._on_sam_apps_adult_toggled)
+        l_src.addWidget(self.sam_apps_adult_chk)
+        left.addWidget(c_src)
+
+        # Card 2: Filter & Application List
+        c_list, l_list = self._make_card('lbl_sam_apps_list_card', 2, collapsible=False)
+        self.sam_apps_search = QLineEdit()
+        self.sam_apps_search.textChanged.connect(self._render_samsung_apps_list)
+        l_list.addWidget(self.sam_apps_search)
+
+        self.sam_apps_cat_combo = QComboBox()
+        self.sam_apps_cat_combo.currentIndexChanged.connect(self._render_samsung_apps_list)
+        l_list.addWidget(self.sam_apps_cat_combo)
+
+        self.sam_apps_list = QListWidget()
+        self.sam_apps_list.setMinimumHeight(290)
+        self.sam_apps_list.setStyleSheet(
+            'QListWidget{background:#0b1318;border:1px solid #1d2f3a;border-radius:10px;padding:4px;}'
+            'QListWidget::item{padding:7px 9px;border-radius:7px;color:#dceaf0;margin:2px 0;}'
+            'QListWidget::item:selected{background:#153829;border:1px solid #2b7555;color:#72ffab;}'
+            'QListWidget::item:hover{background:#12222b;}'
+        )
+        self.sam_apps_list.currentRowChanged.connect(self._on_samsung_app_selected)
+        l_list.addWidget(self.sam_apps_list, 1)
+        left.addWidget(c_list, 1)
+
+        left_scroll = self._wrap_scroll(left_inner)
+
+        # Right pane: App Details & Settings + Live Console
+        right_shell = QWidget()
+        right_shell.setObjectName('ScrollContent')
+        right = QVBoxLayout(right_shell)
+        right.setContentsMargins(10, 2, 2, 4)
+        right.setSpacing(10)
+
+        detail_card = QFrame()
+        detail_card.setObjectName('GlassCard')
+        add_elevation(detail_card, blur=24, alpha=85)
+        dlay = QVBoxLayout(detail_card)
+        dlay.setContentsMargins(16, 13, 16, 14)
+        dlay.setSpacing(8)
+
+        top_head = QHBoxLayout()
+        top_head.setSpacing(10)
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        self.sam_apps_detail_title = QLabel()
+        self.sam_apps_detail_title.setStyleSheet('color:#f0f8f4;font-size:16px;font-weight:bold;')
+        self.sam_apps_detail_title.setWordWrap(True)
+        self.sam_apps_detail_sub = QLabel('')
+        self.sam_apps_detail_sub.setStyleSheet('color:#7d95a3;font-family:"Consolas",monospace;font-size:11px;')
+        self.sam_apps_detail_sub.setWordWrap(True)
+        title_col.addWidget(self.sam_apps_detail_title)
+        title_col.addWidget(self.sam_apps_detail_sub)
+        top_head.addLayout(title_col, 1)
+
+        self.btn_sam_apps_app_repo = QPushButton()
+        self.btn_sam_apps_app_repo.setObjectName('NormalBtn')
+        self.btn_sam_apps_app_repo.setCursor(Qt.PointingHandCursor)
+        self.btn_sam_apps_app_repo.setVisible(False)
+        self.btn_sam_apps_app_repo.clicked.connect(self._open_selected_app_repo)
+        top_head.addWidget(self.btn_sam_apps_app_repo, 0, Qt.AlignTop)
+        dlay.addLayout(top_head)
+
+        self.sam_apps_badges_lbl = QLabel('')
+        self.sam_apps_badges_lbl.setWordWrap(True)
+        self.sam_apps_badges_lbl.setTextFormat(Qt.RichText)
+        self.sam_apps_badges_lbl.setVisible(False)
+        dlay.addWidget(self.sam_apps_badges_lbl)
+
+        self.sam_apps_notice_lbl = QLabel('')
+        self.sam_apps_notice_lbl.setWordWrap(True)
+        self.sam_apps_notice_lbl.setVisible(False)
+        self.sam_apps_notice_lbl.setStyleSheet(
+            'background:#241b0f;border:1px solid #755922;border-radius:8px;padding:7px 10px;color:#ffd87a;font-size:11.5px;'
+        )
+        dlay.addWidget(self.sam_apps_notice_lbl)
+
+        self.sam_apps_desc_lbl = QLabel()
+        self.sam_apps_desc_lbl.setWordWrap(True)
+        self.sam_apps_desc_lbl.setStyleSheet('color:#c7dce5;font-size:12.5px;')
+        dlay.addWidget(self.sam_apps_desc_lbl)
+
+        # Variant selector (visible when a group has multiple variants or single variant info)
+        self.sam_apps_variant_wrap = QWidget()
+        vrow = QHBoxLayout(self.sam_apps_variant_wrap)
+        vrow.setContentsMargins(0, 2, 0, 2)
+        vrow.setSpacing(8)
+        self.lbl_sam_apps_variant = QLabel()
+        self.lbl_sam_apps_variant.setObjectName('FieldLabel')
+        self.sam_apps_variant_combo = QComboBox()
+        self.sam_apps_variant_combo.currentIndexChanged.connect(self._on_samsung_variant_changed)
+        vrow.addWidget(self.lbl_sam_apps_variant)
+        vrow.addWidget(self.sam_apps_variant_combo, 1)
+        self.sam_apps_variant_wrap.setVisible(False)
+        dlay.addWidget(self.sam_apps_variant_wrap)
+
+        # Dynamic user_settings form
+        self.sam_apps_settings_wrap = QFrame()
+        self.sam_apps_settings_wrap.setStyleSheet(
+            'QFrame{background:rgba(13,22,28,210);border:1px solid #1e333e;border-radius:10px;}'
+        )
+        sw_lay = QVBoxLayout(self.sam_apps_settings_wrap)
+        sw_lay.setContentsMargins(11, 9, 11, 9)
+        sw_lay.setSpacing(6)
+        self.sam_apps_settings_title = QLabel()
+        self.sam_apps_settings_title.setStyleSheet('color:#72ffab;font-size:11.5px;font-weight:bold;border:none;background:transparent;')
+        sw_lay.addWidget(self.sam_apps_settings_title)
+        self.sam_apps_settings_form = QVBoxLayout()
+        self.sam_apps_settings_form.setSpacing(6)
+        sw_lay.addLayout(self.sam_apps_settings_form)
+        self.sam_apps_settings_wrap.setVisible(False)
+        dlay.addWidget(self.sam_apps_settings_wrap)
+
+        # Action row
+        act_row = QHBoxLayout()
+        act_row.setSpacing(8)
+        self.btn_sam_apps_install = QPushButton()
+        self.btn_sam_apps_install.setObjectName('PrimaryBtn')
+        self.btn_sam_apps_install.setCursor(Qt.PointingHandCursor)
+        self.btn_sam_apps_install.setEnabled(False)
+        self.btn_sam_apps_install.clicked.connect(self.install_selected_samsung_catalog_app)
+
+        self.btn_sam_apps_launch = QPushButton()
+        self.btn_sam_apps_launch.setObjectName('AccentBtn')
+        self.btn_sam_apps_launch.setCursor(Qt.PointingHandCursor)
+        self.btn_sam_apps_launch.setEnabled(False)
+        self.btn_sam_apps_launch.clicked.connect(self.launch_selected_samsung_catalog_app)
+
+        self.btn_sam_apps_uninstall = QPushButton()
+        self.btn_sam_apps_uninstall.setObjectName('DangerBtn')
+        self.btn_sam_apps_uninstall.setCursor(Qt.PointingHandCursor)
+        self.btn_sam_apps_uninstall.setEnabled(False)
+        self.btn_sam_apps_uninstall.clicked.connect(self.uninstall_selected_samsung_catalog_app)
+
+        act_row.addWidget(self.btn_sam_apps_install, 2)
+        act_row.addWidget(self.btn_sam_apps_launch, 1)
+        act_row.addWidget(self.btn_sam_apps_uninstall, 1)
+        dlay.addLayout(act_row)
+
+        detail_scroll = self._wrap_scroll(detail_card)
+        detail_scroll.setMinimumHeight(230)
+        detail_scroll.setMaximumHeight(360)
+        right.addWidget(detail_scroll)
+
+        self.sam_apps_term = NeonTerminal(on_save=self._save_log_dialog)
+        right.addWidget(self.sam_apps_term, 1)
+
+        grid.addWidget(self._make_split_page(left_scroll, right_shell, left_init=436))
+        self.stack.addWidget(page)
+
     def _build_footer(self):
         foot = QFrame()
         foot.setFixedHeight(26)
@@ -2722,6 +2943,7 @@ class NeonWindow(QMainWindow):
         self.tab_buttons[3].setText('◉   ' + self.t('nav_vpn'))
         self.tab_buttons[4].setText('✦   ' + self.t('nav_diag'))
         self.tab_buttons[5].setText('☎   MSB CALLBACK')
+        self.tab_buttons[6].setText('⊞   ' + self.t('nav_sam_apps'))
         self.side_status_cap.setText(self.t('side_status'))
         self.side_tv_lbl.setText(self.t('side_tv'))
         self.side_sam_lbl.setText(self.t('side_sam'))
@@ -3118,6 +3340,25 @@ class NeonWindow(QMainWindow):
             self.t('col_ics'),
         ])
 
+        # Samsung Apps Catalog tab translations
+        self.lbl_sam_apps_src_card.setText(self.t('nav_sam_apps'))
+        self.lbl_sam_apps_list_card.setText('Apps2Samsung Catalog' if self.lang == 'en' else 'Каталог Apps2Samsung')
+        self.sam_apps_attr_lbl.setText(self.t('sam_apps_attr_prefix') + 'Apps2Samsung/tizen-community-packages')
+        self.btn_sam_apps_repo.setText(self.t('sam_apps_btn_catalog_repo'))
+        self.lbl_sam_apps_ip.setText(self.t('sam_apps_lbl_ip'))
+        self.btn_sam_apps_check_tv.setText(self.t('sam_apps_btn_check_tv'))
+        self.btn_sam_apps_refresh.setText(self.t('sam_apps_btn_refresh'))
+        self.sam_apps_adult_chk.setText(self.t('sam_apps_chk_adult'))
+        self.sam_apps_search.setPlaceholderText(self.t('sam_apps_ph_search'))
+        self.lbl_sam_apps_variant.setText(self.t('sam_apps_lbl_variant'))
+        self.sam_apps_settings_title.setText(self.t('sam_apps_lbl_settings'))
+        self.btn_sam_apps_install.setText(self.t('sam_apps_btn_install'))
+        self.btn_sam_apps_launch.setText(self.t('sam_apps_btn_launch'))
+        self.btn_sam_apps_uninstall.setText(self.t('sam_apps_btn_uninstall'))
+        self.btn_sam_apps_app_repo.setText(self.t('sam_apps_btn_repo'))
+        self._rebuild_sam_apps_categories()
+        self._render_samsung_apps_list()
+
         self.footer_lbl.setText(self.t('footer'))
         self._refresh_env_badge()
         self._sync_status_badges()
@@ -3129,6 +3370,8 @@ class NeonWindow(QMainWindow):
             ('page_his_title', 'page_his_sub'),
             ('page_vpn_title', 'page_vpn_sub'),
             ('page_diag_title', 'page_diag_sub'),
+            None,
+            ('page_sam_apps_title', 'page_sam_apps_sub'),
         ]
         if self.current_tab == 5:
             self.page_title.setText('MSB CALLBACK')
@@ -3141,7 +3384,10 @@ class NeonWindow(QMainWindow):
     def _restore_saved_inputs(self):
         self.tv_ip.setText(self.settings.get('tv_ip', '192.168.1.100'))
         self.chk_os26.setChecked(bool(self.settings.get('webos26', False)))
-        self.sam_ip.setText(self.settings.get('samsung_ip', '192.168.1.101'))
+        sam_ip_val = self.settings.get('samsung_ip', '192.168.1.101')
+        self.sam_ip.setText(sam_ip_val)
+        self.sam_apps_ip.setText(sam_ip_val)
+        self.sam_apps_adult_chk.setChecked(bool(self.settings.get('samsung_catalog_show_adult', False)))
         self.his_ip.setText(self.settings.get('hisense_ip', '192.168.1.102'))
         hp_idx = self.his_profile_combo.findData(str(self.settings.get('hisense_auth_profile', 'auto') or 'auto'))
         if hp_idx >= 0:
@@ -3238,6 +3484,8 @@ class NeonWindow(QMainWindow):
             btn.style().polish(btn)
         if hasattr(self, 'page_title'):
             self._update_page_header()
+        if index == 6 and not self._sam_apps_loaded and not self.sam_apps_busy:
+            self.refresh_samsung_catalog(force=False)
 
     def _on_fx_toggled(self, enabled):
         self.backdrop.set_fx_enabled(enabled)
@@ -3444,6 +3692,7 @@ class NeonWindow(QMainWindow):
         for line in str(msg).splitlines():
             self.tv_term.append_line(line, kind=kind)
             self.sam_term.append_line(line, kind=kind)
+            self.sam_apps_term.append_line(line, kind=kind)
             self.his_term.append_line(line, kind=kind)
             self.vpn_term.append_line(line, kind=kind)
 
@@ -3462,6 +3711,8 @@ class NeonWindow(QMainWindow):
             return
         if channel == 'sam' and self.sam_busy:
             return
+        if channel == 'sam_apps' and self.sam_apps_busy:
+            return
         if channel == 'his' and self.his_busy:
             return
         if channel == 'net' and self.net_busy:
@@ -3472,6 +3723,9 @@ class NeonWindow(QMainWindow):
         elif channel == 'sam':
             self.sam_busy = True
             self.sam_term.scanner.start(scan_title or self.t('scanner_title'), self.t('scanner_tag'))
+        elif channel == 'sam_apps':
+            self.sam_apps_busy = True
+            self.sam_apps_term.scanner.start(scan_title or self.t('scanner_title'), self.t('scanner_tag'))
         elif channel == 'his':
             self.his_busy = True
             self.his_term.scanner.start(scan_title or self.t('scanner_title'), self.t('scanner_tag'))
@@ -3500,6 +3754,9 @@ class NeonWindow(QMainWindow):
                 elif channel == 'sam':
                     self.sam_busy = False
                     self.sam_term.scanner.stop()
+                elif channel == 'sam_apps':
+                    self.sam_apps_busy = False
+                    self.sam_apps_term.scanner.stop()
                 elif channel == 'his':
                     self.his_busy = False
                     self.his_term.scanner.stop()
@@ -3515,7 +3772,7 @@ class NeonWindow(QMainWindow):
                     if out:
                         for line in out.splitlines():
                             self.log(line)
-                    if result.get('error'):
+                    if result.get('error') and not result.get('needs_version_confirm'):
                         self.log('[!] ' + result['error'], 'bad')
                         self.toast.show_toast(result['error'], 'error')
                     if result.get('disconnected'):
@@ -3533,6 +3790,7 @@ class NeonWindow(QMainWindow):
             sam = self.api.read_samsung_logs()
             for line in sam.get('logs', []):
                 self.sam_term.append_line(line)
+                self.sam_apps_term.append_line(line)
         except Exception:
             pass
 
@@ -4839,6 +5097,544 @@ class NeonWindow(QMainWindow):
                 )
 
         self._run_async('sam', lambda: self.api.remove_samsung_alemtv(ip), done)
+
+    # ------------------------------------------------------------------
+    # Samsung Community Apps Catalog (Apps2Samsung)
+    # ------------------------------------------------------------------
+    def _open_url_external(self, url):
+        target = str(url or '').strip()
+        if target.startswith('https://'):
+            try:
+                webbrowser.open(target)
+            except Exception as exc:
+                self.toast.show_toast(str(exc), 'warn')
+
+    def _open_selected_app_repo(self):
+        entry = self._sam_selected_entry
+        if isinstance(entry, dict) and entry.get('repo_url'):
+            self._open_url_external(entry['repo_url'])
+
+    def _sync_sam_ip_fields(self, text, source='tv'):
+        if source == 'tv':
+            target = getattr(self, 'sam_apps_ip', None)
+        else:
+            target = getattr(self, 'sam_ip', None)
+        if target is not None and target.text() != text:
+            target.blockSignals(True)
+            target.setText(text)
+            target.blockSignals(False)
+            if source == 'apps':
+                self._update_sam_host_ip_label()
+
+    def _on_sam_apps_adult_toggled(self, enabled):
+        self.api.set_samsung_catalog_preferences(show_adult=bool(enabled))
+        if isinstance(self._sam_catalog_data, dict):
+            self._sam_catalog_groups = build_catalog_groups(
+                self._sam_catalog_data.get('apps'),
+                show_adult=bool(enabled),
+            )
+            self._rebuild_sam_apps_categories()
+            self._render_samsung_apps_list()
+
+    def refresh_samsung_catalog(self, force=True):
+        self.log(f'$ fetch Apps2Samsung/tizen-community-packages (force={bool(force)})')
+
+        def done(res):
+            if not isinstance(res, dict) or not res.get('ok'):
+                return
+            self._sam_apps_loaded = True
+            self._sam_catalog_data = res.get('catalog') or {}
+            self._sam_catalog_groups = list(res.get('groups') or [])
+            self._sam_saved_settings = dict(res.get('saved_settings') or {})
+            show_adult = bool(res.get('show_adult', False))
+            self.sam_apps_adult_chk.blockSignals(True)
+            self.sam_apps_adult_chk.setChecked(show_adult)
+            self.sam_apps_adult_chk.blockSignals(False)
+
+            cat = self._sam_catalog_data
+            tag = cat.get('release_tag') or 'latest'
+            pub = (cat.get('published_at') or '')[:10]
+            cache_tag = 'cached' if cat.get('from_cache') else 'live'
+            n_apps = len(self._sam_catalog_groups)
+            n_rem = len(cat.get('removed') or ())
+            rel_txt = f'Release: {tag}' + (f' ({pub})' if pub else '') + f' · {n_apps} app(s), {n_rem} removed [{cache_tag}]'
+            self.sam_apps_release_lbl.setText(rel_txt)
+            for w in cat.get('warnings') or ():
+                self.log('[!] ' + w, 'bad')
+            self._rebuild_sam_apps_categories()
+            self._render_samsung_apps_list()
+
+        self._run_async('sam_apps', lambda: self.api.get_samsung_catalog(force_refresh=force), done)
+
+    def check_samsung_apps_tv(self):
+        ip = self.sam_apps_ip.text().strip() or self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast(
+                'Введите IP-адрес Samsung ТВ.' if self.lang == 'ru' else 'Enter Samsung TV IP address.',
+                'warn',
+            )
+            return
+        self.log(f'$ sdb {ip}:26101 0 vd_applist')
+
+        def done(res):
+            if not isinstance(res, dict) or not res.get('ok'):
+                return
+            self._sam_installed_pkgs = set(res.get('package_ids') or ())
+            self._sam_installed_apps = set(res.get('app_ids') or ())
+            self._render_samsung_apps_list()
+            self.toast.show_toast(
+                f'Найдено пакетов на ТВ: {len(self._sam_installed_pkgs)}'
+                if self.lang == 'ru'
+                else f'Found {len(self._sam_installed_pkgs)} package(s) on TV',
+                'info',
+            )
+
+        self._run_async('sam_apps', lambda: self.api.check_samsung_tv_installed(ip), done)
+
+    def _rebuild_sam_apps_categories(self):
+        combo = getattr(self, 'sam_apps_cat_combo', None)
+        if combo is None:
+            return
+        prev_key = combo.currentData() or '__all__'
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(self.t('sam_apps_cat_all'), '__all__')
+        cat = self._sam_catalog_data or {}
+        for c in cat.get('categories') or ():
+            combo.addItem(c.capitalize(), c)
+        if cat.get('removed'):
+            rem_cnt = len(cat.get('removed') or ())
+            combo.addItem(f"{self.t('sam_apps_cat_removed')} ({rem_cnt})", '__removed__')
+        idx = combo.findData(prev_key)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _is_entry_installed(self, entry):
+        if not isinstance(entry, dict):
+            return False
+        pkg = entry.get('package_id') or ''
+        aid = entry.get('app_id') or ''
+        return bool((pkg and pkg in self._sam_installed_pkgs) or (aid and aid in self._sam_installed_apps))
+
+    def _render_samsung_apps_list(self):
+        lw = getattr(self, 'sam_apps_list', None)
+        if lw is None:
+            return
+        prev_key = None
+        cur_item = lw.currentItem()
+        if cur_item is not None:
+            prev_key = cur_item.data(Qt.UserRole + 1)
+
+        lw.blockSignals(True)
+        lw.clear()
+
+        cat_data = self._sam_catalog_data
+        if not isinstance(cat_data, dict):
+            self._render_sam_app_detail(None)
+            lw.blockSignals(False)
+            return
+
+        query = self.sam_apps_search.text().strip().lower()
+        cat_filter = self.sam_apps_cat_combo.currentData() or '__all__'
+        colors = cat_data.get('category_colors') or {}
+
+        restore_row = -1
+        if cat_filter == '__removed__':
+            for rem in cat_data.get('removed') or ():
+                hay = ' '.join([
+                    rem.get('title', ''),
+                    rem.get('reason', ''),
+                    rem.get('note', ''),
+                    ' '.join(rem.get('package_ids') or ()),
+                ]).lower()
+                if query and query not in hay:
+                    continue
+                item = QListWidgetItem(f"[Removed] {rem.get('title')}")
+                item.setForeground(QColor('#ff98a4'))
+                item.setData(Qt.UserRole, {'kind': 'removed', 'data': rem})
+                item.setData(Qt.UserRole + 1, f"removed:{rem.get('title')}")
+                lw.addItem(item)
+                if prev_key == item.data(Qt.UserRole + 1):
+                    restore_row = lw.count() - 1
+        else:
+            for grp in self._sam_catalog_groups:
+                if cat_filter != '__all__' and grp.get('category') != cat_filter:
+                    continue
+                variants = grp.get('variants') or ()
+                hay_parts = [grp.get('name', ''), grp.get('description', ''), grp.get('category', '')]
+                for v in variants:
+                    hay_parts.extend([v.get('file', ''), v.get('package_id', ''), v.get('app_id', ''), v.get('variant', '')])
+                if query and query not in ' '.join(hay_parts).lower():
+                    continue
+                prim = grp['primary']
+                tags = []
+                if any(self._is_entry_installed(v) for v in variants):
+                    tags.append('✓ TV')
+                if len(variants) > 1:
+                    tags.append(f'{len(variants)}x')
+                if any(v.get('cert_level') == 'partner' for v in variants):
+                    tags.append('Partner')
+                if any(v.get('is_root') for v in variants):
+                    tags.append('Root')
+                if any(v.get('pkg_kind') == 'tpk' for v in variants):
+                    tags.append('TPK')
+                if any(v.get('adult') for v in variants):
+                    tags.append('18+')
+                suffix = f"  [{' · '.join(tags)}]" if tags else ''
+                item = QListWidgetItem(f"{grp['name']}  ({grp['category']}){suffix}")
+                dot_hex = colors.get(grp.get('category'), '#72ffab')
+                if any(self._is_entry_installed(v) for v in variants):
+                    item.setForeground(QColor('#5ef2a0'))
+                else:
+                    item.setForeground(QColor(dot_hex if dot_hex != '#607d8b' else '#dceaf0'))
+                item.setData(Qt.UserRole, {'kind': 'group', 'data': grp})
+                item.setData(Qt.UserRole + 1, grp['group_key'])
+                lw.addItem(item)
+                if prev_key == grp['group_key']:
+                    restore_row = lw.count() - 1
+
+        lw.blockSignals(False)
+        if lw.count() > 0:
+            row = restore_row if restore_row >= 0 else 0
+            lw.setCurrentRow(row)
+            self._on_samsung_app_selected(row)
+        else:
+            self._render_sam_app_detail(None)
+
+    def _on_samsung_app_selected(self, row):
+        if row < 0 or row >= self.sam_apps_list.count():
+            self._render_sam_app_detail(None)
+            return
+        item = self.sam_apps_list.item(row)
+        payload = item.data(Qt.UserRole) if item else None
+        if not isinstance(payload, dict):
+            self._render_sam_app_detail(None)
+            return
+
+        if payload.get('kind') == 'removed':
+            self._render_sam_removed_detail(payload.get('data'))
+            return
+
+        grp = payload.get('data') or {}
+        variants = grp.get('variants') or []
+        self.sam_apps_variant_combo.blockSignals(True)
+        self.sam_apps_variant_combo.clear()
+        for v in variants:
+            lbl = v.get('variant') or v.get('file')
+            if v.get('version'):
+                lbl += f" · v{v['version']}"
+            if v.get('required_version'):
+                lbl += f" (Tizen {v['required_version']}+)"
+            self.sam_apps_variant_combo.addItem(lbl, v)
+        self.sam_apps_variant_combo.blockSignals(False)
+        self.sam_apps_variant_wrap.setVisible(len(variants) > 1)
+        self._render_sam_app_detail(variants[0] if variants else None)
+
+    def _on_samsung_variant_changed(self, _idx):
+        entry = self.sam_apps_variant_combo.currentData()
+        if isinstance(entry, dict):
+            self._render_sam_app_detail(entry)
+
+    def _clear_layout_widgets(self, layout):
+        while layout.count():
+            child = layout.takeAt(0)
+            w = child.widget()
+            if w is not None:
+                w.deleteLater()
+            elif child.layout() is not None:
+                self._clear_layout_widgets(child.layout())
+
+    def _build_sam_apps_settings_form(self, app_entry):
+        self._sam_setting_inputs = {}
+        self._clear_layout_widgets(self.sam_apps_settings_form)
+        if not app_entry or not app_entry.get('has_user_settings'):
+            self.sam_apps_settings_wrap.setVisible(False)
+            return
+        if not app_entry.get('user_settings_valid'):
+            err_lbl = QLabel(app_entry.get('user_settings_error') or 'Invalid settings schema.')
+            err_lbl.setWordWrap(True)
+            err_lbl.setStyleSheet('color:#ff8292;border:none;background:transparent;font-size:11.5px;')
+            self.sam_apps_settings_form.addWidget(err_lbl)
+            self.sam_apps_settings_wrap.setVisible(True)
+            return
+
+        saved_map = getattr(self, '_sam_saved_settings', {}) or {}
+        group_key = app_entry.get('group') or app_entry.get('file')
+        saved_vals = saved_map.get(group_key) or saved_map.get(app_entry.get('file')) or {}
+
+        for field in app_entry.get('user_settings_fields') or ():
+            fid = field['id']
+            req_mark = ' *' if field.get('required', True) else ''
+            lbl = QLabel(f"{field['label']}{req_mark}")
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet('color:#d8ebf2;font-weight:600;font-size:11.5px;border:none;background:transparent;')
+            self.sam_apps_settings_form.addWidget(lbl)
+
+            inp = QLineEdit()
+            inp.setPlaceholderText(field.get('placeholder') or field.get('default') or '')
+            init_val = saved_vals.get(fid)
+            if init_val is None or init_val == '':
+                init_val = field.get('default') or ''
+            inp.setText(str(init_val))
+            if field.get('secret'):
+                inp.setEchoMode(QLineEdit.Password)
+            self.sam_apps_settings_form.addWidget(inp)
+
+            if field.get('description'):
+                hint = QLabel(field['description'])
+                hint.setWordWrap(True)
+                hint.setStyleSheet('color:#7d95a3;font-size:10.5px;border:none;background:transparent;')
+                self.sam_apps_settings_form.addWidget(hint)
+
+            self._sam_setting_inputs[fid] = inp
+
+        self.sam_apps_settings_wrap.setVisible(True)
+
+    def _render_sam_removed_detail(self, rem):
+        self._sam_selected_entry = rem
+        self._sam_selected_is_removed = True
+        self.sam_apps_variant_wrap.setVisible(False)
+        self.sam_apps_settings_wrap.setVisible(False)
+        self._sam_setting_inputs = {}
+        self.btn_sam_apps_app_repo.setVisible(False)
+        self.sam_apps_detail_title.setText(rem.get('title') or 'Removed package')
+        since = f" · since {rem['since']}" if rem.get('since') else ''
+        self.sam_apps_detail_sub.setText(f"reason={rem.get('reason') or '?'}{since}")
+        self.sam_apps_badges_lbl.setText(
+            '<span style="background:#3a161c;color:#ff8f9b;border:1px solid #8a313e;padding:2px 7px;border-radius:5px;font-size:10px;font-weight:bold;">REMOVED</span>'
+        )
+        self.sam_apps_badges_lbl.setVisible(True)
+        reason_txt = rem.get('reason_ru') if self.lang == 'ru' else rem.get('reason_en')
+        note_txt = f"\n{rem['note']}" if rem.get('note') else ''
+        self.sam_apps_notice_lbl.setText(f"{self.t('sam_apps_warn_removed')}\n{reason_txt}{note_txt}")
+        self.sam_apps_notice_lbl.setVisible(True)
+        self.sam_apps_desc_lbl.setText(rem.get('note') or reason_txt)
+        self.btn_sam_apps_install.setEnabled(False)
+        self.btn_sam_apps_launch.setEnabled(False)
+        pkg_ids = rem.get('package_ids') or ()
+        self.btn_sam_apps_uninstall.setEnabled(bool(pkg_ids))
+
+    def _render_sam_app_detail(self, entry):
+        self._sam_selected_entry = entry
+        self._sam_selected_is_removed = False
+        if not isinstance(entry, dict):
+            self.sam_apps_detail_title.setText(self.t('nav_sam_apps'))
+            self.sam_apps_detail_sub.setText('')
+            self.sam_apps_badges_lbl.setVisible(False)
+            self.sam_apps_notice_lbl.setVisible(False)
+            self.sam_apps_desc_lbl.setText(
+                self.t('sam_apps_loading') if not self._sam_apps_loaded else self.t('sam_apps_select_hint')
+            )
+            self.sam_apps_variant_wrap.setVisible(False)
+            self.sam_apps_settings_wrap.setVisible(False)
+            self.btn_sam_apps_app_repo.setVisible(False)
+            self.btn_sam_apps_install.setEnabled(False)
+            self.btn_sam_apps_launch.setEnabled(False)
+            self.btn_sam_apps_uninstall.setEnabled(False)
+            return
+
+        self.sam_apps_detail_title.setText(entry.get('name') or entry.get('file'))
+        meta_parts = [entry.get('file', '')]
+        if entry.get('version'):
+            meta_parts.append(f"v{entry['version']}")
+        if entry.get('package_id'):
+            meta_parts.append(f"pkg={entry['package_id']}")
+        if entry.get('app_id'):
+            meta_parts.append(f"app={entry['app_id']}")
+        if entry.get('required_version'):
+            meta_parts.append(f"Tizen {entry['required_version']}+")
+        self.sam_apps_detail_sub.setText(' · '.join(meta_parts))
+
+        self.btn_sam_apps_app_repo.setVisible(bool(entry.get('repo_url')))
+
+        # Rich badges bar
+        cat_colors = (self._sam_catalog_data or {}).get('category_colors') or {}
+        cat_bg = cat_colors.get(entry.get('category'), '#2f6f55')
+        pills = [
+            f'<span style="background:#12242d;color:#d6eef8;border:1px solid {cat_bg};padding:2px 7px;border-radius:5px;font-size:10px;font-weight:bold;">{entry.get("category", "other").upper()}</span>',
+            f'<span style="background:#101e26;color:#9cc2d2;border:1px solid #284250;padding:2px 7px;border-radius:5px;font-size:10px;">.{entry.get("pkg_kind", "wgt").upper()}</span>',
+        ]
+        if self._is_entry_installed(entry):
+            pills.append(f'<span style="background:#113624;color:#5ef2a0;border:1px solid #2a7852;padding:2px 7px;border-radius:5px;font-size:10px;font-weight:bold;">✓ {self.t("sam_apps_badge_installed")}</span>')
+        if entry.get('cert_level') == 'partner':
+            pills.append(f'<span style="background:#2e220f;color:#ffd166;border:1px solid #755820;padding:2px 7px;border-radius:5px;font-size:10px;font-weight:bold;">{self.t("sam_apps_badge_partner")}</span>')
+        if entry.get('is_root'):
+            pills.append(f'<span style="background:#38171d;color:#ff8a96;border:1px solid #7c2d38;padding:2px 7px;border-radius:5px;font-size:10px;font-weight:bold;">{self.t("sam_apps_badge_root")}</span>')
+        if entry.get('is_closed_source'):
+            pills.append(f'<span style="background:#1f2730;color:#b2c4d0;border:1px solid #3c4b59;padding:2px 7px;border-radius:5px;font-size:10px;">{self.t("sam_apps_badge_closed")}</span>')
+        if entry.get('is_self_updating'):
+            pills.append(f'<span style="background:#142836;color:#6be8d4;border:1px solid #2b6475;padding:2px 7px;border-radius:5px;font-size:10px;">{self.t("sam_apps_badge_selfup")}</span>')
+        if entry.get('adult'):
+            pills.append(f'<span style="background:#3a1628;color:#ff86c0;border:1px solid #7a2d55;padding:2px 7px;border-radius:5px;font-size:10px;font-weight:bold;">{self.t("sam_apps_badge_adult")}</span>')
+
+        self.sam_apps_badges_lbl.setText(' '.join(pills))
+        self.sam_apps_badges_lbl.setVisible(True)
+
+        notices = []
+        if entry.get('moved_to'):
+            notices.append(self.t('sam_apps_warn_moved') + entry['moved_to'])
+        if entry.get('is_root'):
+            notices.append(self.t('sam_apps_warn_root'))
+        if entry.get('cert_level') == 'partner':
+            notices.append(self.t('sam_apps_warn_partner'))
+        if notices:
+            self.sam_apps_notice_lbl.setText('\n'.join(notices))
+            self.sam_apps_notice_lbl.setVisible(True)
+        else:
+            self.sam_apps_notice_lbl.setVisible(False)
+
+        self.sam_apps_desc_lbl.setText(entry.get('description') or '')
+        self._build_sam_apps_settings_form(entry)
+
+        can_install = not (entry.get('has_user_settings') and not entry.get('user_settings_valid'))
+        self.btn_sam_apps_install.setEnabled(can_install)
+        self.btn_sam_apps_launch.setEnabled(bool(entry.get('app_id')))
+        self.btn_sam_apps_uninstall.setEnabled(bool(entry.get('package_id')))
+
+    def _collect_sam_apps_user_values(self):
+        return {fid: inp.text() for fid, inp in (self._sam_setting_inputs or {}).items()}
+
+    def install_selected_samsung_catalog_app(self, force_version_override=False):
+        if self._sam_selected_is_removed or not isinstance(self._sam_selected_entry, dict):
+            return
+        entry = self._sam_selected_entry
+        ip = self.sam_apps_ip.text().strip() or self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast(
+                'Введите IP-адрес Samsung ТВ.' if self.lang == 'ru' else 'Enter Samsung TV IP address.',
+                'warn',
+            )
+            return
+
+        user_values = self._collect_sam_apps_user_values()
+        if entry.get('user_settings'):
+            try:
+                validate_user_values(entry['user_settings'], user_values)
+            except Exception as exc:
+                self.toast.show_toast(str(exc), 'warn')
+                return
+
+        fname = entry['file']
+        self.log(f'$ neon samsung-catalog install {fname} -> {ip}:26101')
+
+        def done(res):
+            if not isinstance(res, dict):
+                return
+            if res.get('needs_version_confirm'):
+                tv_v = res.get('tv_version') or '?'
+                req_v = res.get('required_version') or '?'
+                body = (
+                    f"{entry.get('name')} требует Tizen {req_v}+, а на ТВ версия {tv_v}. Всё равно попробовать установить?"
+                    if self.lang == 'ru'
+                    else f"{entry.get('name')} requires Tizen {req_v}+, and your TV reports Tizen {tv_v}. Install anyway?"
+                )
+                dlg = ConfirmDialog(
+                    self,
+                    self.t('sam_apps_ver_title'),
+                    body,
+                    self.t('sam_apps_ver_confirm'),
+                    self.t('confirm_cancel'),
+                    danger=False,
+                )
+                if dlg.exec_() == ConfirmDialog.Accepted:
+                    self.install_selected_samsung_catalog_app(force_version_override=True)
+                return
+            if res.get('ok'):
+                if res.get('pkg_id'):
+                    self._sam_installed_pkgs.add(res['pkg_id'])
+                if res.get('app_id'):
+                    self._sam_installed_apps.add(res['app_id'])
+                self._render_samsung_apps_list()
+                self.toast.show_toast(
+                    f"{entry.get('name')} установлен на Samsung ТВ!"
+                    if self.lang == 'ru'
+                    else f"{entry.get('name')} installed on Samsung TV!",
+                    'info',
+                )
+
+        self._run_async(
+            'sam_apps',
+            lambda: self.api.install_samsung_catalog_app(
+                ip=ip,
+                file_name=fname,
+                user_values=user_values,
+                force_version_override=bool(force_version_override),
+            ),
+            done,
+        )
+
+    def launch_selected_samsung_catalog_app(self):
+        entry = self._sam_selected_entry
+        if self._sam_selected_is_removed or not isinstance(entry, dict) or not entry.get('app_id'):
+            return
+        ip = self.sam_apps_ip.text().strip() or self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast(
+                'Введите IP-адрес Samsung ТВ.' if self.lang == 'ru' else 'Enter Samsung TV IP address.',
+                'warn',
+            )
+            return
+        app_id = entry['app_id']
+        self.log(f'$ sdb {ip}:26101 0 was_execute {app_id}')
+
+        def done(r):
+            if r.get('ok'):
+                self.toast.show_toast(
+                    f"Запущено {entry.get('name')}" if self.lang == 'ru' else f"Launched {entry.get('name')}",
+                    'info',
+                )
+
+        self._run_async('sam_apps', lambda: self.api.launch_samsung_app(ip=ip, app_id=app_id), done)
+
+    def uninstall_selected_samsung_catalog_app(self):
+        entry = self._sam_selected_entry
+        if not isinstance(entry, dict):
+            return
+        if self._sam_selected_is_removed:
+            pkg_ids = entry.get('package_ids') or ()
+            if not pkg_ids:
+                return
+            pkg_id = pkg_ids[0]
+            app_name = entry.get('title') or pkg_id
+        else:
+            pkg_id = entry.get('package_id') or ''
+            app_name = entry.get('name') or pkg_id
+        if not pkg_id:
+            return
+        ip = self.sam_apps_ip.text().strip() or self.sam_ip.text().strip()
+        if not ip:
+            self.toast.show_toast(
+                'Введите IP-адрес Samsung ТВ.' if self.lang == 'ru' else 'Enter Samsung TV IP address.',
+                'warn',
+            )
+            return
+        body = (
+            f'Удалить {app_name} ({pkg_id}) с Samsung ТВ?'
+            if self.lang == 'ru'
+            else f'Uninstall {app_name} ({pkg_id}) from Samsung TV?'
+        )
+        dlg = ConfirmDialog(
+            self,
+            'Удаление приложения Samsung' if self.lang == 'ru' else 'Uninstall Samsung App',
+            body,
+            self.t('confirm_ok'),
+            self.t('confirm_cancel'),
+            danger=True,
+        )
+        if dlg.exec_() != ConfirmDialog.Accepted:
+            return
+        self.log(f'$ sdb {ip}:26101 0 vd_appuninstall {pkg_id}')
+
+        def done(r):
+            if r.get('ok'):
+                self._sam_installed_pkgs.discard(pkg_id)
+                self._render_samsung_apps_list()
+                self.toast.show_toast(
+                    f'Удалено: {app_name}' if self.lang == 'ru' else f'Uninstalled {app_name}',
+                    'info',
+                )
+
+        self._run_async('sam_apps', lambda: self.api.uninstall_samsung_app(ip=ip, pkg_id=pkg_id), done)
     # ------------------------------------------------------------------
     def _on_profile_changed(self, profile_name):
         if not profile_name:

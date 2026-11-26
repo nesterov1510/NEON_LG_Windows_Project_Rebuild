@@ -26,11 +26,11 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     win.show()
     qt_app.processEvents()
 
-    assert win.stack.count() == 6
+    assert win.stack.count() == 7
     assert win.current_tab == 0
     assert not win.windowIcon().isNull()
 
-    # Tab switching across LG, Samsung, Hisense, Conf, Diagnostics and contacts
+    # Tab switching across LG, Samsung, Hisense, Conf, Diagnostics, Contacts and Samsung Apps
     win.switch_tab(1)
     assert win.current_tab == 1
     win.switch_tab(2)
@@ -41,6 +41,9 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
     assert win.current_tab == 4
     win.switch_tab(5)
     assert win.page_title.text() == 'MSB CALLBACK'
+    win.switch_tab(6)
+    assert win.current_tab == 6
+    assert 'SAMSUNG' in win.page_title.text().upper()
     win.switch_tab(0)
 
     # Language switch RU <-> EN (ensure no unintended & mnemonic markers)
@@ -353,11 +356,13 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
         assert 'OpenVPN Connect' in win.pub_combo.currentText()
 
     win.vpn_state = 'CONNECTED'
+    api.vpn_state = 'CONNECTED'
     api.ethernet_active = True
     win._sync_status_badges()
     assert 'ETHERNET' in win.vpn_stat_val.text()
     assert 'ETHERNET' in win.kpi_vpn.val.text()
     api.ethernet_active = False
+    api.vpn_state = 'DISCONNECTED'
     win.vpn_state = 'DISCONNECTED'
     win._sync_status_badges()
 
@@ -374,6 +379,8 @@ def test_qt_window_tabs_i18n_and_auth_visibility(qt_app, tmp_path, monkeypatch):
         'samTimeChkCheck', 'samTimeUpstream', 'startSamTimeOverride()', 'stopSamTimeOverride()', 'syncSamTimeNow()',
         'tabHis', 'hisPage', 'hisStartPairing()', 'hisBeletMode', 'hisInstallBelet()', 'hisInstallAlem()', 'hisInstallCallback()',
         'installCallbackHisense()',
+        'tabSamApps', 'samAppsPage', 'loadSamCatalog(', 'checkSamAppsTv()',
+        'installSamCatalogApp()', 'launchSamCatalogApp()', 'uninstallSamCatalogApp()',
     ):
         assert token in ui_html
 
@@ -672,6 +679,7 @@ def test_ui_ux_splitters_filters_badges_and_wheel_guard(qt_app, tmp_path, monkey
     assert win.eth_inline_badge.objectName() == 'InlineBadgeIdle'
 
     win.vpn_state = 'CONNECTED'
+    api.vpn_state = 'CONNECTED'
     api.vpn_profile = 'Happ: Edge Node'
     api.ethernet_active = True
     api.ethernet_iface = 'Ethernet'
@@ -710,3 +718,190 @@ def test_ui_ux_splitters_filters_badges_and_wheel_guard(qt_app, tmp_path, monkey
     win._force_exit = True
     win.close()
     qt_app.processEvents()
+
+
+def test_samsung_apps_catalog_tab_interactions(qt_app, tmp_path, monkeypatch):
+    from unittest import mock
+    from samsung_catalog import normalize_catalog
+    monkeypatch.setenv('APPDATA', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path))
+
+    api = Api()
+    api.save_settings({
+        'samsung_catalog_settings': {
+            'jellyfin': {'server_url': 'https://saved.nas:8096'}
+        }
+    })
+    raw_catalog = {
+        'schemaVersion': 1,
+        'categories': ['media', 'utility'],
+        'category_colors': {'media': '#4caf50', 'utility': '#607d8b'},
+        'apps': [
+            {
+                'file': 'Jellyfin-tizen6.wgt',
+                'name': 'Jellyfin',
+                'description': 'Media client Tizen 6+',
+                'category': 'media',
+                'group': 'jellyfin',
+                'variant': 'Tizen 6+',
+                'version': '1.0',
+                'required_version': '6.0',
+                'package_id': 'Jellyfin01',
+                'app_id': 'Jellyfin01.Main',
+                'cert_level': 'public',
+                'repo': 'jellyfin/jellyfin-tizen',
+                'user_settings': {
+                    'cfg.js': [
+                        {'id': 'server_url', 'label': 'Server URL', 'type': 'text', 'required': True, 'find': 'X', 'replace': '{value}'},
+                        {'id': 'api_secret_token', 'label': 'API Secret', 'type': 'text', 'secret': True, 'required': False, 'find': 'Y', 'replace': '{value}'},
+                    ]
+                },
+            },
+            {
+                'file': 'Jellyfin-tizen5.wgt',
+                'name': 'Jellyfin',
+                'description': 'Media client Tizen 5',
+                'category': 'media',
+                'group': 'jellyfin',
+                'variant': 'Tizen 5',
+                'version': '0.9',
+                'required_version': '5.0',
+                'package_id': 'Jellyfin01',
+                'app_id': 'Jellyfin01.Main',
+                'cert_level': 'public',
+                'repo': 'jellyfin/jellyfin-tizen',
+            },
+            {
+                'file': 'Overscan.tpk',
+                'name': 'Overscan',
+                'description': 'Display border tool',
+                'category': 'utility',
+                'version': '1.0',
+                'required_version': '6.0',
+                'package_id': 'org.apps2samsung.overscan',
+                'app_id': 'org.apps2samsung.overscan.ui',
+                'cert_level': 'partner',
+                'flags': ['root'],
+                'repo': 'Apps2Samsung/Overscan',
+            },
+            {
+                'file': 'AdultPortal.wgt',
+                'name': 'AdultPortal',
+                'description': '18+ catalog item',
+                'category': 'media',
+                'version': '1.0',
+                'required_version': '5.0',
+                'package_id': 'Adult00001',
+                'app_id': 'Adult00001.Main',
+                'adult': True,
+            },
+        ],
+        'removed': [
+            {
+                'files': ['OldGone.wgt'],
+                'reason': 'upstream_archived',
+                'note': 'Removed',
+                'since': '2026-08-01',
+                'package_ids': ['OldGone001'],
+            }
+        ],
+    }
+    norm_catalog = normalize_catalog(
+        raw_catalog,
+        assets_map={
+            'Jellyfin-tizen6.wgt': {'browser_download_url': 'https://github.com/a/b/Jellyfin-tizen6.wgt', 'size': 2097152, 'digest': 'sha256:' + ('1' * 64)},
+            'Jellyfin-tizen5.wgt': {'browser_download_url': 'https://github.com/a/b/Jellyfin-tizen5.wgt', 'size': 1048576, 'digest': 'sha256:' + ('2' * 64)},
+            'Overscan.tpk': {'browser_download_url': 'https://github.com/a/b/Overscan.tpk', 'size': 524288, 'digest': 'sha256:' + ('3' * 64)},
+            'AdultPortal.wgt': {'browser_download_url': 'https://github.com/a/b/AdultPortal.wgt', 'size': 102400, 'digest': 'sha256:' + ('4' * 64)},
+        },
+        release_meta={'tag_name': 'community-934', 'published_at': '2026-11-10T00:00:00Z'},
+    )
+
+    win = NeonWindow(api=api)
+    win.show()
+    qt_app.processEvents()
+
+    def _wait_sam():
+        deadline = __import__('time').time() + 3.0
+        while win.sam_apps_busy and __import__('time').time() < deadline:
+            win._pump()
+            qt_app.processEvents()
+        win._pump()
+        qt_app.processEvents()
+
+    with mock.patch('samsung_catalog.SamsungCatalogManager.get_catalog', return_value=norm_catalog):
+        win.switch_tab(6)
+        _wait_sam()
+
+    # Adult app hidden by default -> 2 visible groups (Jellyfin + Overscan)
+    assert win.sam_apps_list.count() == 2
+    assert win.sam_apps_adult_chk.isChecked() is False
+
+    # Selected Jellyfin -> has 2 variants & prefilled saved server_url + password-masked secret field
+    assert win.sam_apps_detail_title.text() == 'Jellyfin'
+    assert win.sam_apps_variant_combo.count() == 2
+    assert win._sam_setting_inputs['server_url'].text() == 'https://saved.nas:8096'
+    assert win._sam_setting_inputs['api_secret_token'].echoMode() == QtWidgets.QLineEdit.Password
+
+    # Switch variant to Tizen 5 -> user_settings box clears
+    win.sam_apps_variant_combo.setCurrentIndex(1)
+    qt_app.processEvents()
+    assert win._sam_setting_inputs == {}
+
+    # Toggle 18+ switch via user click -> AdultPortal appears and preference persists in settings
+    from PyQt5 import QtCore, QtTest
+    QtTest.QTest.mouseClick(win.sam_apps_adult_chk, QtCore.Qt.LeftButton)
+    qt_app.processEvents()
+    assert win.sam_apps_adult_chk.isChecked() is True
+    assert win.sam_apps_list.count() == 3
+    assert api.load_settings()['samsung_catalog_show_adult'] is True
+
+    # Removed category disables Install button
+    removed_idx = win.sam_apps_cat_combo.findData('__removed__')
+    assert removed_idx >= 0
+    win.sam_apps_cat_combo.setCurrentIndex(removed_idx)
+    qt_app.processEvents()
+    assert win.sam_apps_list.count() == 1
+    assert win.btn_sam_apps_install.isEnabled() is False
+
+    # Return to All Categories, search Overscan, sync TV IP two-way, Check TV Apps, and test version override confirm
+    win.sam_apps_cat_combo.setCurrentIndex(0)
+    qt_app.processEvents()
+    win.sam_apps_search.setText('Overscan')
+    qt_app.processEvents()
+    assert win.sam_apps_list.count() == 1
+
+    win.sam_apps_ip.setText('192.168.1.99')
+    qt_app.processEvents()
+    assert win.sam_ip.text() == '192.168.1.99'
+
+    with mock.patch.object(api, 'check_samsung_tv_installed', return_value={'ok': True, 'package_ids': ['org.apps2samsung.overscan'], 'app_ids': ['org.apps2samsung.overscan.ui'], 'count': 1}):
+        win.check_samsung_apps_tv()
+        _wait_sam()
+    assert 'org.apps2samsung.overscan' in win._sam_installed_pkgs
+
+    calls = []
+
+    def fake_install(**kwargs):
+        calls.append(kwargs)
+        if not kwargs.get('force_version_override'):
+            return {'ok': False, 'needs_version_confirm': True, 'tv_version': '5.5', 'required_version': '6.0', 'error': 'Version too old'}
+        return {'ok': True, 'pkg_id': 'org.apps2samsung.overscan', 'app_id': 'org.apps2samsung.overscan.ui', 'cert_level': 'partner'}
+
+    win.sam_apps_search.setText('')
+    qt_app.processEvents()
+    win.sam_apps_list.setCurrentRow(1)
+    qt_app.processEvents()
+    with mock.patch.object(api, 'install_samsung_catalog_app', side_effect=fake_install), \
+         mock.patch('app_legacy.ConfirmDialog.exec_', return_value=ConfirmDialog.Accepted):
+        win.install_selected_samsung_catalog_app()
+        _wait_sam()
+        _wait_sam()
+    assert len(calls) == 2
+    assert calls[0]['force_version_override'] is False
+    assert calls[1]['force_version_override'] is True
+
+    win._force_exit = True
+    win.close()
+    qt_app.processEvents()
+

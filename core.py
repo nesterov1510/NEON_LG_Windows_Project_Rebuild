@@ -32,7 +32,19 @@ import vless
 import happ_client
 import msb_callback
 import belet_lg_client
-from local_tv_packages import read_package, validate_ipk, validate_wgt
+from local_tv_packages import read_package, validate_ipk, validate_tizen_package, validate_wgt
+from samsung_catalog import (
+    CATALOG_REPO_URL,
+    CatalogError,
+    SamsungCatalogManager,
+    UserSettingsError,
+    apply_user_settings_to_package,
+    build_catalog_groups,
+    is_version_below,
+    parse_vd_applist,
+    safe_asset_filename,
+    validate_user_values,
+)
 
 from samsung_tv import (
     SAMSUNG_LOCAL_SETS,
@@ -46,6 +58,7 @@ from samsung_tizen import (
     BELET_PKG_ID,
     BELET_URL,
     SamsungCertManager,
+    SamsungPartnerPrivilegeError,
     SdbClient,
     SdbError,
     _format_chain_summary,
@@ -329,6 +342,8 @@ class Api:
             'samsung_ip': '192.168.1.101',
             'samsung_port': 'auto',
             'samsung_tokens': {},
+            'samsung_catalog_show_adult': False,
+            'samsung_catalog_settings': {},
             'samsung_time_mode': 'gateway',
             'samsung_time_target': 'time.cloudflare.com',
             'samsung_time_sources': ', '.join(SAMSUNG_TIME_DEFAULT_SOURCES),
@@ -5637,6 +5652,320 @@ class Api:
                 'ok': True,
                 'pkg_id': ALEMTV_PKG_ID,
                 'output': f'[+] Removed Alem TV ({ALEMTV_PKG_ID}): {reply.strip() or "done"}',
+            }
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Uninstall failed: {exc}'}
+
+    def _samsung_catalog_manager(self):
+        return SamsungCatalogManager(self._data_dir())
+
+    def get_samsung_catalog(self, force_refresh=False):
+        try:
+            catalog = self._samsung_catalog_manager().get_catalog(force_refresh=bool(force_refresh))
+            settings = self.load_settings()
+            show_adult = bool(settings.get('samsung_catalog_show_adult', False))
+            saved_map = settings.get('samsung_catalog_settings')
+            if not isinstance(saved_map, dict):
+                saved_map = {}
+            groups = build_catalog_groups(catalog.get('apps'), show_adult=show_adult)
+            return {
+                'ok': True,
+                'catalog': catalog,
+                'groups': groups,
+                'show_adult': show_adult,
+                'saved_settings': saved_map,
+                'repo_url': CATALOG_REPO_URL,
+            }
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'repo_url': CATALOG_REPO_URL}
+
+    def set_samsung_catalog_preferences(self, show_adult=None):
+        updates = {}
+        if show_adult is not None:
+            updates['samsung_catalog_show_adult'] = bool(show_adult)
+        saved = self.save_settings(updates) if updates else self.load_settings()
+        return {'ok': True, 'show_adult': bool(saved.get('samsung_catalog_show_adult', False))}
+
+    def _save_catalog_app_user_values(self, app_entry, user_values):
+        if not isinstance(user_values, dict):
+            return
+        fields = {f['id']: f for f in (app_entry.get('user_settings_fields') or ())}
+        storable = {}
+        for k, v in user_values.items():
+            fmeta = fields.get(k) or {}
+            if fmeta.get('secret'):
+                continue
+            val = '' if v is None else str(v).strip()
+            if val:
+                storable[k] = val
+        cfg = self.load_settings()
+        saved_map = dict(cfg.get('samsung_catalog_settings') or {})
+        key = app_entry.get('group') or app_entry.get('file')
+        if key:
+            saved_map[key] = storable
+            self.save_settings({'samsung_catalog_settings': saved_map})
+
+    def check_samsung_tv_installed(self, ip=None):
+        try:
+            clean_ip = self._resolve_samsung_ip(ip)
+        except ValueError as exc:
+            return {'ok': False, 'error': str(exc)}
+        try:
+            with SdbClient(clean_ip, timeout=8.0) as sdb:
+                caps = sdb.capability()
+                duid = sdb.get_duid(caps=caps)
+                platform_ver = caps.get('platform_version', '')
+                raw_applist = sdb.list_apps()
+            parsed = parse_vd_applist(raw_applist)
+            return {
+                'ok': True,
+                'ip': clean_ip,
+                'duid': duid,
+                'platform_version': platform_ver,
+                'package_ids': parsed['package_ids'],
+                'app_ids': parsed['app_ids'],
+                'output': f'[+] SDB {clean_ip} | DUID={duid} | Tizen={platform_ver or "?"} | Found {len(parsed["package_ids"])} package(s)',
+            }
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] SDB check failed: {exc}'}
+
+    def install_samsung_catalog_app(
+        self,
+        ip=None,
+        file_name='',
+        user_values=None,
+        force_version_override=False,
+        launch=False,
+    ):
+        lines = []
+        try:
+            clean_ip = self._resolve_samsung_ip(ip)
+            fname = safe_asset_filename(file_name)
+        except (ValueError, CatalogError) as exc:
+            return {'ok': False, 'error': str(exc)}
+
+        try:
+            cat_mgr = self._samsung_catalog_manager()
+            catalog = cat_mgr.get_catalog(force_refresh=False)
+
+            # Never install packages listed under removed[]
+            for rem in catalog.get('removed') or ():
+                if fname in (rem.get('files') or ()):
+                    msg = f'{fname} was removed from the catalog ({rem.get("reason_en")}).'
+                    return {'ok': False, 'removed': True, 'error': msg, 'output': f'[!] {msg}'}
+
+            app_entry = next((a for a in (catalog.get('apps') or ()) if a.get('file') == fname), None)
+            if app_entry is None:
+                return {'ok': False, 'error': f'Package {fname} was not found in the Samsung catalog.'}
+
+            if app_entry.get('has_user_settings') and not app_entry.get('user_settings_valid'):
+                return {
+                    'ok': False,
+                    'error': app_entry.get('user_settings_error') or 'Invalid user_settings definition in catalog.',
+                }
+
+            specs = app_entry.get('user_settings') or ()
+            if specs:
+                # Validate user_values before downloading/signing; do not log secret inputs.
+                validate_user_values(specs, user_values)
+                self._save_catalog_app_user_values(app_entry, user_values)
+
+            pc_ip = _tizen_local_ip(clean_ip)
+            lines.append(f'[+] Preparing {app_entry.get("name") or fname} ({fname}) for Samsung TV {clean_ip}...')
+            if app_entry.get('is_root'):
+                lines.append('[i] Root-flagged app: ensure TV Developer Mode Host PC IP matches this app\'s instructions (often 127.0.0.1).')
+
+            require_digest = bool(catalog.get('digests_available', True))
+            pkg_bytes, sha_hex, verified = cat_mgr.download_and_verify_package(app_entry, require_digest=require_digest)
+            if verified:
+                lines.append(f'[+] Verified SHA-256 ({sha_hex[:12]}...) · {len(pkg_bytes) // 1024} KB')
+            else:
+                lines.append(f'[i] Downloaded {fname} ({len(pkg_bytes) // 1024} KB; API rate limit skipped asset digest check)')
+
+            pkg_meta = validate_tizen_package(pkg_bytes, allow_tpk=True)
+            pkg_kind = pkg_meta['kind']
+            pkg_id = pkg_meta['pkg_id'] or app_entry.get('package_id') or ''
+            app_id = pkg_meta['app_id'] or app_entry.get('app_id') or pkg_id
+
+            if specs:
+                pkg_bytes, _ = apply_user_settings_to_package(pkg_bytes, specs, user_values)
+                pkg_meta = validate_tizen_package(pkg_bytes, allow_tpk=True)
+                pkg_id = pkg_meta['pkg_id'] or pkg_id
+                app_id = pkg_meta['app_id'] or app_id
+                lines.append(f'[+] Applied {len(app_entry.get("user_settings_fields") or ())} custom setting(s) into {pkg_kind.upper()} package.')
+
+            cert_mgr = self._samsung_cert_manager()
+            self._samsung_auth_stop.clear()
+            req_ver = app_entry.get('required_version') or pkg_meta.get('required_version') or ''
+            req_level = app_entry.get('cert_level') or 'public'
+
+            with SdbClient(clean_ip, timeout=10.0) as sdb:
+                caps = sdb.capability()
+                duid = sdb.get_duid(caps=caps)
+                platform_ver = caps.get('platform_version', '')
+                sdk_toolpath = sdb.resolve_sdk_toolpath(caps)
+                if not re.fullmatch(r'/[A-Za-z0-9_./-]+', sdk_toolpath) or '..' in sdk_toolpath.split('/'):
+                    raise ValueError('Invalid SDK upload path returned by TV.')
+                lines.append(f'[+] SDB 26101 connected · DUID={duid} · Tizen={platform_ver or "?"} · path={sdk_toolpath}')
+                self._sam_log(f'[CATALOG] Connected to {clean_ip} (DUID={duid}, Tizen={platform_ver or "?"}) for {fname}')
+
+                if req_ver and is_version_below(platform_ver, req_ver) and not force_version_override:
+                    warn_msg = f'{app_entry.get("name") or fname} requires Tizen {req_ver}+, but your TV reports Tizen {platform_ver}.'
+                    lines.append('[!] ' + warn_msg)
+                    return {
+                        'ok': False,
+                        'needs_version_confirm': True,
+                        'tv_version': platform_ver,
+                        'required_version': req_ver,
+                        'pkg_id': pkg_id,
+                        'app_id': app_id,
+                        'error': warn_msg,
+                        'output': '\n'.join(lines),
+                    }
+
+                bundle = cert_mgr.find_saved_samsung_certs(duid, cert_level=req_level)
+                used_partner_fallback = False
+                ver_num = None
+                m_ver = re.match(r'(\d+(?:\.\d+)?)', str(platform_ver or ''))
+                if m_ver:
+                    try:
+                        ver_num = float(m_ver.group(1))
+                    except ValueError:
+                        ver_num = None
+
+                if bundle is not None:
+                    lines.append(f'[+] Using saved {bundle.get("cert_level", req_level)} certificate: {bundle["source"]}')
+                else:
+                    if req_level == 'public' and ver_num is not None and ver_num < 7.0:
+                        try:
+                            self._sam_log('[CERT] Tizen < 7.0 detected — trying zero-login Tizen SDK certificate...')
+                            bundle = cert_mgr.ensure_tizen_sdk_certs()
+                            lines.append('[+] Using Tizen SDK local certificate (no Samsung login required)')
+                        except Exception as sdk_exc:
+                            lines.append(f'[i] Tizen SDK local cert skipped ({sdk_exc}); using Samsung sign-in...')
+
+                    if bundle is None:
+                        self._sam_log(f'[CERT] Samsung Account sign-in required ({req_level}) for DUID {duid}...')
+                        try:
+                            bundle = cert_mgr.sign_in_and_provision(
+                                duid,
+                                open_browser=True,
+                                timeout=240.0,
+                                stop_event=self._samsung_auth_stop,
+                                url_cb=lambda u: self._sam_log('[CERT] Sign-in URL: ' + u),
+                                cert_level=req_level,
+                            )
+                            lines.append(f'[+] Provisioned {req_level} certificate: {bundle["source"]}')
+                        except SamsungPartnerPrivilegeError as pexc:
+                            lines.append(f'[!] Samsung rejected Partner certificate provisioning ({pexc}); falling back to Public cert...')
+                            used_partner_fallback = True
+                            bundle = cert_mgr.find_saved_samsung_certs(duid, cert_level='public')
+                            if bundle is None and getattr(pexc, 'token_info', None):
+                                bundle = cert_mgr.provision_with_oauth_token(duid, pexc.token_info, cert_level='public')
+                            if bundle is None:
+                                bundle = cert_mgr.sign_in_and_provision(
+                                    duid,
+                                    open_browser=True,
+                                    timeout=240.0,
+                                    stop_event=self._samsung_auth_stop,
+                                    url_cb=lambda u: self._sam_log('[CERT] Sign-in URL: ' + u),
+                                    cert_level='public',
+                                )
+
+                signed = sign_wgt_bytes(
+                    pkg_bytes,
+                    bundle['author_key'],
+                    bundle['author_certs'],
+                    bundle['dist_key'],
+                    bundle['dist_certs'],
+                )
+                verify_wgt_signatures(signed)
+                a_sum = _format_chain_summary(bundle.get('author_certs'))
+                d_sum = _format_chain_summary(bundle.get('dist_certs'))
+                lines.append(f'[+] Signed {pkg_id}.{pkg_kind} ({len(signed) // 1024} KB) · Author ({a_sum}) | Dist ({d_sum})')
+
+                remote_path = f'{sdk_toolpath}/{pkg_id}.{pkg_kind}'
+                sdb.push_bytes(signed, remote_path)
+                lines.append(f'[+] Uploaded to {remote_path}')
+
+                result = sdb.install_wgt(pkg_id, remote_path, timeout=180.0)
+                if result.strip():
+                    lines.extend(result.strip().splitlines())
+                diag = diagnose_install_output(result, pkg_id)
+
+                if diag.get('status') == 'cert_mismatch':
+                    lines.append(f'[i] Removing existing {pkg_id} (different signature) and retrying...')
+                    try:
+                        sdb.uninstall_app(pkg_id)
+                    except Exception:
+                        pass
+                    result = sdb.install_wgt(pkg_id, remote_path, timeout=180.0)
+                    if result.strip():
+                        lines.extend(result.strip().splitlines())
+                    diag = diagnose_install_output(result, pkg_id)
+
+                if diag.get('status') != 'ok':
+                    reason = diag.get('reason') or 'Installation did not succeed; see log.'
+                    if used_partner_fallback and diag.get('status') == 'api_mismatch':
+                        reason += ' This app requires a Partner-level Samsung certificate.'
+                    return {'ok': False, 'error': reason, 'output': '\n'.join(lines)}
+
+                lines.append(f'[+] Installed {app_entry.get("name") or fname} ({pkg_id}) successfully!')
+                if launch and app_id:
+                    try:
+                        lreply = sdb.launch_app(app_id)
+                        lines.append(f'[+] Launched {app_id}: {lreply}')
+                    except Exception as lex:
+                        lines.append(f'[i] Installed OK (launch note: {lex})')
+
+                return {
+                    'ok': True,
+                    'duid': duid,
+                    'pkg_id': pkg_id,
+                    'app_id': app_id,
+                    'pkg_kind': pkg_kind,
+                    'sha256': sha_hex,
+                    'cert_level': bundle.get('cert_level', req_level),
+                    'output': '\n'.join(lines),
+                }
+        except (CatalogError, UserSettingsError, ValueError) as exc:
+            lines.append(f'[!] {exc}')
+            return {'ok': False, 'error': str(exc), 'output': '\n'.join(lines)}
+        except Exception as exc:
+            err = str(exc)
+            if '26101' in err or 'timed out' in err.lower() or 'refused' in err.lower():
+                pc_ip = _tizen_local_ip(clean_ip)
+                lines.append(
+                    f'[i] On Samsung TV: Apps -> 1 2 3 4 5 -> Developer Mode ON -> '
+                    f'Host PC IP: {pc_ip} -> hold Power 5s to reboot TV.'
+                )
+            lines.append(f'[!] Catalog install failed: {err}')
+            return {'ok': False, 'error': err, 'output': '\n'.join(lines)}
+
+    def launch_samsung_app(self, ip=None, app_id=''):
+        clean_id = str(app_id or '').strip()
+        if not re.fullmatch(r'[A-Za-z0-9._-]{1,128}', clean_id):
+            return {'ok': False, 'error': 'Invalid Samsung app ID.'}
+        try:
+            clean_ip = self._resolve_samsung_ip(ip)
+            with SdbClient(clean_ip, timeout=10.0) as sdb:
+                reply = sdb.launch_app(clean_id)
+            return {'ok': True, 'app_id': clean_id, 'output': f'[+] Launched {clean_id}: {reply}'}
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc), 'output': f'[!] Launch failed: {exc}'}
+
+    def uninstall_samsung_app(self, ip=None, pkg_id=''):
+        clean_pkg = str(pkg_id or '').strip()
+        if not re.fullmatch(r'[A-Za-z0-9._-]{1,128}', clean_pkg):
+            return {'ok': False, 'error': 'Invalid Samsung package ID.'}
+        try:
+            clean_ip = self._resolve_samsung_ip(ip)
+            with SdbClient(clean_ip, timeout=10.0) as sdb:
+                reply = sdb.uninstall_app(clean_pkg)
+            return {
+                'ok': True,
+                'pkg_id': clean_pkg,
+                'output': f'[+] Uninstalled {clean_pkg}: {reply.strip() or "done"}',
             }
         except Exception as exc:
             return {'ok': False, 'error': str(exc), 'output': f'[!] Uninstall failed: {exc}'}

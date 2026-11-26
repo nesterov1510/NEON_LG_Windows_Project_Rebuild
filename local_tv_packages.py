@@ -81,3 +81,94 @@ def validate_wgt(data):
             return pkg, app_id
     except (zipfile.BadZipFile, ET.ParseError, KeyError, RuntimeError) as exc:
         raise ValueError('Invalid WGT archive or config.xml.') from exc
+
+
+_TIZEN_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,128}$')
+
+
+def validate_tizen_package(data, allow_tpk=True):
+    """Validate a Samsung Tizen .wgt or .tpk archive safely and extract manifest metadata."""
+    if not data or len(data) > MAX_PACKAGE:
+        raise ValueError('Package is empty or larger than 128 MB.')
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            infos = z.infolist()
+            if len(infos) > 10000 or sum(i.file_size for i in infos) > MAX_UNPACKED:
+                raise ValueError('Tizen package exceeds safe size limits.')
+            names = set()
+            for info in infos:
+                n = info.filename
+                raw_name = info.orig_filename
+                if (raw_name != n or not n or n.startswith(('/', '\\')) or '\\' in n or
+                    any(part in ('.', '..') for part in n.split('/')) or
+                    re.match(r'^[A-Za-z]:', n) or info.flag_bits & 1 or
+                    stat.S_ISLNK(info.external_attr >> 16) or n in names):
+                    raise ValueError('Tizen package contains unsafe, encrypted or duplicate paths.')
+                names.add(n)
+
+            if 'config.xml' in names:
+                if z.getinfo('config.xml').file_size > 1024 * 1024:
+                    raise ValueError('config.xml exceeds 1 MB limit.')
+                xml_bytes = z.read('config.xml')
+                try:
+                    xml_text = xml_bytes.decode('utf-8-sig')
+                except UnicodeError as exc:
+                    raise ValueError('Tizen manifest must be UTF-8.') from exc
+                if re.search(r'<!\s*(?:DOCTYPE|ENTITY)', xml_text, re.I):
+                    raise ValueError('Tizen manifest must not contain XML entities or a DTD.')
+                root = ET.fromstring(xml_text)
+                if root.tag != '{http://www.w3.org/ns/widgets}widget':
+                    raise ValueError('Not a Tizen widget manifest.')
+                app = root.find('{http://tizen.org/ns/widgets}application')
+                if app is None:
+                    raise ValueError('WGT config.xml is missing tizen:application.')
+                pkg = (app.get('package') or '').strip()
+                app_id = (app.get('id') or '').strip()
+                if not _TIZEN_ID_RE.fullmatch(pkg) or not _TIZEN_ID_RE.fullmatch(app_id):
+                    raise ValueError('Invalid Tizen package or application ID.')
+                return {
+                    'kind': 'wgt',
+                    'pkg_id': pkg,
+                    'app_id': app_id,
+                    'version': (root.get('version') or '').strip(),
+                    'required_version': (app.get('required_version') or '').strip(),
+                }
+
+            if allow_tpk and 'tizen-manifest.xml' in names:
+                if z.getinfo('tizen-manifest.xml').file_size > 1024 * 1024:
+                    raise ValueError('tizen-manifest.xml exceeds 1 MB limit.')
+                xml_bytes = z.read('tizen-manifest.xml')
+                try:
+                    xml_text = xml_bytes.decode('utf-8-sig')
+                except UnicodeError as exc:
+                    raise ValueError('Tizen manifest must be UTF-8.') from exc
+                if re.search(r'<!\s*(?:DOCTYPE|ENTITY)', xml_text, re.I):
+                    raise ValueError('Tizen manifest must not contain XML entities or a DTD.')
+                root = ET.fromstring(xml_text)
+                if root.tag.split('}')[-1] != 'manifest':
+                    raise ValueError('Not a native TPK manifest.')
+                pkg = (root.get('package') or '').strip()
+                app_id = ''
+                for el in root.iter():
+                    local_tag = el.tag.split('}')[-1]
+                    if local_tag in ('ui-application', 'service-application', 'widget-application', 'watch-application'):
+                        cand = (el.get('appid') or '').strip()
+                        if cand:
+                            app_id = cand
+                            break
+                if not _TIZEN_ID_RE.fullmatch(pkg) or not _TIZEN_ID_RE.fullmatch(app_id):
+                    raise ValueError('Invalid TPK package or application ID.')
+                return {
+                    'kind': 'tpk',
+                    'pkg_id': pkg,
+                    'app_id': app_id,
+                    'version': (root.get('version') or '').strip(),
+                    'required_version': (root.get('api-version') or '').strip(),
+                }
+
+            raise ValueError('Package must contain config.xml (.wgt) or tizen-manifest.xml (.tpk).')
+    except ValueError:
+        raise
+    except (zipfile.BadZipFile, ET.ParseError, KeyError, RuntimeError) as exc:
+        raise ValueError('Invalid Tizen package archive or manifest.') from exc
+

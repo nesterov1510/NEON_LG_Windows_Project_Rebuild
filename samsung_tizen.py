@@ -5059,39 +5059,78 @@ def parse_samsung_oauth_callback(method, path, body):
     return token_obj
 
 
+class SamsungPartnerPrivilegeError(RuntimeError):
+    """Raised when Samsung certificate service rejects Partner privilege provisioning."""
+
+
 class SamsungCertManager:
     """Discovers, caches, downloads CAs, and provisions Samsung/Tizen certs."""
 
     def __init__(self, data_dir):
         self.data_dir = str(data_dir)
         self.cert_dir = os.path.join(self.data_dir, 'samsung_cert')
+        self.partner_cert_dir = os.path.join(self.data_dir, 'samsung_cert_partner')
         self.ca_dir = os.path.join(self.data_dir, 'samsung_ca')
         self.sdk_ca_dir = os.path.join(self.data_dir, 'tizen_sdk_ca')
+
+    @staticmethod
+    def _normalize_cert_level(cert_level):
+        lvl = str(cert_level or 'public').strip().lower()
+        return 'partner' if lvl == 'partner' else 'public'
+
+    def _cert_dir_for_level(self, cert_level='public'):
+        return self.partner_cert_dir if self._normalize_cert_level(cert_level) == 'partner' else self.cert_dir
+
+    @staticmethod
+    def _is_partner_chain(chain):
+        for cert in (chain or ()):
+            try:
+                subj = cert.subject.rfc4514_string().lower()
+                iss = cert.issuer.rfc4514_string().lower()
+                if 'partner' in subj or 'partner' in iss:
+                    return True
+            except Exception:
+                continue
+        return False
 
     @staticmethod
     def _safe_duid(duid):
         return re.sub(r'[^A-Za-z0-9_-]+', '_', str(duid or '').strip()) or 'default'
 
-    def _external_profile_dirs(self):
+    def _external_profile_dirs(self, cert_level='public'):
+        lvl = self._normalize_cert_level(cert_level)
         home = os.path.expanduser('~')
         appdata = os.environ.get('APPDATA') or os.path.join(home, '.config')
         localappdata = os.environ.get('LOCALAPPDATA') or appdata
+        own_first = self.partner_cert_dir if lvl == 'partner' else self.cert_dir
         roots = [
-            self.cert_dir,
+            own_first,
             os.path.join(home, 'tizen-studio-data', 'SamsungCertificate'),
             os.path.join(home, 'SamsungCertificate'),
             os.path.join(appdata, 'Apps2Samsung', 'Certificates'),
             os.path.join(localappdata, 'Apps2Samsung', 'Certificates'),
         ]
         found = []
+        seen = set()
         for root in roots:
             if not os.path.isdir(root):
                 continue
-            found.append(root)
+            aroot = os.path.abspath(root)
+            if aroot not in seen:
+                seen.add(aroot)
+                found.append(root)
             try:
-                for entry in os.listdir(root):
+                subs = []
+                for entry in sorted(os.listdir(root)):
                     sub = os.path.join(root, entry)
                     if os.path.isdir(sub):
+                        subs.append((entry.lower(), sub))
+                # Prioritize folders matching requested privilege level
+                subs.sort(key=lambda item: (0 if (lvl == 'partner') == ('partner' in item[0]) else 1, item[0]))
+                for _lname, sub in subs:
+                    asub = os.path.abspath(sub)
+                    if asub not in seen:
+                        seen.add(asub)
                         found.append(sub)
             except OSError:
                 pass
@@ -5235,10 +5274,17 @@ class SamsungCertManager:
                 pass
         return repaired
 
-    def find_saved_samsung_certs(self, duid):
-        """Return (author_key, author_certs, dist_key, dist_certs, source) if valid for DUID."""
+    def find_saved_samsung_certs(self, duid, cert_level='public'):
+        """Return (author_key, author_certs, dist_key, dist_certs, source) if valid for DUID & cert_level."""
+        lvl = self._normalize_cert_level(cert_level)
         safe = self._safe_duid(duid)
-        for pdir in self._external_profile_dirs():
+        own_dir = self._cert_dir_for_level(lvl)
+        dist_pref = (
+            ['vd_tizen_dev_partner2.crt', 'partner2.crt']
+            if lvl == 'partner'
+            else ['vd_tizen_dev_public2.crt', 'public2.crt']
+        )
+        for pdir in self._external_profile_dirs(cert_level=lvl):
             author_p12 = os.path.join(pdir, 'author.p12')
             if not os.path.isfile(author_p12):
                 continue
@@ -5271,7 +5317,7 @@ class SamsungCertManager:
             if duid and not cert_covers_duid(d_chain[0], duid):
                 continue
 
-            is_own_dir = os.path.abspath(pdir) == os.path.abspath(self.cert_dir)
+            is_own_dir = os.path.abspath(pdir) == os.path.abspath(own_dir)
             valid_a = self._repair_or_validate_chain(
                 a_key,
                 a_chain,
@@ -5286,11 +5332,16 @@ class SamsungCertManager:
                 d_chain,
                 dist_p12,
                 d_pwd,
-                ['vd_tizen_dev_public2.crt', 'public2.crt', 'vd_tizen_dev_partner2.crt'],
+                dist_pref,
                 can_rewrite=is_own_dir,
                 allow_remote_refresh=is_own_dir,
             )
             if not valid_a or not valid_d:
+                continue
+            chain_is_partner = self._is_partner_chain(valid_d)
+            if lvl == 'partner' and not chain_is_partner:
+                continue
+            if lvl == 'public' and chain_is_partner:
                 continue
             if is_own_dir and dist_p12 != os.path.join(pdir, 'distributor.p12') and valid_d != d_chain:
                 try:
@@ -5299,6 +5350,7 @@ class SamsungCertManager:
                     pass
             return {
                 'source': pdir,
+                'cert_level': 'partner' if chain_is_partner else 'public',
                 'author_key': a_key,
                 'author_certs': valid_a,
                 'dist_key': d_key,
@@ -5306,9 +5358,10 @@ class SamsungCertManager:
             }
         return None
 
-    def _load_or_init_neon_author_key(self):
-        author_p12 = os.path.join(self.cert_dir, 'author.p12')
-        pw_file = os.path.join(self.cert_dir, 'password.txt')
+    def _load_or_init_neon_author_key(self, cert_dir=None):
+        target_dir = cert_dir or self.cert_dir
+        author_p12 = os.path.join(target_dir, 'author.p12')
+        pw_file = os.path.join(target_dir, 'password.txt')
         if os.path.isfile(author_p12) and os.path.isfile(pw_file):
             try:
                 with open(pw_file, 'r', encoding='utf-8') as f:
@@ -5470,11 +5523,12 @@ class SamsungCertManager:
             srv.settimeout(0.5)
             return srv
 
-    def sign_in_and_provision(self, duid, open_browser=True, timeout=240.0, stop_event=None, url_cb=None):
+    def sign_in_and_provision(self, duid, open_browser=True, timeout=240.0, stop_event=None, url_cb=None, cert_level='public'):
         """Perform Samsung Account OAuth2 sign-in and mint VD Author + DUID Distributor certs."""
         if not duid:
             raise ValueError('TV DUID is required to create a Samsung TV certificate')
 
+        lvl = self._normalize_cert_level(cert_level)
         self.ensure_samsung_ca_certs(use_bundled=True)
         auth_url = build_samsung_authorize_url()
         srv = self._open_oauth_listener()
@@ -5531,17 +5585,19 @@ class SamsungCertManager:
         if token_info is None:
             raise TimeoutError('Samsung account sign-in timed out before callback arrived')
 
-        return self.provision_with_oauth_token(duid, token_info)
+        return self.provision_with_oauth_token(duid, token_info, cert_level=lvl)
 
-    def provision_with_oauth_token(self, duid, token_info):
+    def provision_with_oauth_token(self, duid, token_info, cert_level='public'):
         """Exchange Samsung OAuth token + CSRs at svdca.samsungqbe.com and save .p12 bundle."""
+        lvl = self._normalize_cert_level(cert_level)
+        target_dir = self._cert_dir_for_level(lvl)
         self.ensure_samsung_ca_certs(use_bundled=True)
         access_token = str(token_info['access_token'])
         user_id = str(token_info['userId'])
         user_email = str(token_info.get('inputEmailID') or token_info.get('email') or 'user@neon.local')
 
-        os.makedirs(self.cert_dir, exist_ok=True)
-        author_key, existing_author_chain, pwd, had_author = self._load_or_init_neon_author_key()
+        os.makedirs(target_dir, exist_ok=True)
+        author_key, existing_author_chain, pwd, had_author = self._load_or_init_neon_author_key(cert_dir=target_dir)
 
         if had_author and existing_author_chain and cert_is_valid_now(existing_author_chain[0]) and _is_valid_signing_chain(existing_author_chain):
             author_chain = existing_author_chain
@@ -5586,9 +5642,9 @@ class SamsungCertManager:
                 [author_ca],
                 enc,
             )
-            with open(os.path.join(self.cert_dir, 'author.p12'), 'wb') as f:
+            with open(os.path.join(target_dir, 'author.p12'), 'wb') as f:
                 f.write(author_p12)
-            with open(os.path.join(self.cert_dir, 'password.txt'), 'w', encoding='utf-8') as f:
+            with open(os.path.join(target_dir, 'password.txt'), 'w', encoding='utf-8') as f:
                 f.write(pwd)
 
         # Mint DUID-bound Distributor certificate (reuse same author_key as Apps2Samsung)
@@ -5613,7 +5669,7 @@ class SamsungCertManager:
             {
                 'access_token': access_token,
                 'user_id': user_id,
-                'privilege_level': 'public',
+                'privilege_level': lvl,
                 'developer_type': 'Individual',
                 'platform': 'VD',
             },
@@ -5624,13 +5680,17 @@ class SamsungCertManager:
             profile_xml = _http_read(req_d1, timeout=30)
         except urllib.error.HTTPError as exc:
             err_txt = exc.read().decode('utf-8', errors='replace')
+            if lvl == 'partner':
+                pe = SamsungPartnerPrivilegeError(f'Samsung Distributor partner v1 failed ({exc.code}): {err_txt}')
+                pe.token_info = token_info
+                raise pe from exc
             raise RuntimeError(f'Samsung Distributor v1 failed ({exc.code}): {err_txt}') from exc
 
         d3_body, d3_ctype = _encode_multipart(
             {
                 'access_token': access_token,
                 'user_id': user_id,
-                'privilege_level': 'public',
+                'privilege_level': lvl,
                 'developer_type': 'Individual',
                 'platform': 'VD',
             },
@@ -5641,15 +5701,24 @@ class SamsungCertManager:
             signed_dist_raw = _http_read(req_d3, timeout=30)
         except urllib.error.HTTPError as exc:
             err_txt = exc.read().decode('utf-8', errors='replace')
+            if lvl == 'partner':
+                pe = SamsungPartnerPrivilegeError(f'Samsung Distributor partner v3 failed ({exc.code}): {err_txt}')
+                pe.token_info = token_info
+                raise pe from exc
             raise RuntimeError(f'Samsung Distributor v3 failed ({exc.code}): {err_txt}') from exc
 
         dist_certs_resp = _extract_certs(signed_dist_raw)
         dist_leaf = dist_certs_resp[0]
+        dist_pref = (
+            ['vd_tizen_dev_partner2.crt', 'partner2.crt', 'vd_tizen_dev_public2.crt', 'public2.crt']
+            if lvl == 'partner'
+            else ['vd_tizen_dev_public2.crt', 'public2.crt', 'vd_tizen_dev_partner2.crt']
+        )
         dist_ca = self._resolve_ca_for_leaf(
             dist_leaf,
-            ['vd_tizen_dev_public2.crt', 'public2.crt', 'vd_tizen_dev_partner2.crt'],
+            dist_pref,
             extra_certs=dist_certs_resp[1:],
-            label='Samsung Distributor',
+            label=f'Samsung Distributor ({lvl})',
         )
         dist_chain = [dist_leaf, dist_ca]
 
@@ -5662,16 +5731,17 @@ class SamsungCertManager:
             [dist_ca],
             enc,
         )
-        with open(os.path.join(self.cert_dir, f'distributor_{safe}.p12'), 'wb') as f:
+        with open(os.path.join(target_dir, f'distributor_{safe}.p12'), 'wb') as f:
             f.write(dist_p12)
-        with open(os.path.join(self.cert_dir, 'distributor.p12'), 'wb') as f:
+        with open(os.path.join(target_dir, 'distributor.p12'), 'wb') as f:
             f.write(dist_p12)
         if profile_xml:
-            with open(os.path.join(self.cert_dir, f'device-profile_{safe}.xml'), 'wb') as f:
+            with open(os.path.join(target_dir, f'device-profile_{safe}.xml'), 'wb') as f:
                 f.write(profile_xml)
 
         return {
-            'source': self.cert_dir,
+            'source': target_dir,
+            'cert_level': 'partner' if (lvl == 'partner' or self._is_partner_chain(dist_chain)) else 'public',
             'author_key': author_key,
             'author_certs': author_chain,
             'dist_key': dist_key,
