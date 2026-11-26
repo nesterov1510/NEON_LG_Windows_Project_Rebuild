@@ -4297,6 +4297,161 @@ upstream.listen(0, '127.0.0.1', async () => {
     assert chk.returncode == 0, chk.stderr + chk.stdout
 
 
+def test_inspect_profile_cp1251_cd_quotes_and_pem_markers(tmp_path, tmp_api):
+    sub = tmp_path / 'my #dir'
+    sub.mkdir()
+    (sub / 'creds.txt').write_text('user\npass\n', encoding='utf-8')
+    plain_key = tmp_path / 'plain.key'
+    plain_key.write_text('-----BEGIN PRIVATE KEY-----\n# UNENCRYPTED comment\nMIIB\n-----END PRIVATE KEY-----\n', encoding='utf-8')
+    dek_key = tmp_path / 'dek.key'
+    dek_key.write_text('-----BEGIN RSA PRIVATE KEY-----\nDEK-INFO: AES-128-CBC,001122\nMIIB\n-----END RSA PRIVATE KEY-----\n', encoding='utf-8')
+
+    ovpn1 = tmp_path / 'cp1251_cd.ovpn'
+    ovpn1.write_bytes(
+        (
+            '# Кириллический комментарий\n'
+            'client\n'
+            'cd "my #dir" ; directory directive\n'
+            'auth-user-pass creds.txt # comment\n'
+            f'key "{plain_key}"\n'
+        ).encode('cp1251')
+    )
+    res1 = tmp_api.inspect_profile(str(ovpn1))
+    assert res1['exists'] is True
+    assert res1['needs_auth'] is False
+    assert res1['needs_askpass'] is False
+
+    ovpn2 = tmp_path / 'dek.ovpn'
+    ovpn2.write_text(f'client\nauth-user-pass "{sub / "creds.txt"}" ; keep\nkey "{dek_key}"\n', encoding='utf-8')
+    res2 = tmp_api.inspect_profile(str(ovpn2))
+    assert res2['needs_auth'] is False
+    assert res2['needs_askpass'] is True
+
+    with mock.patch('cryptography.hazmat.primitives.serialization.pkcs12.load_key_and_certificates', side_effect=ValueError('Unsupported algorithm')):
+        assert tmp_api._pkcs12_requires_password(b'dummy-p12') is False
 
 
+def test_list_profiles_finds_subdirectory_ovpn(tmp_path, tmp_api, monkeypatch):
+    cfg_root = tmp_path / 'OpenVPN' / 'config'
+    sub = cfg_root / 'work'
+    sub.mkdir(parents=True)
+    ovpn = sub / 'office.ovpn'
+    ovpn.write_text('client\n', encoding='utf-8')
+    monkeypatch.setenv('USERPROFILE', str(tmp_path))
+    monkeypatch.setenv('ProgramFiles', str(tmp_path / 'pf_none'))
+    monkeypatch.setenv('ProgramFiles(x86)', str(tmp_path / 'pf86_none'))
+    with mock.patch('platform.system', return_value='Windows'):
+        res = tmp_api.list_profiles()
+    assert 'office' in res['profiles']
+
+
+def test_select_vpn_public_adapter_allows_vpn_with_default_gw_and_retries_ics(tmp_path, tmp_api):
+    adapters = [
+        {'name': 'Wi-Fi', 'category': 'wifi', 'status': 2, 'has_default_gw': True, 'shared': True, 'sharing_type': 0},
+        {'name': 'TAP-Inactive', 'category': 'vpn', 'status': 7, 'has_default_gw': False, 'has_vpn_route': False},
+        {'name': 'OpenVPN TAP', 'category': 'vpn', 'status': 2, 'has_default_gw': True, 'has_vpn_route': True},
+        {'name': 'Ethernet TV', 'category': 'ethernet', 'status': 2, 'has_default_gw': False, 'hardware': True},
+    ]
+    pub = tmp_api._select_vpn_public_adapter(adapters)
+    assert pub is not None and pub['name'] == 'OpenVPN TAP'
+
+    tmp_api.vpn_state = 'CONNECTED'
+    with mock.patch('platform.system', return_value='Windows'), \
+         mock.patch.object(tmp_api, 'network_connections', return_value={'adapters': adapters}), \
+         mock.patch.object(tmp_api, '_clear_conflicting_ics', return_value='Cleared') as m_clr, \
+         mock.patch.object(tmp_api, 'set_sharing', side_effect=[
+             {'error': 'Another ICS route is already active (Wi-Fi:0). Stop existing sharing first.'},
+             {'ok': True, 'output': 'ICS enabled'},
+         ]) as m_share, \
+         mock.patch('time.sleep'):
+        res = tmp_api.start_vpn_ethernet('Ethernet TV')
+    assert res['ok'] is True
+    assert res['vpn_adapter'] == 'OpenVPN TAP'
+    assert m_share.call_count == 2
+    assert m_clr.call_count == 2
+
+
+def test_cleanup_orphaned_neon_tunnels_kills_only_confirmed_dead_parent_child(tmp_path, tmp_api):
+    tmp_api._record_runtime_pids([])
+    with mock.patch('platform.system', return_value='Windows'):
+        tmp_api._record_runtime_pids([('openvpn.exe', 4321)])
+    pid_file = tmp_path / 'NEON' / 'runtime_pids.json'
+    assert pid_file.is_file()
+    data = json.loads(pid_file.read_text(encoding='utf-8'))
+    data['parent_pid'] = 99999
+    pid_file.write_text(json.dumps(data), encoding='utf-8')
+
+    # Case 1: active parent NEON -> do not kill
+    with mock.patch('platform.system', return_value='Windows'), \
+         mock.patch.object(tmp_api, '_windows_process_image', side_effect=lambda p: 'NeonLGControl81.exe' if p == 99999 else 'openvpn.exe'), \
+         mock.patch('subprocess.run') as m_run:
+        assert tmp_api._cleanup_orphaned_neon_tunnels('openvpn.exe') == []
+        m_run.assert_not_called()
+
+    # Case 2: dead parent, recycled PID (notepad.exe) -> do not kill
+    with mock.patch('platform.system', return_value='Windows'), \
+         mock.patch.object(tmp_api, '_windows_process_image', side_effect=lambda p: None if p == 99999 else 'notepad.exe'), \
+         mock.patch('subprocess.run') as m_run:
+        assert tmp_api._cleanup_orphaned_neon_tunnels('openvpn.exe') == []
+        m_run.assert_not_called()
+
+    # Case 3: dead parent, matching openvpn.exe -> kill once and remove runtime_pids.json
+    pid_file.write_text(json.dumps(data), encoding='utf-8')
+    with mock.patch('platform.system', return_value='Windows'), \
+         mock.patch.object(tmp_api, '_windows_process_image', side_effect=lambda p: None if p == 99999 else 'openvpn.exe'), \
+         mock.patch('subprocess.run') as m_run:
+        cleaned = tmp_api._cleanup_orphaned_neon_tunnels('openvpn.exe')
+    assert cleaned == [('openvpn.exe', 4321)]
+    m_run.assert_called_once()
+    assert not pid_file.exists()
+
+
+def test_connect_openvpn_writes_lf_auth_and_askpass_files(tmp_path, tmp_api):
+    import io
+    from pathlib import Path
+
+    ovpn = tmp_path / 'both.ovpn'
+    ovpn.write_text('client\nauth-user-pass\n<key>\n-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIB\n-----END ENCRYPTED PRIVATE KEY-----\n</key>\n', encoding='utf-8')
+    tmp_api.profile_map['both'] = str(ovpn)
+
+    captured = {}
+
+    class DummyProc:
+        pid = 7777
+        stdout = io.StringIO('')
+
+        @staticmethod
+        def poll():
+            return None
+
+        @staticmethod
+        def wait(timeout=None):
+            return 0
+
+        @staticmethod
+        def terminate():
+            pass
+
+    def fake_popen(cmd, **kwargs):
+        captured['cmd'] = cmd
+        idx_a = cmd.index('--auth-user-pass') + 1
+        idx_k = cmd.index('--askpass') + 1
+        captured['auth_bytes'] = Path(cmd[idx_a]).read_bytes()
+        captured['ask_bytes'] = Path(cmd[idx_k]).read_bytes()
+        return DummyProc()
+
+    with mock.patch('platform.system', return_value='Windows'), \
+         mock.patch.object(tmp_api, '_openvpn_exe', return_value=r'C:\Program Files\OpenVPN\bin\openvpn.exe'), \
+         mock.patch.object(tmp_api, '_cleanup_orphaned_neon_tunnels', return_value=[]), \
+         mock.patch('subprocess.Popen', side_effect=fake_popen), \
+         mock.patch('threading.Thread'):
+        res = tmp_api.connect_vpn('both', 'alice', 'pw123', 'keypass')
+    assert res['ok'] is True
+    assert captured['auth_bytes'] == b'alice\npw123\n'
+    assert captured['ask_bytes'] == b'keypass\n'
+    assert b'\r' not in captured['auth_bytes'] and b'\r' not in captured['ask_bytes']
+    assert (tmp_path / 'NEON' / 'runtime_pids.json').is_file()
+    with mock.patch('platform.system', return_value='Windows'):
+        tmp_api.disconnect_vpn()
+    assert not (tmp_path / 'NEON' / 'runtime_pids.json').exists()
 

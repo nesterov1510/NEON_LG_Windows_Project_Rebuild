@@ -5549,7 +5549,7 @@ class NeonWindow(QMainWindow):
                 cat = a.get('category') or self.api._classify_adapter(a)
                 st = '[Connected]' if a.get('status') == 2 else '[Disconnected]'
                 ics = ' [ICS]' if a.get('shared') else ''
-                role = ' [Uplink]' if a.get('has_default_gw') else (' [VPN]' if cat == 'vpn' else '')
+                role = ' [VPN]' if cat == 'vpn' else (' [Uplink]' if a.get('has_default_gw') else '')
                 disp = f'{name}  —  {dev}  {st}{role}{ics}' if dev and dev != name else f'{name}  {st}{role}{ics}'
                 labels.append(disp)
                 self.adapter_map[disp] = name
@@ -5771,12 +5771,16 @@ class NeonWindow(QMainWindow):
     # Clean Shutdown
     # ------------------------------------------------------------------
     def closeEvent(self, event):
-        vpn_or_hs = self.vpn_state in ('CONNECTED', 'CONNECTING') or getattr(self.api, 'hotspot_active', False)
+        vpn_or_hs = (
+            self.vpn_state in ('CONNECTED', 'CONNECTING')
+            or getattr(self.api, 'hotspot_active', False)
+            or getattr(self.api, 'ethernet_active', False)
+        )
         if not self._force_exit and vpn_or_hs and self.tray is not None:
             body = (
-                'Conf or Hotspot is currently active. Stop Conf/Hotspot and exit, or Cancel to keep running?'
+                'Conf or network sharing (Hotspot/Ethernet) is currently active. Stop them and exit, or Cancel to keep running?'
                 if self.lang == 'en'
-                else 'Сейчас активен модуль Conf или точка доступа. Остановить их и выйти?'
+                else 'Сейчас активен модуль Conf или раздача сети (точка/Ethernet). Остановить их и выйти?'
             )
             dlg = ConfirmDialog(
                 self,

@@ -5,6 +5,7 @@ import glob
 import io
 import ipaddress
 import json
+import locale
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -165,6 +166,135 @@ class Api:
 
     def _log_path(self):
         return os.path.join(self._data_dir(), 'neon.log')
+
+    def _runtime_pids_path(self):
+        return os.path.join(self._data_dir(), 'runtime_pids.json')
+
+    def _record_runtime_pids(self, entries):
+        if platform.system() != 'Windows':
+            return
+        try:
+            path = self._runtime_pids_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            payload = {
+                'parent_pid': int(os.getpid()),
+                'pids': [
+                    {'exe': str(exe), 'pid': int(pid)}
+                    for exe, pid in (entries or [])
+                    if exe and pid
+                ],
+            }
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, indent=2)
+        except Exception:
+            pass
+
+    def _clear_runtime_pids(self, target_exe=None):
+        try:
+            path = self._runtime_pids_path()
+            if not os.path.isfile(path):
+                return
+            if target_exe is None:
+                os.remove(path)
+                return
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                os.remove(path)
+                return
+            kept = [
+                row for row in (data.get('pids') or [])
+                if str(row.get('exe') or '').lower() != str(target_exe).lower()
+            ]
+            if not kept:
+                os.remove(path)
+            else:
+                data['pids'] = kept
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    def _windows_process_image(self, pid):
+        if platform.system() != 'Windows':
+            return None
+        try:
+            proc = subprocess.run(
+                ['tasklist', '/FI', f'PID eq {int(pid)}', '/NH', '/FO', 'CSV'],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=4,
+                creationflags=self._creation_flags(),
+            )
+            for line in (proc.stdout or '').splitlines():
+                line = line.strip()
+                if not line or line.upper().startswith('INFO:'):
+                    continue
+                if line.startswith('"'):
+                    first = line[1:].split('"', 1)[0].strip()
+                    if first:
+                        return first
+        except Exception:
+            pass
+        return None
+
+    def _cleanup_orphaned_neon_tunnels(self, target_exe=None):
+        if platform.system() != 'Windows':
+            return []
+        path = self._runtime_pids_path()
+        if not os.path.isfile(path):
+            return []
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            return []
+        if not isinstance(data, dict):
+            return []
+        parent_pid = data.get('parent_pid')
+        if parent_pid == os.getpid():
+            return []
+        if parent_pid:
+            parent_img = (self._windows_process_image(parent_pid) or '').lower()
+            if parent_img.startswith('neon') or parent_img.startswith('python'):
+                return []
+        cleaned = []
+        remaining = []
+        for row in (data.get('pids') or []):
+            if not isinstance(row, dict):
+                continue
+            exe = str(row.get('exe') or '')
+            pid = row.get('pid')
+            if not exe or not pid:
+                continue
+            if target_exe and exe.lower() != str(target_exe).lower():
+                remaining.append(row)
+                continue
+            img = (self._windows_process_image(pid) or '').lower()
+            if img and img == exe.lower():
+                try:
+                    subprocess.run(
+                        ['taskkill', '/F', '/PID', str(int(pid))],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        creationflags=self._creation_flags(),
+                    )
+                    cleaned.append((exe, int(pid)))
+                except Exception:
+                    remaining.append(row)
+        try:
+            if remaining:
+                data['pids'] = remaining
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2)
+            else:
+                os.remove(path)
+        except Exception:
+            pass
+        return cleaned
 
     def _setup_logger(self):
         logger = logging.getLogger('neon')
@@ -1201,6 +1331,7 @@ class Api:
         for root in roots:
             if root:
                 paths.extend(glob.glob(os.path.join(root, '*.ovpn')))
+                paths.extend(glob.glob(os.path.join(root, '*', '*.ovpn')))
         unique = {os.path.normcase(os.path.abspath(p)): os.path.abspath(p) for p in paths}
 
         saved = self._load_saved_profile_map()
@@ -1511,20 +1642,76 @@ class Api:
         return cand
 
     @staticmethod
+    def _strip_ovpn_inline_comment(line):
+        in_quote = None
+        escaped = False
+        for i, ch in enumerate(line):
+            if escaped:
+                escaped = False
+                continue
+            if ch == '\\' and os.name != 'nt' and in_quote == '"':
+                escaped = True
+                continue
+            if ch in ('"', "'"):
+                if in_quote is None:
+                    in_quote = ch
+                elif in_quote == ch:
+                    in_quote = None
+                continue
+            if in_quote is None and ch in ('#', ';') and (i == 0 or line[i - 1].isspace()):
+                return line[:i].strip()
+        return line.strip()
+
+    @staticmethod
+    def _read_text_with_fallback(path, max_bytes=2 * 1024 * 1024):
+        with open(path, 'rb') as f:
+            raw = f.read(max_bytes) if max_bytes else f.read()
+        encodings = ['utf-8-sig', 'cp1251']
+        try:
+            pref = locale.getpreferredencoding(False)
+            if pref and pref.lower() not in ('utf-8', 'utf8', 'cp1251', 'ascii'):
+                encodings.append(pref)
+        except Exception:
+            pass
+        for enc in encodings:
+            try:
+                return raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode('utf-8-sig', errors='replace')
+
+    @staticmethod
+    def _pem_key_is_encrypted(text):
+        upper = str(text or '').upper()
+        return (
+            'BEGIN ENCRYPTED PRIVATE KEY' in upper
+            or 'PROC-TYPE: 4,ENCRYPTED' in upper
+            or 'DEK-INFO:' in upper
+        )
+
+    @staticmethod
     def _pkcs12_requires_password(raw_bytes):
         if not raw_bytes:
             return False
         try:
             from cryptography.hazmat.primitives.serialization.pkcs12 import load_key_and_certificates
-            try:
-                load_key_and_certificates(raw_bytes, None)
-                return False
-            except ValueError:
-                return True
-            except Exception:
-                return True
+            from cryptography.exceptions import UnsupportedAlgorithm
         except ImportError:
-            return True
+            return False
+        for candidate_pw in (None, b''):
+            try:
+                load_key_and_certificates(raw_bytes, candidate_pw)
+                return False
+            except UnsupportedAlgorithm:
+                return False
+            except ValueError as exc:
+                msg = str(exc).lower()
+                if 'unsupported' in msg or 'algorithm' in msg:
+                    return False
+                continue
+            except Exception:
+                return False
+        return True
 
     def inspect_profile(self, profile):
         p = self._resolve_profile_path(profile)
@@ -1534,85 +1721,84 @@ class Api:
         needs_askpass = False
         base_dir = os.path.dirname(os.path.abspath(p))
         try:
-            with open(p, 'r', encoding='utf-8-sig', errors='replace') as config:
-                inline_tag = None
-                inline_buf = []
-                for raw in config:
-                    stripped = raw.strip()
-                    low = stripped.lower()
-                    if inline_tag is not None:
-                        if low == f'</{inline_tag}>':
-                            content = '\n'.join(inline_buf)
-                            if inline_tag == 'key' and 'ENCRYPTED' in content.upper():
-                                needs_askpass = True
-                            elif inline_tag == 'pkcs12':
-                                b64 = ''.join(line.strip() for line in inline_buf if not line.strip().startswith('-'))
-                                try:
-                                    raw_p12 = base64.b64decode(b64, validate=False) if b64 else b''
-                                except Exception:
-                                    raw_p12 = b''
-                                if raw_p12 and self._pkcs12_requires_password(raw_p12):
-                                    needs_askpass = True
-                            elif inline_tag == 'auth-user-pass':
-                                non_empty = [ln.strip() for ln in inline_buf if ln.strip()]
-                                if len(non_empty) < 2:
-                                    needs_auth = True
-                            inline_tag = None
-                            inline_buf = []
-                        else:
-                            inline_buf.append(raw.rstrip('\r\n'))
-                        continue
-
-                    if not stripped or stripped.startswith('#') or stripped.startswith(';'):
-                        continue
-                    if low in ('<key>', '<pkcs12>', '<auth-user-pass>'):
-                        inline_tag = low[1:-1]
-                        inline_buf = []
-                        continue
-
-                    # Strip inline comments outside quotes
-                    line = stripped
-                    for marker in (' #', ' ;', '\t#', '\t;'):
-                        if marker in line:
-                            line = line.split(marker, 1)[0].strip()
-                    words = self._unquote_ovpn_arg(line)
-                    if not words:
-                        continue
-                    directive = words[0].lower()
-                    if directive == 'auth-user-pass':
-                        if len(words) == 1 or words[1].lower() == 'stdin':
-                            needs_auth = True
-                        else:
-                            ref = self._ovpn_resolve_ref(base_dir, words[1])
-                            if not os.path.isfile(ref):
-                                needs_auth = True
-                    elif directive == 'askpass':
-                        if len(words) == 1 or words[1].lower() == 'stdin':
+            text = self._read_text_with_fallback(p)
+            inline_tag = None
+            inline_buf = []
+            for raw in text.splitlines():
+                stripped = raw.strip()
+                low = stripped.lower()
+                if inline_tag is not None:
+                    if low == f'</{inline_tag}>':
+                        content = '\n'.join(inline_buf)
+                        if inline_tag == 'key' and self._pem_key_is_encrypted(content):
                             needs_askpass = True
-                        else:
-                            ref = self._ovpn_resolve_ref(base_dir, words[1])
-                            if not os.path.isfile(ref):
+                        elif inline_tag == 'pkcs12':
+                            b64 = ''.join(line.strip() for line in inline_buf if not line.strip().startswith('-'))
+                            try:
+                                raw_p12 = base64.b64decode(b64, validate=False) if b64 else b''
+                            except Exception:
+                                raw_p12 = b''
+                            if raw_p12 and self._pkcs12_requires_password(raw_p12):
                                 needs_askpass = True
-                    elif directive == 'key' and len(words) >= 2:
+                        elif inline_tag == 'auth-user-pass':
+                            non_empty = [ln.strip() for ln in inline_buf if ln.strip()]
+                            if len(non_empty) < 2:
+                                needs_auth = True
+                        inline_tag = None
+                        inline_buf = []
+                    else:
+                        inline_buf.append(raw.rstrip('\r\n'))
+                    continue
+
+                if not stripped or stripped.startswith('#') or stripped.startswith(';'):
+                    continue
+                if low in ('<key>', '<pkcs12>', '<auth-user-pass>'):
+                    inline_tag = low[1:-1]
+                    inline_buf = []
+                    continue
+
+                line = self._strip_ovpn_inline_comment(stripped)
+                words = self._unquote_ovpn_arg(line)
+                if not words:
+                    continue
+                directive = words[0].lower()
+                if directive == 'cd' and len(words) >= 2:
+                    cand_dir = self._ovpn_resolve_ref(base_dir, words[1])
+                    if cand_dir and os.path.isdir(cand_dir):
+                        base_dir = os.path.abspath(cand_dir)
+                elif directive == 'auth-user-pass':
+                    if len(words) == 1 or words[1].lower() == 'stdin':
+                        needs_auth = True
+                    else:
                         ref = self._ovpn_resolve_ref(base_dir, words[1])
-                        if os.path.isfile(ref):
-                            try:
-                                with open(ref, 'r', encoding='utf-8', errors='replace') as kf:
-                                    head = kf.read(1024)
-                                if 'ENCRYPTED' in head.upper():
-                                    needs_askpass = True
-                            except Exception:
-                                pass
-                    elif directive == 'pkcs12' and len(words) >= 2:
+                        if not os.path.isfile(ref):
+                            needs_auth = True
+                elif directive == 'askpass':
+                    if len(words) == 1 or words[1].lower() == 'stdin':
+                        needs_askpass = True
+                    else:
                         ref = self._ovpn_resolve_ref(base_dir, words[1])
-                        if os.path.isfile(ref):
-                            try:
-                                with open(ref, 'rb') as pf:
-                                    raw_p12 = pf.read(256 * 1024)
-                                if self._pkcs12_requires_password(raw_p12):
-                                    needs_askpass = True
-                            except Exception:
-                                pass
+                        if not os.path.isfile(ref):
+                            needs_askpass = True
+                elif directive == 'key' and len(words) >= 2:
+                    ref = self._ovpn_resolve_ref(base_dir, words[1])
+                    if os.path.isfile(ref):
+                        try:
+                            head = self._read_text_with_fallback(ref, max_bytes=4096)
+                            if self._pem_key_is_encrypted(head):
+                                needs_askpass = True
+                        except Exception:
+                            pass
+                elif directive == 'pkcs12' and len(words) >= 2:
+                    ref = self._ovpn_resolve_ref(base_dir, words[1])
+                    if os.path.isfile(ref):
+                        try:
+                            with open(ref, 'rb') as pf:
+                                raw_p12 = pf.read(256 * 1024)
+                            if self._pkcs12_requires_password(raw_p12):
+                                needs_askpass = True
+                        except Exception:
+                            pass
         except Exception as exc:
             return {
                 'exists': True,
@@ -1683,6 +1869,7 @@ class Api:
             exe = resource(os.path.join('assets', 'vless', 'sing-box.exe'))
             if not os.path.isfile(exe):
                 return {'error': 'Embedded VLESS engine missing. Reinstall the NEON Windows build.'}
+            self._cleanup_orphaned_neon_tunnels(target_exe='sing-box.exe')
             proc = None
             try:
                 # stdin avoids putting UUIDs in the process list or temp files.
@@ -1699,6 +1886,7 @@ class Api:
                     self.vpn_adapter_name = self.vpn_adapter_guid = self.vpn_ifindex = None
                     self.vpn_state = 'CONNECTING'
                     self.vpn_logs = ['[NEON] Starting embedded VLESS tunnel.']
+                self._record_runtime_pids([('sing-box.exe', proc.pid)])
                 threading.Thread(target=self._read_openvpn_log, args=(proc, True), daemon=True).start()
                 return {'ok': True, 'output': 'Starting NEON-VLESS.'}
             except OSError:
@@ -1731,6 +1919,10 @@ class Api:
         ):
             return {'error': 'A Conf session is already active in NEON. Disconnect it first.'}
 
+        cleaned_orphans = []
+        if platform.system() == 'Windows':
+            cleaned_orphans = self._cleanup_orphaned_neon_tunnels(target_exe='openvpn.exe')
+
         cmd = [engine, '--config', os.path.abspath(p), '--verb', '4']
         self._cleanup_auth_file()
         data_dir = self._data_dir()
@@ -1745,7 +1937,7 @@ class Api:
                 }
             os.makedirs(data_dir, exist_ok=True)
             fd, auth_path = tempfile.mkstemp(prefix='neon_auth_', suffix='.txt', dir=data_dir)
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(f'{user}\n{pw}\n')
             self._auth_temp_file = auth_path
             cmd.extend(['--auth-user-pass', auth_path, '--auth-nocache'])
@@ -1763,7 +1955,7 @@ class Api:
                 }
             os.makedirs(data_dir, exist_ok=True)
             fd_k, ask_path = tempfile.mkstemp(prefix='neon_askpass_', suffix='.txt', dir=data_dir)
-            with os.fdopen(fd_k, 'w', encoding='utf-8') as f:
+            with os.fdopen(fd_k, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(f'{kp}\n')
             self._askpass_temp_file = ask_path
             cmd.extend(['--askpass', ask_path, '--auth-nocache'])
@@ -1776,6 +1968,10 @@ class Api:
             mgmt_port = None
 
         try:
+            start_logs = []
+            for exe_name, old_pid in cleaned_orphans:
+                start_logs.append(f'[!] Cleaned leftover NEON child {exe_name} (PID {old_pid}) from an earlier session.')
+            start_logs.append('[NEON] Starting Conf engine in background: ' + profile)
             with self.vpn_lock:
                 self._vpn_stop_requested = False
                 self.vpn_profile = profile
@@ -1784,7 +1980,7 @@ class Api:
                 self.vpn_adapter_name = None
                 self.vpn_adapter_guid = None
                 self.vpn_ifindex = None
-                self.vpn_logs = ['[NEON] Starting Conf engine in background: ' + profile]
+                self.vpn_logs = start_logs
             proc = subprocess.Popen(
                 cmd,
                 cwd=os.path.dirname(os.path.abspath(p)),
@@ -1799,6 +1995,7 @@ class Api:
             )
             with self.vpn_lock:
                 self.openvpn_process = proc
+            self._record_runtime_pids([('openvpn.exe', proc.pid)])
             self.save_settings({'last_profile': profile})
             self._logger.info('Started Conf profile %s', profile)
             threading.Thread(target=self._read_openvpn_log, args=(proc,), daemon=True).start()
@@ -1925,6 +2122,11 @@ class Api:
                             self.vpn_logs.append('[!] Conf authentication failed. Check profile username/password.')
                         elif any(km in line for km in key_err_markers):
                             self.vpn_logs.append('[!] Conf private-key / certificate password failed. Check key passphrase.')
+                        elif 'All TAP-Windows adapters on this system are currently in use' in line or 'Cannot open TUN/TAP dev' in line:
+                            self.vpn_logs.append(
+                                '[!] TAP/Wintun adapter is busy or missing (often held by OpenVPN GUI/service or a previous crash). '
+                                'Close external OpenVPN / tapctl add, or retry in a few seconds.'
+                            )
                 if drop_auth:
                     self._cleanup_auth_file()
         except Exception as exc:
@@ -1962,6 +2164,7 @@ class Api:
             if is_current:
                 if aux_to_stop and aux_to_stop.poll() is None:
                     self._terminate_proc(aux_to_stop)
+                self._clear_runtime_pids()
                 if platform.system() == 'Windows':
                     self._restore_windows_proxy()
             if need_teardown:
@@ -2011,8 +2214,10 @@ class Api:
                         self.vpn_state = 'ERROR' if (rc is not None and rc != 0) else 'DISCONNECTED'
             if main_to_stop and main_to_stop.poll() is None:
                 self._terminate_proc(main_to_stop)
-            if not is_aux and platform.system() == 'Windows':
-                self._restore_windows_proxy()
+            if not is_aux:
+                self._clear_runtime_pids()
+                if platform.system() == 'Windows':
+                    self._restore_windows_proxy()
 
     @staticmethod
     def _terminate_proc(proc, mgmt_port=None, sigterm_fn=None):
@@ -2081,6 +2286,7 @@ class Api:
 
         self._terminate_proc(proc, mgmt_port=mgmt_port, sigterm_fn=self._send_mgmt_sigterm)
         self._terminate_proc(aux_proc)
+        self._clear_runtime_pids()
 
         if platform.system() == 'Windows':
             self._restore_windows_proxy()
@@ -2559,6 +2765,8 @@ class Api:
             http_port = int(settings.get('http_port') or 10809)
             sys_proxy_want = bool(settings.get('system_proxy', True))
             fallback_notes = []
+            for exe_name, old_pid in self._cleanup_orphaned_neon_tunnels():
+                fallback_notes.append(f'[!] Cleaned leftover NEON child {exe_name} (PID {old_pid}) from an earlier session.')
 
             if mode == 'tun':
                 if self._clear_stale_local_proxy((http_port, socks_port, 10808, 10809)):
@@ -2630,6 +2838,7 @@ class Api:
                         ]
                     if sys_proxy_want:
                         self._enable_windows_proxy(http_port)
+                    self._record_runtime_pids([('xray.exe', proc.pid)])
                     threading.Thread(target=self._read_proxy_log, args=(proc, False, 'Xray'), daemon=True).start()
                     return {'ok': True, 'plan': plan, 'http_port': http_port, 'socks_port': socks_port, 'output': f'Starting {display} (Proxy).'}
 
@@ -2736,6 +2945,7 @@ class Api:
                         ]
                     if mode == 'mixed' and sys_proxy_want:
                         self._enable_windows_proxy(http_port)
+                    self._record_runtime_pids([('xray.exe', xproc.pid), ('sing-box.exe', sb_proc.pid)])
                     threading.Thread(target=self._read_proxy_log, args=(xproc, True, 'Xray'), daemon=True).start()
                     threading.Thread(target=self._read_openvpn_log, args=(sb_proc, True, display), daemon=True).start()
                     return {'ok': True, 'plan': plan, 'output': f'Starting {display} (Xray + TUN).'}
@@ -2797,6 +3007,7 @@ class Api:
                 self.vpn_logs = fallback_notes + [start_msg]
             if sb_mode in ('proxy', 'mixed') and sys_proxy_want:
                 self._enable_windows_proxy(http_port)
+            self._record_runtime_pids([('sing-box.exe', sb_proc.pid)])
             threading.Thread(
                 target=self._read_openvpn_log,
                 args=(sb_proc, True, display, sb_mode != 'proxy'),
@@ -3391,26 +3602,40 @@ class Api:
         payload = base64.b64encode(json.dumps({'public': public_name, 'private': private_name}).encode('utf-8')).decode('ascii')
         script = (
             f"$d=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}'))|ConvertFrom-Json; "
-            "$m=New-Object -ComObject HNetCfg.HNetShare; $changed=$false; "
+            "$m=New-Object -ComObject HNetCfg.HNetShare; $changed=$false; $stopHotspot=$false; "
             "foreach($c in $m.EnumEveryConnection){"
             "$p=$m.NetConnectionProps.Invoke($c);"
             "$q=$m.INetSharingConfigurationForINetConnection.Invoke($c);"
             "if($q.SharingEnabled){"
             "$want=(($p.Name -eq $d.public -and $q.SharingConnectionType -eq 0) -or ($p.Name -eq $d.private -and $q.SharingConnectionType -eq 1));"
-            "if(-not $want){$q.DisableSharing(); $changed=$true}"
+            "if(-not $want){"
+            "$dn=($p.Name + ' ' + $p.DeviceName).ToLower();"
+            "if($dn -match 'hosted network|wi-fi direct|размещен|размещён|local area connection\\*|подключение по локальной сети\\*'){$stopHotspot=$true};"
+            "$q.DisableSharing(); $changed=$true"
+            "}"
             "}"
             "}; "
             "if($changed){ "
+            "if($stopHotspot){ try{ & netsh.exe wlan stop hostednetwork | Out-Null }catch{} }; "
             "foreach($c in $m.EnumEveryConnection){"
             "$q=$m.INetSharingConfigurationForINetConnection.Invoke($c);"
-            "if($q.SharingEnabled){$q.DisableSharing()}"
+            "if($q.SharingEnabled){ try{$q.DisableSharing()}catch{} }"
             "}; "
             "try{ Restart-Service -Name SharedAccess -Force -ErrorAction SilentlyContinue }catch{}; "
-            "Start-Sleep -Milliseconds 300; 'Cleared non-VPN ICS' "
+            "for($try=0; $try -lt 15; $try++){"
+            "$rem=0; "
+            "foreach($c in $m.EnumEveryConnection){"
+            "$q=$m.INetSharingConfigurationForINetConnection.Invoke($c);"
+            "if($q.SharingEnabled){ try{$q.DisableSharing()}catch{}; $rem++ }"
+            "}; "
+            "if($rem -eq 0){ break }; "
+            "Start-Sleep -Milliseconds 300"
+            "}; "
+            "'Cleared non-VPN ICS' "
             "} else { 'No conflicting ICS' }"
         )
         try:
-            out = self._powershell(script, timeout=20)
+            out = self._powershell(script, timeout=30)
             self._logger.info('Pre-share ICS cleanup: %s', out)
             return out
         except Exception as exc:
@@ -3592,21 +3817,31 @@ class Api:
 
     def _select_vpn_public_adapter(self, adapters, exclude_name=None):
         def _rank(a):
+            active = 0 if (a.get('status') == 2 or a.get('has_vpn_route')) else 1
             exact = 0 if self._is_matching_vpn_adapter(a) else 1
-            rt = 0 if a.get('has_vpn_route') else 1
             st = 0 if a.get('status') == 2 else 1
-            return (exact, rt, st)
+            rt = 0 if a.get('has_vpn_route') else 1
+            gw = 0 if not a.get('has_default_gw') else 1
+            return (active, exact, st, rt, gw)
 
         candidates = []
         for a in adapters:
             if a.get('name') == exclude_name:
                 continue
             cat = a.get('category') or self._classify_adapter(a)
+            if cat in ('wifi', 'hotspot'):
+                continue
             if self._is_matching_vpn_adapter(a) or cat == 'vpn' or (a.get('has_vpn_route') and not a.get('has_default_gw')):
-                if cat not in ('wifi', 'hotspot') and not a.get('has_default_gw'):
-                    candidates.append(a)
+                candidates.append(a)
         candidates.sort(key=_rank)
         return candidates[0] if candidates else None
+
+    def _has_live_vpn_session(self):
+        proc_alive = bool(
+            (self.openvpn_process and self.openvpn_process.poll() is None)
+            or (self._vpn_aux_process and self._vpn_aux_process.poll() is None)
+        )
+        return self.vpn_state in ('CONNECTED', 'CONNECTING') or proc_alive
 
     def _detect_hotspot_and_vpn_adapters(self):
         found = self.network_connections()
@@ -3745,6 +3980,10 @@ class Api:
         self._skip_set_sharing_dns = True
         try:
             sharing = self.set_sharing(public, private)
+            if sharing.get('error') and 'Another ICS route is already active' in sharing['error']:
+                self._clear_conflicting_ics(public, private)
+                time.sleep(0.6)
+                sharing = self.set_sharing(public, private)
         finally:
             self._skip_set_sharing_dns = False
         if sharing.get('error'):
@@ -3842,8 +4081,11 @@ class Api:
             return {'error': 'Stop existing NEON sharing before starting combined sharing.'}
         if use_vpn and self.vpn_state != 'CONNECTED':
             return {'error': 'Connect Conf / OpenVPN before starting VPN sharing.'}
-        if not use_vpn and self.vpn_state != 'DISCONNECTED':
-            return {'error': 'Disconnect Conf / OpenVPN before starting direct sharing.'}
+        if not use_vpn:
+            if self._has_live_vpn_session():
+                return {'error': 'Disconnect Conf / OpenVPN before starting direct sharing.'}
+            if self.vpn_state == 'ERROR':
+                self.vpn_state = 'DISCONNECTED'
         ssid = str(ssid or '').strip()
         password = str(password or '')
         if not re.fullmatch(r'[A-Za-z0-9 _.-]{1,32}', ssid):
@@ -3965,8 +4207,10 @@ class Api:
         """Share a physical uplink over Ethernet, explicitly without NEON VPN."""
         if platform.system() != 'Windows':
             return {'error': 'Ethernet ICS sharing is Windows-only.'}
-        if self.vpn_state != 'DISCONNECTED':
+        if self._has_live_vpn_session():
             return {'error': 'Disconnect Conf / OpenVPN before starting direct Ethernet sharing.'}
+        if self.vpn_state == 'ERROR':
+            self.vpn_state = 'DISCONNECTED'
         if self.hotspot_active or self.ethernet_active or self.app_shared_pair:
             return {'error': 'Stop the existing NEON sharing session before starting direct Ethernet sharing.'}
         found = self.network_connections()
@@ -3976,6 +4220,9 @@ class Api:
         uplinks = [a for a in adapters if a.get('has_default_gw') and a.get('status') == 2
                    and (a.get('category') or self._classify_adapter(a)) in ('wifi', 'ethernet')]
         if len(uplinks) != 1:
+            if len(uplinks) > 1:
+                names = ', '.join(str(u.get('name') or '') for u in uplinks)
+                return {'error': f'Expected one connected Wi-Fi or Ethernet internet uplink with a default gateway (found {len(uplinks)}: {names}). Check adapters and disconnect extra uplinks.'}
             return {'error': 'Expected one connected Wi-Fi or Ethernet internet uplink with a default gateway. Check adapters and disconnect extra uplinks.'}
         public = uplinks[0]['name']
         wired = [a for a in adapters if a.get('name') != public and not a.get('has_default_gw')
@@ -3988,8 +4235,13 @@ class Api:
         if not wired:
             return {'error': 'No separate physical Ethernet target found. Do not select the internet uplink.'}
         private = wired[0]['name']
-        if any(a.get('shared') for a in adapters):
-            return {'error': 'Windows ICS is already active. Stop the existing sharing configuration first; it was not changed.'}
+        shared_adapters = [a for a in adapters if a.get('shared')]
+        if shared_adapters:
+            desc = ', '.join(
+                f"{a.get('name')} ({'Public' if a.get('sharing_type') == 0 else 'Private' if a.get('sharing_type') == 1 else 'ICS'})"
+                for a in shared_adapters
+            )
+            return {'error': f'Windows ICS is already active ({desc}). Stop the existing sharing configuration first (or click "Disable All ICS"); it was not changed.'}
         sharing = self.set_sharing(public, private)
         if sharing.get('error'):
             if self._uplink_dns_backups:

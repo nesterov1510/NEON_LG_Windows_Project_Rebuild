@@ -124,3 +124,39 @@ def test_combined_vpn_drop_during_setup_stops_both(api):
         result = api.start_combined_sharing('NEON', 'Password123')
     assert 'disconnected' in result['error']
     assert not api.hotspot_active and not api.ethernet_active
+
+
+def test_direct_ethernet_allows_after_stale_vpn_error_and_names_conflicting_ics(api):
+    # Stale vpn_state == 'ERROR' without live child process must not block direct Ethernet sharing
+    api.vpn_state = 'ERROR'
+    with mock.patch('platform.system', return_value='Windows'), \
+         mock.patch.object(api, 'network_connections', return_value={'adapters': adapters()}), \
+         mock.patch.object(api, 'set_sharing', return_value={'ok': True}) as share:
+        res = api.start_direct_ethernet()
+    assert res['ok'] is True
+    assert api.vpn_state == 'DISCONNECTED'
+    share.assert_called_once_with('Wi-Fi', 'Ethernet')
+
+    # Live child process must still refuse even if vpn_state == 'ERROR'
+    api.ethernet_active = False
+    api.vpn_state = 'ERROR'
+    live_proc = mock.Mock()
+    live_proc.poll.return_value = None
+    api.openvpn_process = live_proc
+    with mock.patch('platform.system', return_value='Windows'):
+        refused = api.start_direct_ethernet()
+    assert 'Disconnect Conf' in refused['error']
+    api.openvpn_process = None
+    api.vpn_state = 'DISCONNECTED'
+
+    # Existing ICS refusal names the active shared adapter(s) and suggests Disable All ICS
+    data = adapters()
+    data[0]['shared'] = True
+    data[0]['sharing_type'] = 0
+    with mock.patch('platform.system', return_value='Windows'), \
+         mock.patch.object(api, 'network_connections', return_value={'adapters': data}), \
+         mock.patch.object(api, 'set_sharing') as share2:
+        ics_err = api.start_direct_ethernet()
+    assert 'Wi-Fi (Public)' in ics_err['error']
+    assert 'Disable All ICS' in ics_err['error']
+    share2.assert_not_called()
