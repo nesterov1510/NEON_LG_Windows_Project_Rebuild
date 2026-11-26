@@ -6,11 +6,12 @@ import queue
 import sys
 import threading
 
-from PyQt5.QtCore import Qt, QTimer, QRectF, QRegExp, QSize
+from PyQt5.QtCore import Qt, QTimer, QRectF, QRegExp, QSize, QEvent
 from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap, QRegExpValidator
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -26,6 +27,8 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizeGrip,
+    QSizePolicy,
+    QSplitter,
     QStackedWidget,
     QSystemTrayIcon,
     QTableWidget,
@@ -108,8 +111,18 @@ class NeonWindow(QMainWindow):
             | Qt.WindowMaximizeButtonHint
             | Qt.WindowSystemMenuHint
         )
-        self.setMinimumSize(1080, 640)
-        self.resize(1280, 800)
+        self.setMinimumSize(940, 580)
+        init_w, init_h = 1240, 740
+        try:
+            scr = QApplication.primaryScreen()
+            if scr is not None:
+                avail = scr.availableGeometry()
+                if avail.width() > 0 and avail.height() > 0:
+                    init_w = max(940, min(1240, avail.width() - 36))
+                    init_h = max(580, min(748, avail.height() - 28))
+        except Exception:
+            pass
+        self.resize(init_w, init_h)
 
         self._app_icon = self._load_icon()
         if not self._app_icon.isNull():
@@ -208,21 +221,21 @@ class NeonWindow(QMainWindow):
     def _build_sidebar(self):
         self.sidebar = QFrame()
         self.sidebar.setObjectName('Sidebar')
-        self.sidebar.setFixedWidth(248)
+        self.sidebar.setFixedWidth(232)
         self.sidebar.installEventFilter(self)
 
         lay = QVBoxLayout(self.sidebar)
-        lay.setContentsMargins(16, 18, 16, 16)
-        lay.setSpacing(14)
+        lay.setContentsMargins(13, 12, 13, 11)
+        lay.setSpacing(8)
 
         # Brand Header
         brand_row = QHBoxLayout()
-        brand_row.setSpacing(11)
+        brand_row.setSpacing(10)
         logo = QLabel()
-        logo.setFixedSize(42, 42)
+        logo.setFixedSize(38, 38)
         png_path = resource('assets/neon.png')
         if os.path.isfile(png_path):
-            logo.setPixmap(QPixmap(png_path).scaled(42, 42, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            logo.setPixmap(QPixmap(png_path).scaled(38, 38, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             logo.setText('N')
             logo.setAlignment(Qt.AlignCenter)
@@ -247,8 +260,6 @@ class NeonWindow(QMainWindow):
         brand_row.addLayout(bcol)
         lay.addLayout(brand_row)
 
-        lay.addSpacing(4)
-
         # Navigation Buttons
         self.tab_buttons = []
         icons = ['▣', '◈', '◆', '◉', '✦', '☎']
@@ -264,8 +275,8 @@ class NeonWindow(QMainWindow):
         tele = QFrame()
         tele.setObjectName('SideWidget')
         tl = QVBoxLayout(tele)
-        tl.setContentsMargins(13, 12, 13, 12)
-        tl.setSpacing(9)
+        tl.setContentsMargins(11, 9, 11, 9)
+        tl.setSpacing(5)
         self.side_status_cap = QLabel()
         self.side_status_cap.setObjectName('SectionCap')
         tl.addWidget(self.side_status_cap)
@@ -284,8 +295,8 @@ class NeonWindow(QMainWindow):
         fx_card = QFrame()
         fx_card.setObjectName('SideWidget')
         fl = QVBoxLayout(fx_card)
-        fl.setContentsMargins(13, 10, 13, 10)
-        fl.setSpacing(10)
+        fl.setContentsMargins(11, 8, 11, 8)
+        fl.setSpacing(7)
         self.fx_switch = ToggleSwitch('', checked=True, on_change=self._on_fx_toggled)
         fl.addWidget(self.fx_switch)
 
@@ -364,13 +375,13 @@ class NeonWindow(QMainWindow):
 
         self.right_layout.addWidget(self.topbar)
 
-    def _make_card(self, title_attr, step_num):
+    def _make_card(self, title_attr, step_num, collapsible=True, collapsed=False):
         card = QFrame()
         card.setObjectName('GlassCard')
         add_elevation(card, blur=22, alpha=80)
-        lay = QVBoxLayout(card)
-        lay.setContentsMargins(16, 14, 16, 15)
-        lay.setSpacing(8)
+        outer = QVBoxLayout(card)
+        outer.setContentsMargins(15, 12, 15, 13)
+        outer.setSpacing(7)
         head = QHBoxLayout()
         head.setSpacing(9)
         badge = QLabel(str(step_num))
@@ -381,11 +392,43 @@ class NeonWindow(QMainWindow):
         t_lbl.setWordWrap(True)
         head.addWidget(badge, 0, Qt.AlignTop)
         head.addWidget(t_lbl, 1)
-        lay.addLayout(head)
+
+        body = QWidget()
+        body.setObjectName('ScrollContent')
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(0, 2, 0, 0)
+        lay.setSpacing(8)
+
+        def set_collapsed(state):
+            is_col = bool(state)
+            body.setVisible(not is_col)
+            if card._collapse_btn is not None:
+                card._collapse_btn.setText('▸' if is_col else '▾')
+            card._collapsed = is_col
+
+        card._body = body
+        card._collapsed = False
+        card._collapse_btn = None
+        card.set_collapsed = set_collapsed
+
+        if collapsible:
+            cbtn = QPushButton('▾')
+            cbtn.setObjectName('CardCollapseBtn')
+            cbtn.setCursor(Qt.PointingHandCursor)
+            cbtn.setToolTip('Свернуть / развернуть блок' if self.lang == 'ru' else 'Collapse / expand section')
+            cbtn.clicked.connect(lambda _c=False: set_collapsed(not card._collapsed))
+            card._collapse_btn = cbtn
+            head.addWidget(cbtn, 0, Qt.AlignTop)
+
+        outer.addLayout(head)
+        outer.addWidget(body)
+        if collapsed:
+            set_collapsed(True)
         setattr(self, title_attr, t_lbl)
         return card, lay
 
     def _wrap_scroll(self, widget, fixed_width=None):
+        widget.setMinimumWidth(0)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -395,6 +438,54 @@ class NeonWindow(QMainWindow):
         if fixed_width:
             scroll.setFixedWidth(fixed_width)
         return scroll
+
+    def _make_split_page(self, left_widget, right_widget, left_init=456):
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
+        left_widget.setMinimumWidth(330)
+        right_widget.setMinimumWidth(360)
+        splitter.addWidget(left_widget)
+        splitter.addWidget(right_widget)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([left_init, 680])
+        return splitter
+
+    def _make_seg_bar(self, segments, cards_all):
+        bar = QFrame()
+        bar.setObjectName('SegBar')
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(4)
+        grp = QButtonGroup(bar)
+        grp.setExclusive(True)
+
+        def apply_mode(mode_key):
+            target = next((s for s in segments if s[0] == mode_key), segments[0])
+            vis_set = set(target[2])
+            expand_set = set(target[3]) if len(target) > 3 else set()
+            for card in cards_all:
+                show = card in vis_set
+                card.setVisible(show)
+                if show and card in expand_set and hasattr(card, 'set_collapsed'):
+                    card.set_collapsed(False)
+
+        for idx, seg in enumerate(segments):
+            key, attr_name = seg[0], seg[1]
+            btn = QPushButton()
+            btn.setObjectName('SegBtn')
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            if idx == 0:
+                btn.setChecked(True)
+            btn.clicked.connect(lambda _c=False, k=key: apply_mode(k))
+            grp.addButton(btn)
+            lay.addWidget(btn, 1)
+            setattr(self, attr_name, btn)
+
+        bar._apply_mode = apply_mode
+        return bar
 
     # ------------------------------------------------------------------
     # Pages
@@ -409,6 +500,30 @@ class NeonWindow(QMainWindow):
         self._build_vpn_page()
         self._build_diag_page()
         self._build_callback_page()
+
+        for cb in self.stack.findChildren(QComboBox):
+            cb.setFocusPolicy(Qt.StrongFocus)
+            cb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(6)
+            cb.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            cb.setMinimumWidth(0)
+            cb.installEventFilter(self)
+
+        for le in self.stack.findChildren(QLineEdit):
+            if le.maximumWidth() > 200:
+                le.setMinimumWidth(0)
+
+        for scroll in self.stack.findChildren(QScrollArea):
+            w = scroll.widget()
+            if w is not None:
+                for btn in w.findChildren(QPushButton):
+                    if btn.maximumWidth() > 200:
+                        btn.setMinimumWidth(0)
+                for lbl in w.findChildren(QLabel):
+                    if lbl.objectName() in ('FieldLabel', 'HintLabel'):
+                        lbl.setWordWrap(True)
+                        lbl.setMinimumWidth(0)
+
         self.switch_tab(0)
 
     def _build_tv_page(self):
@@ -668,10 +783,10 @@ class NeonWindow(QMainWindow):
         left.addWidget(local_card)
         left.addStretch(1)
 
-        grid.addWidget(self._wrap_scroll(left_inner, fixed_width=392))
-
-        # Right column: KPIs + Terminal + Reboot & System Setup
-        right = QVBoxLayout()
+        right_shell = QWidget()
+        right_shell.setObjectName('ScrollContent')
+        right = QVBoxLayout(right_shell)
+        right.setContentsMargins(6, 0, 0, 0)
         right.setSpacing(12)
 
         kpi_row = QHBoxLayout()
@@ -705,18 +820,17 @@ class NeonWindow(QMainWindow):
         bottom_strip.addWidget(self.reboot_hint, 1)
         right.addLayout(bottom_strip)
 
-        grid.addLayout(right, 1)
+        grid.addWidget(self._make_split_page(self._wrap_scroll(left_inner), right_shell, left_init=410))
         self.stack.addWidget(page)
 
     def _build_samsung_page(self):
         page = QWidget()
         grid = QHBoxLayout(page)
-        grid.setContentsMargins(20, 16, 20, 12)
-        grid.setSpacing(16)
+        grid.setContentsMargins(20, 14, 20, 12)
+        grid.setSpacing(0)
 
         left_inner = QWidget()
         left_inner.setObjectName('ScrollContent')
-        left_inner.setMaximumWidth(406)
         left = QVBoxLayout(left_inner)
         left.setContentsMargins(0, 0, 6, 0)
         left.setSpacing(12)
@@ -987,7 +1101,7 @@ class NeonWindow(QMainWindow):
         left.addWidget(local_card)
 
         # Card 6: Samsung Time Domain Override (DNS + /openapi/timesync + NTP)
-        c_sam_time, stl = self._make_card('lbl_sam_time', 6)
+        c_sam_time, stl = self._make_card('lbl_sam_time', 6, collapsed=True)
         self.sam_time_desc = QLabel()
         self.sam_time_desc.setObjectName('HintLabel')
         self.sam_time_desc.setWordWrap(True)
@@ -1132,8 +1246,6 @@ class NeonWindow(QMainWindow):
         self.btn_sam_time_deploy.clicked.connect(self.deploy_samsung_time_remote)
         stl.addWidget(self.btn_sam_time_deploy)
 
-        st_exp_row = QHBoxLayout()
-        st_exp_row.setSpacing(8)
         self.btn_sam_time_export = QPushButton()
         self.btn_sam_time_export.setObjectName('NormalBtn')
         self.btn_sam_time_export.setCursor(Qt.PointingHandCursor)
@@ -1142,18 +1254,34 @@ class NeonWindow(QMainWindow):
         self.btn_sam_time_snippets.setObjectName('NormalBtn')
         self.btn_sam_time_snippets.setCursor(Qt.PointingHandCursor)
         self.btn_sam_time_snippets.clicked.connect(self.show_samsung_time_snippets)
-        st_exp_row.addWidget(self.btn_sam_time_export, 1)
-        st_exp_row.addWidget(self.btn_sam_time_snippets, 1)
-        stl.addLayout(st_exp_row)
+        stl.addWidget(self.btn_sam_time_export)
+        stl.addWidget(self.btn_sam_time_snippets)
 
         left.addWidget(c_sam_time)
 
         left.addStretch(1)
 
-        grid.addWidget(self._wrap_scroll(left_inner, fixed_width=428))
+        sam_cards_all = [c_conn, c_svc, c_sam_belet, c_sam_alem, local_card, c_sam_time]
+        sam_seg = self._make_seg_bar([
+            ('all', 'btn_sam_seg_all', sam_cards_all, []),
+            ('ctrl', 'btn_sam_seg_ctrl', [c_conn, c_svc], [c_conn, c_svc]),
+            ('apps', 'btn_sam_seg_apps', [c_sam_belet, c_sam_alem, local_card], [c_sam_belet, c_sam_alem, local_card]),
+            ('time', 'btn_sam_seg_time', [c_sam_time], [c_sam_time]),
+        ], sam_cards_all)
+
+        left_shell = QWidget()
+        left_shell.setObjectName('ScrollContent')
+        ls_lay = QVBoxLayout(left_shell)
+        ls_lay.setContentsMargins(0, 0, 6, 0)
+        ls_lay.setSpacing(8)
+        ls_lay.addWidget(sam_seg)
+        ls_lay.addWidget(self._wrap_scroll(left_inner), 1)
 
         # Right column: KPIs + Virtual Service Remote + Live Console
-        right = QVBoxLayout()
+        right_shell = QWidget()
+        right_shell.setObjectName('ScrollContent')
+        right = QVBoxLayout(right_shell)
+        right.setContentsMargins(6, 0, 0, 0)
         right.setSpacing(12)
 
         kpi_row = QHBoxLayout()
@@ -1287,14 +1415,14 @@ class NeonWindow(QMainWindow):
         sam_strip.setColumnStretch(1, 1)
         right.addLayout(sam_strip)
 
-        grid.addLayout(right, 1)
+        grid.addWidget(self._make_split_page(left_shell, right_shell, left_init=436))
         self.stack.addWidget(page)
 
     def _build_hisense_page(self):
         page = QWidget()
         grid = QHBoxLayout(page)
-        grid.setContentsMargins(20, 16, 20, 12)
-        grid.setSpacing(16)
+        grid.setContentsMargins(20, 14, 20, 12)
+        grid.setSpacing(0)
 
         left_inner = QWidget()
         left_inner.setObjectName('ScrollContent')
@@ -1552,7 +1680,7 @@ class NeonWindow(QMainWindow):
         left.addWidget(c4)
 
         # Card 5: Custom App & Installed Apps
-        c5, l5 = self._make_card('lbl_his_custom', 5)
+        c5, l5 = self._make_card('lbl_his_custom', 5, collapsed=True)
         self.his_lbl_custom_id = QLabel()
         self.his_lbl_custom_id.setObjectName('FieldLabel')
         self.his_custom_id = QLineEdit('neon.customapp')
@@ -1608,7 +1736,7 @@ class NeonWindow(QMainWindow):
         left.addWidget(c5)
 
         # Card 6: Browser Self-Installer & vidaahub.com Bridge
-        c6, l6 = self._make_card('lbl_his_portal', 6)
+        c6, l6 = self._make_card('lbl_his_portal', 6, collapsed=True)
         self.his_portal_desc = QLabel()
         self.his_portal_desc.setObjectName('HintLabel')
         self.his_portal_desc.setWordWrap(True)
@@ -1655,10 +1783,28 @@ class NeonWindow(QMainWindow):
         left.addWidget(c6)
 
         left.addStretch(1)
-        grid.addWidget(self._wrap_scroll(left_inner, fixed_width=490))
+
+        his_cards_all = [c1, c2, c3, c4, c5, c6]
+        his_seg = self._make_seg_bar([
+            ('all', 'btn_his_seg_all', his_cards_all, []),
+            ('ctrl', 'btn_his_seg_ctrl', [c1], [c1]),
+            ('apps', 'btn_his_seg_apps', [c2, c3, c4], [c2, c3, c4]),
+            ('tools', 'btn_his_seg_tools', [c5, c6], [c5, c6]),
+        ], his_cards_all)
+
+        left_shell = QWidget()
+        left_shell.setObjectName('ScrollContent')
+        ls_lay = QVBoxLayout(left_shell)
+        ls_lay.setContentsMargins(0, 0, 6, 0)
+        ls_lay.setSpacing(8)
+        ls_lay.addWidget(his_seg)
+        ls_lay.addWidget(self._wrap_scroll(left_inner), 1)
 
         # Right Column: KPIs + VIDAA Remote + Terminal
-        right = QVBoxLayout()
+        right_shell = QWidget()
+        right_shell.setObjectName('ScrollContent')
+        right = QVBoxLayout(right_shell)
+        right.setContentsMargins(6, 0, 0, 0)
         right.setSpacing(12)
 
         kpi_row = QHBoxLayout()
@@ -1739,14 +1885,14 @@ class NeonWindow(QMainWindow):
         self.his_term = NeonTerminal(on_save=self._save_log_dialog)
         right.addWidget(self.his_term, 1)
 
-        grid.addLayout(right, 1)
+        grid.addWidget(self._make_split_page(left_shell, right_shell, left_init=456))
         self.stack.addWidget(page)
 
     def _build_vpn_page(self):
         page = QWidget()
         grid = QHBoxLayout(page)
-        grid.setContentsMargins(20, 16, 20, 12)
-        grid.setSpacing(16)
+        grid.setContentsMargins(20, 14, 20, 12)
+        grid.setSpacing(0)
 
         left_inner = QWidget()
         left_inner.setObjectName('ScrollContent')
@@ -1820,8 +1966,8 @@ class NeonWindow(QMainWindow):
 
         self.happ_node_list = QListWidget()
         self.happ_node_list.setObjectName('HappNodeList')
-        self.happ_node_list.setMinimumHeight(140)
-        self.happ_node_list.setMaximumHeight(200)
+        self.happ_node_list.setMinimumHeight(112)
+        self.happ_node_list.setMaximumHeight(172)
         self.happ_node_list.itemClicked.connect(self._on_happ_node_clicked)
         self.happ_node_list.itemDoubleClicked.connect(lambda _item: self.happ_connect_clicked())
         l_happ.addWidget(self.happ_node_list)
@@ -1859,8 +2005,12 @@ class NeonWindow(QMainWindow):
         l_happ.addLayout(h_act_row)
 
         h_stat_row = QHBoxLayout()
+        h_stat_row.setSpacing(8)
+        self.happ_inline_badge = QLabel('IDLE')
+        self.happ_inline_badge.setObjectName('InlineBadgeIdle')
         self.happ_stat_val = QLabel('DISCONNECTED')
         self.happ_stat_val.setStyleSheet('color:#8fa4b2;font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
+        h_stat_row.addWidget(self.happ_inline_badge, 0)
         h_stat_row.addWidget(self.happ_stat_val, 1)
         l_happ.addLayout(h_stat_row)
 
@@ -2027,14 +2177,16 @@ class NeonWindow(QMainWindow):
         l1.addLayout(vc_row)
 
         stat_row = QHBoxLayout()
+        stat_row.setSpacing(6)
+        self.vpn_inline_badge = QLabel('IDLE')
+        self.vpn_inline_badge.setObjectName('InlineBadgeIdle')
         self.vpn_stat_lbl = QLabel()
         self.vpn_stat_lbl.setStyleSheet('color:#7d94a1;font-size:11px;font-weight:600;')
         self.vpn_stat_val = QLabel('DISCONNECTED')
         self.vpn_stat_val.setStyleSheet('color:#97ad9e;font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
+        stat_row.addWidget(self.vpn_inline_badge)
         stat_row.addWidget(self.vpn_stat_lbl)
-        stat_row.addSpacing(6)
-        stat_row.addWidget(self.vpn_stat_val)
-        stat_row.addStretch(1)
+        stat_row.addWidget(self.vpn_stat_val, 1)
         l1.addLayout(stat_row)
         left.addWidget(c1)
 
@@ -2144,6 +2296,16 @@ class NeonWindow(QMainWindow):
         self.eth_auto_hint.setWordWrap(True)
         l_eth.addWidget(self.eth_auto_hint)
 
+        eth_stat_row = QHBoxLayout()
+        eth_stat_row.setSpacing(8)
+        self.eth_inline_badge = QLabel('IDLE')
+        self.eth_inline_badge.setObjectName('InlineBadgeIdle')
+        self.eth_inline_lbl = QLabel('OFFLINE')
+        self.eth_inline_lbl.setStyleSheet('color:#8fa4b2;font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
+        eth_stat_row.addWidget(self.eth_inline_badge)
+        eth_stat_row.addWidget(self.eth_inline_lbl, 1)
+        l_eth.addLayout(eth_stat_row)
+
         eth_btn_row = QHBoxLayout()
         eth_btn_row.setSpacing(8)
         self.btn_eth_start = QPushButton()
@@ -2196,6 +2358,16 @@ class NeonWindow(QMainWindow):
         hp_row.addWidget(self.hs_pass_eye)
         l2.addLayout(hp_row)
 
+        hs_stat_row = QHBoxLayout()
+        hs_stat_row.setSpacing(8)
+        self.hs_inline_badge = QLabel('IDLE')
+        self.hs_inline_badge.setObjectName('InlineBadgeIdle')
+        self.hs_inline_lbl = QLabel('OFFLINE')
+        self.hs_inline_lbl.setStyleSheet('color:#8fa4b2;font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
+        hs_stat_row.addWidget(self.hs_inline_badge)
+        hs_stat_row.addWidget(self.hs_inline_lbl, 1)
+        l2.addLayout(hs_stat_row)
+
         hb_row = QHBoxLayout()
         hb_row.setSpacing(8)
         self.btn_hs_start = QPushButton()
@@ -2211,14 +2383,20 @@ class NeonWindow(QMainWindow):
         hb_row.addWidget(self.btn_hs_start, 2)
         hb_row.addWidget(self.btn_hs_stop, 1)
         l2.addLayout(hb_row)
+
+        comb_row = QHBoxLayout()
+        comb_row.setSpacing(8)
         self.btn_combined_vpn = QPushButton()
         self.btn_combined_vpn.setObjectName('NormalBtn')
+        self.btn_combined_vpn.setCursor(Qt.PointingHandCursor)
         self.btn_combined_vpn.clicked.connect(lambda: self.start_combined_share(True))
-        l2.addWidget(self.btn_combined_vpn)
         self.btn_combined_direct = QPushButton()
         self.btn_combined_direct.setObjectName('NormalBtn')
+        self.btn_combined_direct.setCursor(Qt.PointingHandCursor)
         self.btn_combined_direct.clicked.connect(lambda: self.start_combined_share(False))
-        l2.addWidget(self.btn_combined_direct)
+        comb_row.addWidget(self.btn_combined_vpn, 1)
+        comb_row.addWidget(self.btn_combined_direct, 1)
+        l2.addLayout(comb_row)
 
         self.btn_hs_win = QPushButton()
         self.btn_hs_win.setObjectName('GhostBtn')
@@ -2227,8 +2405,8 @@ class NeonWindow(QMainWindow):
         l2.addWidget(self.btn_hs_win)
         left.addWidget(c2)
 
-        # Card 6: ICS Manual Fallback
-        c3, l3 = self._make_card('lbl_ics', 6)
+        # Card 6: ICS Manual Fallback (collapsed by default to cut vertical clutter)
+        c3, l3 = self._make_card('lbl_ics', 6, collapsed=True)
         self.ics_desc = QLabel()
         self.ics_desc.setObjectName('HintLabel')
         self.ics_desc.setWordWrap(True)
@@ -2279,10 +2457,73 @@ class NeonWindow(QMainWindow):
         left.addWidget(c3)
         left.addStretch(1)
 
-        grid.addWidget(self._wrap_scroll(left_inner, fixed_width=428))
+        self._conf_card_happ = c_happ
+        self._conf_card_ovpn = c1
+        self._conf_card_dns = c_dns
+        self._conf_card_eth = c_eth
+        self._conf_card_hs = c2
+        self._conf_card_ics = c3
+
+        conf_cards_all = [c_happ, c1, c_dns, c_eth, c2, c3]
+        conf_seg = self._make_seg_bar([
+            ('all', 'btn_conf_seg_all', conf_cards_all, []),
+            ('connect', 'btn_conf_seg_connect', [c_happ, c1], [c_happ, c1]),
+            ('share', 'btn_conf_seg_share', [c_eth, c2], [c_eth, c2]),
+            ('dns', 'btn_conf_seg_dns', [c_dns, c3], [c_dns, c3]),
+        ], conf_cards_all)
+
+        left_shell = QWidget()
+        left_shell.setObjectName('ScrollContent')
+        ls_lay = QVBoxLayout(left_shell)
+        ls_lay.setContentsMargins(0, 0, 6, 0)
+        ls_lay.setSpacing(8)
+        ls_lay.addWidget(conf_seg)
+        ls_lay.addWidget(self._wrap_scroll(left_inner), 1)
+
+        right_shell = QWidget()
+        right_shell.setObjectName('ScrollContent')
+        right = QVBoxLayout(right_shell)
+        right.setContentsMargins(6, 0, 0, 0)
+        right.setSpacing(10)
+
+        conf_kpi_row = QHBoxLayout()
+        conf_kpi_row.setSpacing(12)
+        self.kpi_conf_conn = KpiCard('TUNNEL / CONF', 'Idle', 'Happ / OpenVPN')
+        self.kpi_conf_share = KpiCard('NETWORK SHARE', 'Off', 'Ethernet / Wi-Fi')
+        self.kpi_conf_dns = KpiCard('SHARED DNS', 'Auto', 'DHCP / Conf')
+        conf_kpi_row.addWidget(self.kpi_conf_conn, 1)
+        conf_kpi_row.addWidget(self.kpi_conf_share, 1)
+        conf_kpi_row.addWidget(self.kpi_conf_dns, 1)
+        right.addLayout(conf_kpi_row)
+
+        quick_row = QHBoxLayout()
+        quick_row.setSpacing(8)
+        self.btn_quick_disc = QPushButton()
+        self.btn_quick_disc.setObjectName('GhostBtn')
+        self.btn_quick_disc.setCursor(Qt.PointingHandCursor)
+        self.btn_quick_disc.setEnabled(False)
+        self.btn_quick_disc.clicked.connect(self.disconnect_vpn)
+
+        self.btn_quick_stop_share = QPushButton()
+        self.btn_quick_stop_share.setObjectName('GhostBtn')
+        self.btn_quick_stop_share.setCursor(Qt.PointingHandCursor)
+        self.btn_quick_stop_share.setEnabled(False)
+        self.btn_quick_stop_share.clicked.connect(self.stop_sharing)
+
+        self.btn_quick_adapters = QPushButton()
+        self.btn_quick_adapters.setObjectName('NormalBtn')
+        self.btn_quick_adapters.setCursor(Qt.PointingHandCursor)
+        self.btn_quick_adapters.clicked.connect(self.refresh_adapters)
+
+        quick_row.addWidget(self.btn_quick_disc, 1)
+        quick_row.addWidget(self.btn_quick_stop_share, 1)
+        quick_row.addWidget(self.btn_quick_adapters, 1)
+        right.addLayout(quick_row)
 
         self.vpn_term = NeonTerminal(on_save=self._save_log_dialog)
-        grid.addWidget(self.vpn_term, 1)
+        right.addWidget(self.vpn_term, 1)
+
+        grid.addWidget(self._make_split_page(left_shell, right_shell, left_init=476))
         self.stack.addWidget(page)
 
     def _build_diag_page(self):
@@ -2834,6 +3075,32 @@ class NeonWindow(QMainWindow):
         self.btn_stop_ics.setText(self.t('btn_stop_ics'))
         self.failsafe_warn.setText(self.t('failsafe_warn'))
 
+        # Segmented section filter pills & Conf right-pane quick bar / KPIs
+        self.btn_sam_seg_all.setText(self.t('seg_all'))
+        self.btn_sam_seg_ctrl.setText(self.t('sam_seg_ctrl'))
+        self.btn_sam_seg_apps.setText(self.t('sam_seg_apps'))
+        self.btn_sam_seg_time.setText(self.t('sam_seg_time'))
+
+        self.btn_his_seg_all.setText(self.t('seg_all'))
+        self.btn_his_seg_ctrl.setText(self.t('his_seg_ctrl'))
+        self.btn_his_seg_apps.setText(self.t('his_seg_apps'))
+        self.btn_his_seg_tools.setText(self.t('his_seg_tools'))
+
+        self.btn_conf_seg_all.setText(self.t('seg_all'))
+        self.btn_conf_seg_connect.setText(self.t('conf_seg_connect'))
+        self.btn_conf_seg_share.setText(self.t('conf_seg_share'))
+        self.btn_conf_seg_dns.setText(self.t('conf_seg_dns'))
+
+        self.kpi_conf_conn.lbl.setText(self.t('kpi_conf_tunnel'))
+        self.kpi_conf_share.lbl.setText(self.t('kpi_conf_share'))
+        self.kpi_conf_dns.lbl.setText(self.t('kpi_conf_dns'))
+        self.btn_quick_disc.setText(self.t('btn_quick_disc'))
+        self.btn_quick_stop_share.setText(self.t('btn_quick_stop_share'))
+        self.btn_quick_adapters.setText('⟳ Адаптеры' if self.lang == 'ru' else '⟳ Adapters')
+        c_tip = 'Свернуть / развернуть блок' if self.lang == 'ru' else 'Collapse / expand section'
+        for cbtn in self.findChildren(QPushButton, 'CardCollapseBtn'):
+            cbtn.setToolTip(c_tip)
+
         self.diag_title.setText(self.t('diag_title'))
         self.diag_sub.setText(self.t('diag_sub'))
         self.btn_diag_run.setText(self.t('btn_diag_run'))
@@ -3001,6 +3268,15 @@ class NeonWindow(QMainWindow):
             self.max_btn.setText('❐')
 
     def eventFilter(self, obj, event):
+        if event.type() == QEvent.Wheel and isinstance(obj, QComboBox):
+            view = obj.view()
+            if view is None or not view.isVisible():
+                p = obj.parentWidget()
+                while p is not None and not isinstance(p, QScrollArea):
+                    p = p.parentWidget()
+                if p is not None:
+                    QApplication.sendEvent(p.viewport(), event)
+                return True
         topbar = getattr(self, 'topbar', None)
         sidebar = getattr(self, 'sidebar', None)
         if obj in (topbar, sidebar):
@@ -3309,6 +3585,18 @@ class NeonWindow(QMainWindow):
         except Exception:
             pass
 
+    @staticmethod
+    def _set_inline_badge(badge_lbl, obj_name, text):
+        if badge_lbl is None:
+            return
+        changed = badge_lbl.objectName() != obj_name
+        if badge_lbl.text() != text:
+            badge_lbl.setText(text)
+        if changed:
+            badge_lbl.setObjectName(obj_name)
+            badge_lbl.style().unpolish(badge_lbl)
+            badge_lbl.style().polish(badge_lbl)
+
     def _sync_status_badges(self):
         hs = getattr(self.api, 'hotspot_active', False)
         eth = getattr(self.api, 'ethernet_active', False)
@@ -3363,18 +3651,93 @@ class NeonWindow(QMainWindow):
         v_col = vpn_colors.get(self.vpn_state, '#8fa4b2')
         extra = ' + ETHERNET' if eth else (' + HOTSPOT' if hs else '')
         v_txt = f'{self.vpn_state}{extra}'
+        prof = str(getattr(self.api, 'vpn_profile', '') or '')
+        is_happ_prof = prof.startswith('Happ:')
         self.vpn_stat_val.setText(v_txt)
         self.vpn_stat_val.setStyleSheet(f'color:{v_col};font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
         if hasattr(self, 'happ_stat_val'):
-            prof = str(getattr(self.api, 'vpn_profile', '') or '')
-            h_txt = f'{v_txt} · {prof}' if prof.startswith('Happ:') and self.vpn_state != 'DISCONNECTED' else v_txt
+            h_txt = f'{v_txt} · {prof}' if is_happ_prof and self.vpn_state != 'DISCONNECTED' else v_txt
             self.happ_stat_val.setText(h_txt)
             self.happ_stat_val.setStyleSheet(f'color:{v_col};font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
+
+        badge_obj_map = {
+            'CONNECTED': ('InlineBadgeOk', 'ACTIVE'),
+            'CONNECTING': ('InlineBadgeWarn', 'WAIT'),
+            'ERROR': ('InlineBadgeErr', 'ERROR'),
+            'DISCONNECTED': ('InlineBadgeIdle', 'IDLE'),
+        }
+        b_obj, b_txt = badge_obj_map.get(self.vpn_state, ('InlineBadgeIdle', 'IDLE'))
+        if is_happ_prof or self.vpn_state == 'DISCONNECTED':
+            self._set_inline_badge(getattr(self, 'happ_inline_badge', None), b_obj, b_txt)
+        else:
+            self._set_inline_badge(getattr(self, 'happ_inline_badge', None), 'InlineBadgeIdle', 'IDLE')
+        if (not is_happ_prof) or self.vpn_state == 'DISCONNECTED':
+            self._set_inline_badge(getattr(self, 'vpn_inline_badge', None), b_obj, b_txt)
+        else:
+            self._set_inline_badge(getattr(self, 'vpn_inline_badge', None), 'InlineBadgeIdle', 'IDLE')
+
+        if eth:
+            eth_if = str(getattr(self.api, 'ethernet_iface', '') or '').strip()
+            self._set_inline_badge(getattr(self, 'eth_inline_badge', None), 'InlineBadgeOk', 'ACTIVE')
+            if hasattr(self, 'eth_inline_lbl'):
+                self.eth_inline_lbl.setText(eth_if or ('Ethernet активен' if self.lang == 'ru' else 'Ethernet active'))
+                self.eth_inline_lbl.setStyleSheet('color:#45f0ff;font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
+        else:
+            self._set_inline_badge(getattr(self, 'eth_inline_badge', None), 'InlineBadgeIdle', 'IDLE')
+            if hasattr(self, 'eth_inline_lbl'):
+                self.eth_inline_lbl.setText('Неактивно' if self.lang == 'ru' else 'Offline')
+                self.eth_inline_lbl.setStyleSheet('color:#8fa4b2;font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
+
+        if hs:
+            ssid = self.hs_ssid.text().strip() or 'NEON-NET'
+            self._set_inline_badge(getattr(self, 'hs_inline_badge', None), 'InlineBadgeOk', 'ACTIVE')
+            if hasattr(self, 'hs_inline_lbl'):
+                self.hs_inline_lbl.setText(f'Wi-Fi · {ssid}')
+                self.hs_inline_lbl.setStyleSheet('color:#a3ff70;font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
+        else:
+            self._set_inline_badge(getattr(self, 'hs_inline_badge', None), 'InlineBadgeIdle', 'IDLE')
+            if hasattr(self, 'hs_inline_lbl'):
+                self.hs_inline_lbl.setText('Неактивно' if self.lang == 'ru' else 'Offline')
+                self.hs_inline_lbl.setStyleSheet('color:#8fa4b2;font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
 
         if self.vpn_state == 'DISCONNECTED' and not hs and not eth:
             self.kpi_vpn.set_data(self.t('kpi_vpn_idle'), '#edf5fa', 'Conf Engine')
         else:
-            self.kpi_vpn.set_data(v_txt, v_col, self.api.vpn_profile or 'Conf Engine')
+            self.kpi_vpn.set_data(v_txt, v_col, prof or 'Conf Engine')
+
+        if hasattr(self, 'kpi_conf_conn'):
+            if self.vpn_state == 'DISCONNECTED':
+                self.kpi_conf_conn.set_data(self.t('kpi_vpn_idle'), '#edf5fa', 'Happ / OpenVPN')
+            else:
+                self.kpi_conf_conn.set_data(self.vpn_state, v_col, prof or 'Conf Engine')
+
+        if hasattr(self, 'kpi_conf_share'):
+            if eth and hs:
+                self.kpi_conf_share.set_data('Ethernet + Wi-Fi', '#45f0ff', self.hs_ssid.text().strip() or 'ICS Bridge')
+            elif eth:
+                self.kpi_conf_share.set_data('Ethernet LAN', '#45f0ff', str(getattr(self.api, 'ethernet_iface', '') or 'ICS Bridge'))
+            elif hs:
+                self.kpi_conf_share.set_data('Wi-Fi Hotspot', '#a3ff70', self.hs_ssid.text().strip() or 'NEON-NET')
+            else:
+                self.kpi_conf_share.set_data(self.t('kpi_share_idle'), '#edf5fa', 'Ethernet / Wi-Fi')
+
+        if hasattr(self, 'btn_quick_disc'):
+            can_disc = self.vpn_state != 'DISCONNECTED'
+            self.btn_quick_disc.setEnabled(can_disc)
+            q_obj = 'DangerBtn' if can_disc else 'GhostBtn'
+            if self.btn_quick_disc.objectName() != q_obj:
+                self.btn_quick_disc.setObjectName(q_obj)
+                self.btn_quick_disc.style().unpolish(self.btn_quick_disc)
+                self.btn_quick_disc.style().polish(self.btn_quick_disc)
+
+        if hasattr(self, 'btn_quick_stop_share'):
+            can_stop = bool(eth or hs)
+            self.btn_quick_stop_share.setEnabled(can_stop)
+            s_obj = 'DangerBtn' if can_stop else 'GhostBtn'
+            if self.btn_quick_stop_share.objectName() != s_obj:
+                self.btn_quick_stop_share.setObjectName(s_obj)
+                self.btn_quick_stop_share.style().unpolish(self.btn_quick_stop_share)
+                self.btn_quick_stop_share.style().polish(self.btn_quick_stop_share)
 
     # ------------------------------------------------------------------
     # TV Actions
@@ -4495,6 +4858,8 @@ class NeonWindow(QMainWindow):
         self.vpn_auth_user_wrap.setVisible(need_auth)
         self.vpn_auth_key_wrap.setVisible(need_ask)
         self.vpn_auth_box.setVisible(need_auth or need_ask)
+        if (need_auth or need_ask) and getattr(self, '_conf_card_ovpn', None) is not None:
+            self._conf_card_ovpn.set_collapsed(False)
 
     def browse_profile(self):
         path, _ = QFileDialog.getOpenFileName(self, 'Conf Profile', '', 'Conf profile (*.ovpn)')
@@ -5281,12 +5646,18 @@ class NeonWindow(QMainWindow):
         s = self.dns_secondary.text().strip()
         servers = [x for x in (p, s) if x]
         if mode == 'auto' or not servers:
-            self.dns_stat_val.setText('Авто (Conf / DHCP)' if self.lang == 'ru' else 'Auto (Conf / DHCP)')
+            lbl_txt = 'Авто (Conf / DHCP)' if self.lang == 'ru' else 'Auto (Conf / DHCP)'
+            self.dns_stat_val.setText(lbl_txt)
             self.dns_stat_val.setStyleSheet('color:#97ad9e;font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
+            if hasattr(self, 'kpi_conf_dns'):
+                self.kpi_conf_dns.set_data('Авто' if self.lang == 'ru' else 'Auto', '#edf5fa', 'DHCP / Conf')
         else:
             up_tag = ' + Uplink' if self.chk_dns_uplink.isChecked() else ''
-            self.dns_stat_val.setText(f"{', '.join(servers)}{up_tag}")
+            dns_txt = f"{', '.join(servers)}{up_tag}"
+            self.dns_stat_val.setText(dns_txt)
             self.dns_stat_val.setStyleSheet('color:#5ef2a0;font-family:"Consolas",monospace;font-size:11px;font-weight:bold;')
+            if hasattr(self, 'kpi_conf_dns'):
+                self.kpi_conf_dns.set_data(servers[0], '#5ef2a0', dns_txt)
 
     def _on_dns_preset_changed(self):
         mode = self.dns_preset_combo.currentData() or 'auto'

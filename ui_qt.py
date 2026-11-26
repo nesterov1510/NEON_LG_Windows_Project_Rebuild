@@ -42,7 +42,7 @@ REGIONS = [
 
 TR = {
     'en': {
-        'app_sub': 'LG · Samsung · Hisense · Conf',
+        'app_sub': 'LG · Samsung · Hisense',
         'nav_tv': 'LG webOS TV',
         'nav_sam': 'Samsung TV',
         'nav_his': 'Hisense VIDAA',
@@ -53,7 +53,7 @@ TR = {
         'page_sam_title': 'Samsung Smart TV Service Control',
         'page_sam_sub': 'Connect via LAN WebSocket (8002/8001) to open Service Menu, MRT Option, Local Set & Factory Reset',
         'page_his_title': 'Hisense / Toshiba VIDAA Control',
-        'page_his_sub': 'Pair over MQTT/TLS (36669) or TV Browser / vidaahub.com to install Belet, Alem TV, MSB Callback & web apps',
+        'page_his_sub': 'MQTT/TLS (36669) & TV Browser / vidaahub.com: Belet, Alem TV, MSB Callback',
         'page_vpn_title': 'Network Conf · Wi-Fi Hotspot · Ethernet Cable',
         'page_vpn_sub': 'Background Conf engine + share over Wi-Fi Hotspot or Ethernet cable (192.168.137.x)',
         'page_diag_title': 'System & Network Diagnostics',
@@ -117,7 +117,7 @@ TR = {
         'kpi_vpn_idle': 'Idle',
         'backup_none': 'No NVRAM backup yet',
         'backup_prefix': 'Last backup: ',
-        'term_title': 'Live System Console',
+        'term_title': 'Console',
         'btn_copy': 'Copy',
         'btn_save': 'Save Log',
         'btn_clear': 'Clear',
@@ -126,8 +126,8 @@ TR = {
         'reboot_hint': 'Always read and note the original NVRAM value before modifying.',
         'scanner_title': 'Executing Operation',
         'scanner_tag': 'WORKING',
-        'vpn_card1': 'Network Conf Profile',
-        'vpn_card1_desc': 'Select a certificate/key or username/password .ovpn conf file. Runs silently without external GUI.',
+        'vpn_card1': 'Conf Profile (.ovpn)',
+        'vpn_card1_desc': 'Select a local .ovpn config file. Runs silently inside NEON with no extra window.',
         'lbl_profile': 'Local Conf Profile (.ovpn)',
         'btn_browse': 'Browse Conf',
         'btn_refresh': 'Refresh',
@@ -142,13 +142,13 @@ TR = {
         'btn_vpn_conn': 'Start Conf',
         'btn_vpn_disc': 'Disconnect',
         'vpn_stat_lbl': 'Conf state:',
-        'happ_card': 'Built-in Proxy & Tunnel (Happ / Xray + sing-box)',
-        'happ_desc': 'Import subscriptions (https://, happ://add/), happ://routing/, VLESS/VMess/Trojan/SS/Hysteria/Hysteria2 (hysteria://, hysteriya://, hy2://)/SOCKS5 links, or JSON/YAML. Powered by embedded Xray-core + sing-box TUN.',
+        'happ_card': 'Proxy & Tunnel (Happ / VLESS / JSON)',
+        'happ_desc': 'Paste a subscription link (https://, happ://) or server URI (VLESS, Trojan, SS, Hysteria2, JSON/YAML), then pick a server.',
         'happ_lbl_input': 'Subscription URL, Proxy URI(s), or JSON/YAML',
         'happ_ph_input': 'https://..., happ://add/..., vless://, hysteria://, hysteriya://, hy2://, or JSON',
         'happ_btn_import': 'Import',
         'happ_btn_paste': 'Paste',
-        'happ_btn_update': 'Update Subs',
+        'happ_btn_update': 'Update',
         'happ_lbl_sub': 'Subscription / Group',
         'happ_btn_del_sub': 'Remove Sub',
         'happ_lbl_nodes': 'Servers & Latency (double-click to connect)',
@@ -163,8 +163,8 @@ TR = {
         'happ_chk_lan': 'Allow LAN proxy (share HTTP/SOCKS with Smart TV)',
         'happ_chk_sysproxy': 'Set Windows System Proxy (in Proxy / Mixed modes)',
         'happ_btn_desktop': 'Open in Happ Desktop',
-        'dns_card': 'DNS for Hotspot & Ethernet Sharing',
-        'dns_desc': 'Sets IPv4 DNS for clients (TVs/devices) over Wi-Fi Hotspot or Ethernet ICS. Applied automatically when Conf connects & sharing starts.',
+        'dns_card': 'DNS for Sharing (TV & Devices)',
+        'dns_desc': 'Sets IPv4 DNS for TVs/devices connected over Ethernet or Wi-Fi Hotspot (applied automatically when sharing starts).',
         'lbl_dns_preset': 'DNS Provider Preset',
         'lbl_dns_primary': 'Primary DNS (IPv4)',
         'lbl_dns_secondary': 'Secondary DNS (optional)',
@@ -176,21 +176,21 @@ TR = {
         'btn_dns_reset': 'Reset (Auto)',
         'dns_stat_lbl': 'Active DNS profile:',
         'hs_card': 'Wi-Fi Hotspot Sharing',
-        'hs_desc': 'Start Conf first. Uses Hosted Network on Win 8.1 or Mobile Hotspot on Win 10/11 and routes ICS via Conf.',
+        'hs_desc': 'Shares Conf tunnel over Wi-Fi (Hosted Network on Win 8.1 or Mobile Hotspot on Win 10/11). Start Conf first.',
         'lbl_ssid': 'Hotspot Name (SSID)',
         'lbl_hs_pass': 'Wi-Fi Password (8–63 chars)',
         'ph_hs_pass': 'Set hotspot password',
         'btn_hs_start': 'Start Conf Hotspot',
         'btn_hs_stop': 'Stop Hotspot',
         'btn_hs_win': 'Open Windows Hotspot Settings',
-        'eth_card': 'Ethernet Sharing (Wi-Fi + Conf → LAN)',
-        'eth_desc': 'If your PC gets internet via Wi-Fi and Conf is active, share Conf-routed internet out through your Ethernet cable to a TV or switch (DHCP 192.168.137.x).',
+        'eth_card': 'Ethernet Cable Sharing (PC → TV)',
+        'eth_desc': 'Routes internet from PC out through your Ethernet cable to a TV (DHCP 192.168.137.x). Connect Conf first or use direct sharing.',
         'lbl_eth_iface': 'Target Ethernet Adapter (Cable to TV / Device)',
         'eth_auto_hint': 'Auto-detects physical Ethernet (click ⟳ if plugged in after launch).',
         'btn_eth_start': 'Share Conf via Ethernet',
         'btn_eth_stop': 'Stop',
         'ics_card': 'Manual ICS Routing (Fallback)',
-        'ics_desc': 'If auto-detection fails, refresh adapters and choose Conf (Public) → Hotspot/Ethernet (Private).',
+        'ics_desc': 'Only needed if auto-detection fails: pick Conf (Public) → Hotspot or Ethernet (Private).',
         'btn_adapters': 'Refresh Adapters',
         'lbl_pub': 'Public / Conf Adapter (TAP / Wintun / DCO)',
         'lbl_priv': 'Private / Hotspot or Ethernet Adapter',
@@ -328,16 +328,32 @@ TR = {
         'his_btn_portal_open_tv': 'Open Installer on TV',
         'his_btn_portal_diag': 'Check TV → PC',
         'his_btn_portal_stop': 'Stop Server',
-        'his_kpi_tv': 'HISENSE VIDAA TV',
+        'his_kpi_tv': 'HISENSE VIDAA',
         'his_kpi_idle': 'Awaiting TV',
-        'his_kpi_pair': 'PAIRING / PROFILE',
+        'his_kpi_pair': 'PAIRING',
         'his_kpi_pair_idle': 'Not paired',
-        'his_kpi_portal': 'LOCAL / VIDAAHUB',
-        'his_kpi_portal_idle': 'Server stopped',
+        'his_kpi_portal': 'PORTAL / VIDAA',
+        'his_kpi_portal_idle': 'Stopped',
         'his_remote_title': 'Hisense VIDAA Remote (MQTT :36669)',
+        'seg_all': 'All',
+        'conf_seg_connect': 'Tunnel',
+        'conf_seg_share': 'Sharing',
+        'conf_seg_dns': 'DNS & ICS',
+        'sam_seg_ctrl': 'TV & Menu',
+        'sam_seg_apps': 'Apps',
+        'sam_seg_time': 'Time Fix',
+        'his_seg_ctrl': 'TV & Pair',
+        'his_seg_apps': 'Apps',
+        'his_seg_tools': 'Custom / Portal',
+        'kpi_conf_tunnel': 'TUNNEL',
+        'kpi_conf_share': 'SHARING',
+        'kpi_conf_dns': 'DNS',
+        'kpi_share_idle': 'Inactive',
+        'btn_quick_disc': 'Disconnect Conf',
+        'btn_quick_stop_share': 'Stop Sharing',
     },
     'ru': {
-        'app_sub': 'LG · Samsung · Hisense · Conf',
+        'app_sub': 'LG · Samsung · Hisense',
         'nav_tv': 'LG webOS ТВ',
         'nav_sam': 'Samsung ТВ',
         'nav_his': 'Hisense VIDAA',
@@ -348,7 +364,7 @@ TR = {
         'page_sam_title': 'Сервисное управление Samsung Smart TV',
         'page_sam_sub': 'Подключение по сети LAN (8002/8001): Service Menu, MRT Option, Local Set и Factory Reset',
         'page_his_title': 'Управление Hisense / Toshiba VIDAA',
-        'page_his_sub': 'Сопряжение по MQTT/TLS (36669) или через браузер ТВ / vidaahub.com: установка Belet, Alem TV, MSB Callback и веб-приложений',
+        'page_his_sub': 'MQTT/TLS (36669) и браузер ТВ / vidaahub.com: Belet, Alem TV, MSB Callback',
         'page_vpn_title': 'Сетевой Conf · Точка Wi-Fi · Ethernet-кабель',
         'page_vpn_sub': 'Фоновый движок Conf + раздача по Wi-Fi или кабелю Ethernet (192.168.137.x)',
         'page_diag_title': 'Диагностика системы и сети',
@@ -412,7 +428,7 @@ TR = {
         'kpi_vpn_idle': 'Простой',
         'backup_none': 'Бэкап NVRAM не снят',
         'backup_prefix': 'Бэкап NVRAM: ',
-        'term_title': 'Живая консоль вывода',
+        'term_title': 'Консоль',
         'btn_copy': 'Копировать',
         'btn_save': 'Сохранить',
         'btn_clear': 'Очистить',
@@ -421,8 +437,8 @@ TR = {
         'reboot_hint': 'Перед записью сохраните исходный код региона.',
         'scanner_title': 'Выполнение операции',
         'scanner_tag': 'В РАБОТЕ',
-        'vpn_card1': 'Сетевой профиль Conf',
-        'vpn_card1_desc': 'Выберите конфиг (.ovpn — сертификат или логин/пароль). Работает скрытно без сторонних окон.',
+        'vpn_card1': 'Профиль Conf (.ovpn)',
+        'vpn_card1_desc': 'Выберите локальный .ovpn файл. Запускается внутри NEON в фоне без лишних окон.',
         'lbl_profile': 'Локальный профиль Conf (.ovpn)',
         'btn_browse': 'Выбрать конфиг',
         'btn_refresh': 'Обновить',
@@ -437,8 +453,8 @@ TR = {
         'btn_vpn_conn': 'Запустить Conf',
         'btn_vpn_disc': 'Отключить',
         'vpn_stat_lbl': 'Статус Conf:',
-        'happ_card': 'Встроенный Прокси и Туннель (Happ / Xray + sing-box)',
-        'happ_desc': 'Импорт подписок (https://, happ://add/), happ://routing/, ссылок VLESS/VMess/Trojan/SS/Hysteria/Hysteria2 (hysteria://, hysteriya://, hy2://)/SOCKS5 или JSON/YAML. Работает на встроенных Xray-core + sing-box TUN.',
+        'happ_card': 'Прокси и туннель (Happ / VLESS / JSON)',
+        'happ_desc': 'Вставьте ссылку подписки (https://, happ://) или сервер (VLESS, Trojan, SS, Hysteria2, JSON/YAML) и выберите узел.',
         'happ_lbl_input': 'Ссылка подписки, URI сервера или JSON/YAML',
         'happ_ph_input': 'https://..., happ://add/..., vless://, hysteria://, hysteriya://, hy2:// или JSON',
         'happ_btn_import': 'Импорт',
@@ -458,8 +474,8 @@ TR = {
         'happ_chk_lan': 'Allow LAN (раздача HTTP/SOCKS прокси на Smart TV)',
         'happ_chk_sysproxy': 'Системный прокси Windows (в режимах Прокси / Mixed)',
         'happ_btn_desktop': 'Открыть в Happ Desktop',
-        'dns_card': 'DNS для точки Wi-Fi и Ethernet',
-        'dns_desc': 'Задаёт IPv4 DNS для устройств на точке Wi-Fi или кабеле Ethernet (ICS). Применяется автоматически при запуске Conf и раздачи.',
+        'dns_card': 'DNS для раздачи (ТВ и устройства)',
+        'dns_desc': 'Задаёт DNS для устройств на точке Wi-Fi или кабеле Ethernet (применяется автоматически при старте раздачи).',
         'lbl_dns_preset': 'Пресет DNS-сервера',
         'lbl_dns_primary': 'Основной DNS (IPv4)',
         'lbl_dns_secondary': 'Резервный DNS (необяз.)',
@@ -470,22 +486,22 @@ TR = {
         'btn_dns_apply': 'Применить DNS',
         'btn_dns_reset': 'Сброс (Авто)',
         'dns_stat_lbl': 'Профиль DNS:',
-        'hs_card': 'Раздача Wi-Fi точки доступа',
-        'hs_desc': 'Сначала запустите Conf. На Win 8.1 запускает Hosted Network, на Win 10/11 — Mobile Hotspot через Conf.',
+        'hs_card': 'Точка доступа Wi-Fi',
+        'hs_desc': 'Раздаёт Conf-туннель по Wi-Fi (Hosted Network на Win 8.1 / Mobile Hotspot на Win 10/11). Сначала включите Conf.',
         'lbl_ssid': 'Имя Wi-Fi сети (SSID)',
         'lbl_hs_pass': 'Пароль Wi-Fi (8–63 символа)',
         'ph_hs_pass': 'Задайте пароль точки доступа',
         'btn_hs_start': 'Запустить Conf-точку',
         'btn_hs_stop': 'Остановить',
         'btn_hs_win': 'Открыть настройки точки Windows',
-        'eth_card': 'Раздача через Ethernet (Wi-Fi + Conf)',
-        'eth_desc': 'Если ПК подключён к интернету по Wi-Fi и включён Conf, раздайте интернет с Conf через Ethernet-кабель на ТВ или свитч (DHCP 192.168.137.x).',
+        'eth_card': 'Раздача по кабелю Ethernet (ПК → ТВ)',
+        'eth_desc': 'Передаёт интернет с ПК на ТВ по кабелю (DHCP 192.168.137.x). Сначала запустите Conf или выберите раздачу без него.',
         'lbl_eth_iface': 'Целевой Ethernet-адаптер (кабель к ТВ / устройству)',
         'eth_auto_hint': 'Физический Ethernet выбирается автоматически (нажмите ⟳, если подключили позже).',
         'btn_eth_start': 'Раздать Conf по Ethernet',
         'btn_eth_stop': 'Остановить',
-        'ics_card': 'Ручной маршрут ICS (резерв)',
-        'ics_desc': 'Если автоопределение не сработало, обновите адаптеры и выберите Conf (внешний) → Точка/Ethernet (внутренний).',
+        'ics_card': 'Ручной выбор адаптеров ICS (резерв)',
+        'ics_desc': 'Нужен только если автовыбор не сработал: укажите внешний адаптер Conf → внутренний (Точка или Ethernet).',
         'btn_adapters': 'Обновить адаптеры',
         'lbl_pub': 'Внешний адаптер · Conf (TAP / Wintun / DCO)',
         'lbl_priv': 'Внутренний адаптер · Точка Wi-Fi или Ethernet',
@@ -623,13 +639,29 @@ TR = {
         'his_btn_portal_open_tv': 'Открыть установщик на ТВ',
         'his_btn_portal_diag': 'Проверка ТВ → ПК',
         'his_btn_portal_stop': 'Остановить сервер',
-        'his_kpi_tv': 'HISENSE VIDAA ТВ',
+        'his_kpi_tv': 'HISENSE VIDAA',
         'his_kpi_idle': 'Ожидание ТВ',
-        'his_kpi_pair': 'СОПРЯЖЕНИЕ / ПРОФИЛЬ',
+        'his_kpi_pair': 'СОПРЯЖЕНИЕ',
         'his_kpi_pair_idle': 'Не сопряжён',
-        'his_kpi_portal': 'ЛОКАЛЬНЫЙ / VIDAAHUB',
-        'his_kpi_portal_idle': 'Сервер остановлен',
+        'his_kpi_portal': 'ПОРТАЛ / VIDAA',
+        'his_kpi_portal_idle': 'Остановлен',
         'his_remote_title': 'Пульт Hisense VIDAA (MQTT :36669)',
+        'seg_all': 'Все',
+        'conf_seg_connect': 'Подключение',
+        'conf_seg_share': 'Раздача',
+        'conf_seg_dns': 'DNS и ICS',
+        'sam_seg_ctrl': 'ТВ и меню',
+        'sam_seg_apps': 'Приложения',
+        'sam_seg_time': 'Время ТВ',
+        'his_seg_ctrl': 'ТВ и пара',
+        'his_seg_apps': 'Приложения',
+        'his_seg_tools': 'Своё / Портал',
+        'kpi_conf_tunnel': 'ТУННЕЛЬ',
+        'kpi_conf_share': 'РАЗДАЧА',
+        'kpi_conf_dns': 'DNS',
+        'kpi_share_idle': 'Выкл',
+        'btn_quick_disc': 'Откл. Conf',
+        'btn_quick_stop_share': 'Стоп раздачи',
     },
 }
 
@@ -685,10 +717,10 @@ QPushButton#SideNavBtn {
     background-color: transparent;
     color: #8ea3b0;
     border: 1px solid transparent;
-    border-radius: 10px;
-    padding: 10px 14px;
+    border-radius: 9px;
+    padding: 8px 12px;
     text-align: left;
-    font-size: 13px;
+    font-size: 12.5px;
     font-weight: 600;
 }
 QPushButton#SideNavBtn:hover {
@@ -933,9 +965,9 @@ QPushButton#PrimaryBtn {
     color: #04150d;
     border: none;
     border-radius: 10px;
-    min-height: 40px;
-    padding: 0 16px;
-    font-size: 13px;
+    min-height: 38px;
+    padding: 0 12px;
+    font-size: 12.5px;
     font-weight: bold;
 }
 QPushButton#PrimaryBtn:hover {
@@ -954,8 +986,8 @@ QPushButton#NormalBtn {
     color: #cde3ed;
     border: 1px solid #263b47;
     border-radius: 9px;
-    min-height: 37px;
-    padding: 0 13px;
+    min-height: 36px;
+    padding: 0 10px;
     font-size: 12px;
     font-weight: 600;
 }
@@ -975,8 +1007,8 @@ QPushButton#GhostBtn {
     color: #97adb9;
     border: 1px solid #23333d;
     border-radius: 9px;
-    min-height: 36px;
-    padding: 0 13px;
+    min-height: 35px;
+    padding: 0 10px;
     font-size: 12px;
     font-weight: 600;
 }
@@ -995,8 +1027,8 @@ QPushButton#DangerBtn {
     color: #ff9ba7;
     border: 1px solid #75303f;
     border-radius: 9px;
-    min-height: 37px;
-    padding: 0 13px;
+    min-height: 36px;
+    padding: 0 10px;
     font-size: 12px;
     font-weight: 600;
 }
@@ -1016,7 +1048,7 @@ QPushButton#MiniBtn {
     color: #97aeb9;
     border: 1px solid #22333d;
     border-radius: 7px;
-    padding: 4px 10px;
+    padding: 4px 8px;
     font-size: 11px;
     font-weight: 600;
 }
@@ -1058,18 +1090,121 @@ QScrollArea {
     border: none;
 }
 
+QSplitter::handle:horizontal {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(25, 38, 46, 40),
+        stop:0.45 rgba(55, 92, 108, 175),
+        stop:0.55 rgba(55, 92, 108, 175),
+        stop:1 rgba(25, 38, 46, 40));
+    width: 6px;
+    margin: 28px 3px;
+    border-radius: 3px;
+}
+QSplitter::handle:horizontal:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(62, 230, 143, 40),
+        stop:0.5 rgba(91, 255, 157, 230),
+        stop:1 rgba(62, 230, 143, 40));
+}
+
+QFrame#SegBar {
+    background-color: rgba(11, 18, 23, 230);
+    border: 1px solid #1e2d37;
+    border-radius: 11px;
+}
+
+QPushButton#SegBtn {
+    background-color: transparent;
+    color: #8ca3b0;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    min-height: 30px;
+    padding: 0 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+QPushButton#SegBtn:hover {
+    color: #e4f2f7;
+    background-color: rgba(24, 38, 46, 160);
+}
+QPushButton#SegBtn:checked {
+    background-color: rgba(21, 62, 45, 235);
+    color: #72ffab;
+    border: 1px solid #358763;
+}
+
+QPushButton#CardCollapseBtn {
+    background-color: rgba(18, 29, 36, 190);
+    color: #8ba5b3;
+    border: 1px solid #223542;
+    border-radius: 6px;
+    min-width: 24px;
+    max-width: 24px;
+    min-height: 22px;
+    max-height: 22px;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 0;
+}
+QPushButton#CardCollapseBtn:hover {
+    color: #72ffab;
+    border: 1px solid #358763;
+    background-color: rgba(21, 50, 39, 210);
+}
+
+QLabel#InlineBadgeIdle {
+    background-color: rgba(20, 30, 37, 220);
+    color: #8ca3b0;
+    border: 1px solid #253844;
+    border-radius: 9px;
+    padding: 4px 10px;
+    font-family: "Consolas", monospace;
+    font-size: 11px;
+    font-weight: bold;
+}
+QLabel#InlineBadgeOk {
+    background-color: rgba(16, 48, 34, 230);
+    color: #6effad;
+    border: 1px solid #2f7d5b;
+    border-radius: 9px;
+    padding: 4px 10px;
+    font-family: "Consolas", monospace;
+    font-size: 11px;
+    font-weight: bold;
+}
+QLabel#InlineBadgeWarn {
+    background-color: rgba(46, 36, 16, 230);
+    color: #ffd67a;
+    border: 1px solid #755b23;
+    border-radius: 9px;
+    padding: 4px 10px;
+    font-family: "Consolas", monospace;
+    font-size: 11px;
+    font-weight: bold;
+}
+QLabel#InlineBadgeErr {
+    background-color: rgba(54, 20, 29, 230);
+    color: #ff9ba7;
+    border: 1px solid #8a3545;
+    border-radius: 9px;
+    padding: 4px 10px;
+    font-family: "Consolas", monospace;
+    font-size: 11px;
+    font-weight: bold;
+}
+
 QScrollBar:vertical {
     background: transparent;
-    width: 6px;
+    width: 8px;
     margin: 4px 1px;
 }
 QScrollBar::handle:vertical {
-    background: rgba(95, 130, 148, 75);
-    min-height: 28px;
-    border-radius: 3px;
+    background: rgba(105, 145, 165, 105);
+    min-height: 30px;
+    border-radius: 4px;
 }
 QScrollBar::handle:vertical:hover {
-    background: rgba(94, 242, 160, 150);
+    background: rgba(94, 242, 160, 180);
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0px;
@@ -1213,15 +1348,18 @@ class ToggleSwitch(QWidget):
         self._on_change = on_change
         self._pos = 1.0 if self._checked else 0.0
         self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 2, 0, 2)
-        lay.setSpacing(10)
+        lay.setSpacing(9)
 
         self.track = _SwitchTrack(self)
         self.lbl = QLabel(text)
+        self.lbl.setWordWrap(True)
+        self.lbl.setMinimumWidth(0)
         self.lbl.setStyleSheet('color:#b8cbd5;font-size:12px;')
-        lay.addWidget(self.track)
+        lay.addWidget(self.track, 0, Qt.AlignTop)
         lay.addWidget(self.lbl, 1)
 
         self._anim = QPropertyAnimation(self, b'thumb_pos', self)
@@ -1546,20 +1684,21 @@ class NeonTerminal(QFrame):
 
         bar = QFrame()
         bar.setObjectName('TermHeader')
-        bar.setFixedHeight(44)
+        bar.setFixedHeight(42)
         bl = QHBoxLayout(bar)
-        bl.setContentsMargins(14, 0, 12, 0)
-        bl.setSpacing(7)
+        bl.setContentsMargins(11, 0, 10, 0)
+        bl.setSpacing(5)
 
         for color in ('#3ee68f', '#f4bd4f', '#3a4b55'):
             dot = QLabel('●')
             dot.setStyleSheet(f'color:{color};font-size:10px;background:transparent;')
             bl.addWidget(dot)
 
-        self.title_lbl = QLabel('Live System Console')
-        self.title_lbl.setStyleSheet('color:#b9ccd6;font-size:12px;font-weight:600;margin-left:6px;')
-        bl.addWidget(self.title_lbl)
-        bl.addStretch(1)
+        self.title_lbl = QLabel('Live Console')
+        self.title_lbl.setMinimumWidth(0)
+        self.title_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.title_lbl.setStyleSheet('color:#b9ccd6;font-size:12px;font-weight:600;margin-left:4px;')
+        bl.addWidget(self.title_lbl, 1)
 
         self.copy_btn = QPushButton('Copy')
         self.copy_btn.setObjectName('MiniBtn')
@@ -1664,12 +1803,12 @@ class KpiCard(QFrame):
         self.setObjectName('KpiCard')
         add_elevation(self, blur=20, alpha=75)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(15, 12, 15, 12)
-        lay.setSpacing(4)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(3)
         self.lbl = QLabel(label)
-        self.lbl.setStyleSheet('color:#78909e;font-size:10px;font-weight:bold;letter-spacing:0.8px;')
+        self.lbl.setStyleSheet('color:#78909e;font-size:10px;font-weight:bold;letter-spacing:0.7px;')
         self.val = QLabel(value)
-        self.val.setStyleSheet('color:#edf5fa;font-family:"Consolas",monospace;font-size:15px;font-weight:bold;')
+        self.val.setStyleSheet('color:#edf5fa;font-family:"Consolas",monospace;font-size:14px;font-weight:bold;')
         self.sub = QLabel(sub)
         self.sub.setStyleSheet('color:#6b828f;font-size:11px;')
         lay.addWidget(self.lbl)
@@ -1678,7 +1817,7 @@ class KpiCard(QFrame):
 
     def set_data(self, value, accent='#edf5fa', sub=None):
         self.val.setText(value)
-        self.val.setStyleSheet(f'color:{accent};font-family:"Consolas",monospace;font-size:15px;font-weight:bold;')
+        self.val.setStyleSheet(f'color:{accent};font-family:"Consolas",monospace;font-size:14px;font-weight:bold;')
         if sub is not None:
             self.sub.setText(sub)
 

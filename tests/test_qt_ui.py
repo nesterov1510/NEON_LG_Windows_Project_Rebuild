@@ -600,3 +600,113 @@ def test_happ_widgets_and_ovpn_askpass_prompt(qt_app, tmp_path, monkeypatch):
     win._force_exit = True
     win.close()
     qt_app.processEvents()
+
+
+def test_ui_ux_splitters_filters_badges_and_wheel_guard(qt_app, tmp_path, monkeypatch):
+    from PyQt5 import QtCore, QtGui
+
+    monkeypatch.setenv('APPDATA', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path))
+    api = Api()
+    win = NeonWindow(api=api)
+    win.show()
+    qt_app.processEvents()
+
+    # Screen-adaptive sizing fits compact 1280x720 / 1366x768 displays cleanly
+    assert win.minimumWidth() <= 960
+    assert win.minimumHeight() <= 600
+    assert win.width() <= 1240
+    assert win.height() <= 750
+
+    # LG, Samsung, Hisense, and Conf pages all use horizontal QSplitter
+    for tab_idx in (0, 1, 2, 3):
+        splitter = win.stack.widget(tab_idx).findChild(QtWidgets.QSplitter)
+        assert splitter is not None
+        assert splitter.orientation() == QtCore.Qt.Horizontal
+
+    # Conf page segmented filter & collapsible cards
+    win.switch_tab(3)
+    qt_app.processEvents()
+    assert win._conf_card_happ.isVisible() is True
+    assert win._conf_card_ics.isVisible() is True
+    assert win._conf_card_ics._collapsed is True
+
+    win.btn_conf_seg_share.click()
+    qt_app.processEvents()
+    assert win._conf_card_eth.isVisible() is True
+    assert win._conf_card_hs.isVisible() is True
+    assert win._conf_card_happ.isVisible() is False
+    assert win._conf_card_ovpn.isVisible() is False
+
+    win.btn_conf_seg_dns.click()
+    qt_app.processEvents()
+    assert win._conf_card_dns.isVisible() is True
+    assert win._conf_card_ics.isVisible() is True
+    assert win._conf_card_ics._collapsed is False  # auto-expanded when DNS & ICS chosen
+
+    win.btn_conf_seg_all.click()
+    qt_app.processEvents()
+    assert win._conf_card_happ.isVisible() is True
+
+    # Selecting auth .ovpn auto-expands Card 2 even if collapsed
+    ovpn_plain = tmp_path / 'plain.ovpn'
+    ovpn_plain.write_text('client\n', encoding='utf-8')
+    ovpn_auth = tmp_path / 'need_auth.ovpn'
+    ovpn_auth.write_text('client\nauth-user-pass\n', encoding='utf-8')
+    api.remember_profile(str(ovpn_plain))
+    api.remember_profile(str(ovpn_auth))
+    win.profile_combo.addItem('plain')
+    win.profile_combo.addItem('need_auth')
+    win.profile_combo.setCurrentText('plain')
+    win._conf_card_ovpn.set_collapsed(True)
+    assert win._conf_card_ovpn._collapsed is True
+    win.profile_combo.setCurrentText('need_auth')
+    qt_app.processEvents()
+    assert win._conf_card_ovpn._collapsed is False
+    assert win.vpn_auth_box.isVisible() is True
+
+    # Live KPIs, quick-stop bar & inline badges sync cleanly
+    assert win.btn_quick_disc.isEnabled() is False
+    assert win.btn_quick_stop_share.isEnabled() is False
+    assert win.happ_inline_badge.objectName() == 'InlineBadgeIdle'
+    assert win.eth_inline_badge.objectName() == 'InlineBadgeIdle'
+
+    win.vpn_state = 'CONNECTED'
+    api.vpn_profile = 'Happ: Edge Node'
+    api.ethernet_active = True
+    api.ethernet_iface = 'Ethernet'
+    api.hotspot_active = True
+    win._sync_status_badges()
+    qt_app.processEvents()
+    assert win.btn_quick_disc.isEnabled() is True
+    assert win.btn_quick_stop_share.isEnabled() is True
+    assert win.happ_inline_badge.objectName() == 'InlineBadgeOk'
+    assert win.eth_inline_badge.objectName() == 'InlineBadgeOk'
+    assert win.hs_inline_badge.objectName() == 'InlineBadgeOk'
+    assert win.kpi_conf_conn.val.text() == 'CONNECTED'
+    assert 'Ethernet' in win.kpi_conf_share.val.text()
+
+    # Closed QComboBox wheel guard ignores wheel scroll so scrolling never changes values
+    orig_idx = win.happ_mode_combo.currentIndex()
+    wheel_ev = QtGui.QWheelEvent(
+        QtCore.QPointF(10, 10),
+        QtCore.QPointF(10, 10),
+        QtCore.QPoint(0, -120),
+        QtCore.QPoint(0, -120),
+        QtCore.Qt.NoButton,
+        QtCore.Qt.NoModifier,
+        QtCore.Qt.ScrollUpdate,
+        False,
+    )
+    assert win.eventFilter(win.happ_mode_combo, wheel_ev) is True
+    assert win.happ_mode_combo.currentIndex() == orig_idx
+
+    # Language switch updates segmented pills & right-pane KPI headers
+    win.toggle_language()
+    qt_app.processEvents()
+    assert win.btn_conf_seg_share.text() != ''
+    assert win.kpi_conf_conn.lbl.text() != ''
+
+    win._force_exit = True
+    win.close()
+    qt_app.processEvents()
