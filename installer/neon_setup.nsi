@@ -102,6 +102,10 @@ Section "NEON Console" SecCore
   nsExec::ExecToStack 'taskkill /F /IM NeonLGControl.exe'
   Pop $0
   Pop $1
+  System::Call 'Kernel32::SetEnvironmentVariable(t "NEON_INSTDIR", t "$INSTDIR")'
+  nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -Command "Get-Process -Name sing-box,xray -ErrorAction SilentlyContinue | Where-Object { $$_.Path -and $$env:NEON_INSTDIR -and $$_.Path.StartsWith($$env:NEON_INSTDIR, [System.StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue"'
+  Pop $0
+  Pop $1
   Sleep 350
 
   SetShellVarContext all
@@ -147,6 +151,10 @@ Section "Uninstall"
   Pop $0
   Pop $1
   nsExec::ExecToStack 'taskkill /F /IM NeonLGControl.exe'
+  Pop $0
+  Pop $1
+  System::Call 'Kernel32::SetEnvironmentVariable(t "NEON_INSTDIR", t "$INSTDIR")'
+  nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -Command "Get-Process -Name sing-box,xray -ErrorAction SilentlyContinue | Where-Object { $$_.Path -and $$env:NEON_INSTDIR -and $$_.Path.StartsWith($$env:NEON_INSTDIR, [System.StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue"'
   Pop $0
   Pop $1
   Sleep 450
